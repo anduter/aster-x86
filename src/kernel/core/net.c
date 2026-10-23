@@ -130,9 +130,17 @@ void net_init(void)
     if (!e1000_present()) return;
 
     net_arp_request();
-    for (volatile uint32_t n = 0; n < 8000000U && !got_arp; n++) {
+    for (volatile uint32_t n = 0; n < 30000000U && !got_arp; n++) {
         int len = e1000_rx_poll(buf, sizeof(buf));
-        if (len > 0) got_arp = net_parse_arp(buf, (uint32_t)len);
+        if (len > 0) {
+            static int logged;
+            if (!logged) {
+                logged = 1;
+                kprintf("net: first RX len=%d type=%04x\n",
+                        len, (unsigned int)rd16(buf + 12));
+            }
+            got_arp = net_parse_arp(buf, (uint32_t)len);
+        }
     }
     if (!got_arp) {
         kprintln("net: ARP reply timeout");

@@ -253,8 +253,8 @@ trust: tampered image rejected
 | 仅栈/堆/蹦床 ASLR | 代码/数据段仍未 PIE 化，整体 ASLR 未完成 | P4 |
 | 沙箱策略硬编码 | 按程序名设置 allowlist，尚未由 manifest/句柄权限驱动 | capability 沙箱 |
 | 签名测试密钥在仓库 | 仅用于教学/回归，不能用于生产 | 离线私钥/HSM + 撤销/公证 |
-| 全局对象表 | 句柄仍是全局槽位+类型标签，没有 per-process capability/rights/revoke | capability 表 |
-| 多核仅受限调度 | AP 能调度 heartbeat；全局调度锁已加，但无 per-CPU runqueue/用户进程迁移/TLB shootdown | per-CPU runqueue + TLB shootdown |
+| 能力表容量固定 | 每进程 16 项、generation 16 位；安装策略仍按程序名 allowlist | P4 动态容量 + manifest/句柄权限驱动 |
+| 多核仅受限并行 | AP 只调度 `heartbeat`/`hello` 白名单内核线程；已有 per-CPU runq_mask、全局调度锁、IPI 与 TLB shootdown，但无用户进程迁移/负载均衡 | per-CPU runqueue + 迁移 + 负载均衡 |
 | boot sector/loader 仍是信任根 | 替换整个 bootloader 可绕过 kernel 签名；无硬件 Secure Boot | UEFI Secure Boot/TPM measured boot |
 | 没有审计/速率限制 | 拒绝服务与探测较容易 | 日志计数器 + 配额 |
 | 没有内核栈保护 | 内核栈溢出可能破坏相邻内存 | guard page + canary |

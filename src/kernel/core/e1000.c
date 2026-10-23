@@ -215,7 +215,8 @@ int e1000_init(void)
         reg_write(E1000_RDLEN, RX_DESC_COUNT * RX_DESC_SIZE);
         reg_write(E1000_RDH, 0);
         reg_write(E1000_RDT, RX_DESC_COUNT - 1U);
-        reg_write(E1000_RCTL, (1U << 1) | (1U << 2) | (1U << 15));
+        reg_write(E1000_RCTL, (1U << 1) | (1U << 2) | (1U << 3) |
+                              (1U << 4) | (1U << 15));
     }
 
     /* 环就绪后最后再打开发送单元（顺序对某些固件版本有影响） */
