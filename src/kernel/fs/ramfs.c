@@ -11,11 +11,87 @@
 #include "fs.h"
 #include "../core/object.h"
 #include "../core/error.h"
+#include "../core/spinlock.h"
 #include "../proc/proc.h"
 #include "../core/rtc.h"
 #include "../block/block.h"
 #include "../lib/kprintf.h"
 #include "../lib/string.h"
+
+/* =============================================================================
+ * SMP 串行化
+ *
+ * 节点池、打开句柄表、卷表都是全局共享状态，BSP/AP 上的用户进程可能同时
+ * 调 fs_*。这里用一把全局 fs_lock：先把所有公开入口改名成 *_impl（宏替换，
+ * 函数体不用动），文件末尾再生成加锁的包装函数。
+ *
+ * 为什么不在每个函数体里加锁：公开函数有多条 return 路径，逐条补解锁容易漏；
+ * 包装函数只有一条出口，语义上更接近"整个文件系统操作是原子的"。
+ * 锁序：fs_lock -> obj_lock（fs_open/fs_close 内部会调对象层），没有反向路径。
+ * ============================================================================= */
+static spinlock_t fs_lock = SPINLOCK_INIT;
+
+#define fs_mount        fs_mount_impl
+#define fs_open         fs_open_impl
+#define fs_read         fs_read_impl
+#define fs_write        fs_write_impl
+#define fs_close        fs_close_impl
+#define fs_ref          fs_ref_impl
+#define fs_stat         fs_stat_impl
+#define fs_mkdir        fs_mkdir_impl
+#define fs_unlink       fs_unlink_impl
+#define fs_chmod        fs_chmod_impl
+#define fs_chown        fs_chown_impl
+#define fs_access_as    fs_access_as_impl
+#define fs_listdir      fs_listdir_impl
+#define fs_format_disk  fs_format_disk_impl
+#define fs_sync         fs_sync_impl
+#define fs_mount_disk   fs_mount_disk_impl
+#define fs_sync_backing fs_sync_backing_impl
+#define fs_check        fs_check_impl
+
+/* 公开名已被宏改名为 *_impl；内部调用发生在定义之前，先声明。 */
+int fs_mount_impl(const char *name);
+uint32_t fs_open_impl(const char *path, uint32_t flags);
+int fs_read_impl(uint32_t handle, void *buf, uint32_t len);
+int fs_write_impl(uint32_t handle, const void *buf, uint32_t len);
+int fs_close_impl(uint32_t handle);
+int fs_ref_impl(uint32_t handle);
+int fs_stat_impl(const char *path, fs_stat_t *out);
+int fs_mkdir_impl(const char *path);
+int fs_unlink_impl(const char *path);
+int fs_chmod_impl(const char *path, uint32_t mode, uint32_t uid);
+int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid);
+int fs_access_as_impl(const char *path, uint32_t want, uint32_t uid, uint32_t gid);
+int fs_listdir_impl(const char *path, uint32_t index, char *name,
+                    uint32_t name_max, fs_stat_t *out);
+int fs_format_disk_impl(const char *blk_name);
+int fs_sync_impl(const char *blk_name);
+int fs_mount_disk_impl(const char *blk_name);
+int fs_sync_backing_impl(void);
+int fs_check_impl(char *report, uint32_t max);
+
+/* *_impl 的前置声明（宏会把下面的公开名展开成 *_impl）。
+ * 有些 impl 在定义之前就被调用（如 fs_init 调 fs_mount）。 */
+int      fs_mount(const char *name);
+uint32_t fs_open(const char *path, uint32_t flags);
+int      fs_read(uint32_t handle, void *buf, uint32_t len);
+int      fs_write(uint32_t handle, const void *buf, uint32_t len);
+int      fs_close(uint32_t handle);
+int      fs_ref(uint32_t handle);
+int      fs_stat(const char *path, fs_stat_t *out);
+int      fs_mkdir(const char *path);
+int      fs_unlink(const char *path);
+int      fs_chmod(const char *path, uint32_t mode, uint32_t uid);
+int      fs_chown(const char *path, uint32_t uid, uint32_t gid);
+int      fs_access_as(const char *path, uint32_t want, uint32_t uid, uint32_t gid);
+int      fs_listdir(const char *path, uint32_t index,
+                    char *name, uint32_t name_max, fs_stat_t *out);
+int      fs_format_disk(const char *blk_name);
+int      fs_sync(const char *blk_name);
+int      fs_mount_disk(const char *blk_name);
+int      fs_sync_backing(void);
+int      fs_check(char *report, uint32_t max);
 
 /* ---- 节点 ---- */
 typedef struct fs_node {
@@ -1011,4 +1087,171 @@ int fs_mount_disk(const char *blk_name)
     }
 
     return E_OK;
+}
+
+/* =============================================================================
+ * 加锁包装：从这里开始恢复公开符号名，所有外部调用者看到的都是"原子"的 fs_*
+ * ============================================================================= */
+#undef fs_mount
+#undef fs_open
+#undef fs_read
+#undef fs_write
+#undef fs_close
+#undef fs_ref
+#undef fs_stat
+#undef fs_mkdir
+#undef fs_unlink
+#undef fs_chmod
+#undef fs_chown
+#undef fs_access_as
+#undef fs_listdir
+#undef fs_format_disk
+#undef fs_sync
+#undef fs_mount_disk
+#undef fs_sync_backing
+#undef fs_check
+
+int fs_mount(const char *name)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_mount_impl(name);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+uint32_t fs_open(const char *path, uint32_t flags)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    uint32_t h = fs_open_impl(path, flags);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return h;
+}
+
+int fs_read(uint32_t handle, void *buf, uint32_t len)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_read_impl(handle, buf, len);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_write(uint32_t handle, const void *buf, uint32_t len)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_write_impl(handle, buf, len);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_close(uint32_t handle)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_close_impl(handle);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_ref(uint32_t handle)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_ref_impl(handle);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_stat(const char *path, fs_stat_t *out)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_stat_impl(path, out);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_mkdir(const char *path)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_mkdir_impl(path);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_unlink(const char *path)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_unlink_impl(path);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_chmod(const char *path, uint32_t mode, uint32_t uid)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_chmod_impl(path, mode, uid);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_chown(const char *path, uint32_t uid, uint32_t gid)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_chown_impl(path, uid, gid);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_access_as(const char *path, uint32_t want, uint32_t uid, uint32_t gid)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_access_as_impl(path, want, uid, gid);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_listdir(const char *path, uint32_t index,
+               char *name, uint32_t name_max, fs_stat_t *out)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_listdir_impl(path, index, name, name_max, out);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_format_disk(const char *blk_name)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_format_disk_impl(blk_name);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_sync(const char *blk_name)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_sync_impl(blk_name);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_mount_disk(const char *blk_name)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_mount_disk_impl(blk_name);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_sync_backing(void)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_sync_backing_impl();
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_check(char *report, uint32_t max)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_check_impl(report, max);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
 }
