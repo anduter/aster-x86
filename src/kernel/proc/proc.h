@@ -87,6 +87,8 @@ typedef struct process {
     bool         sandboxed;     /* 是否启用 syscall allowlist 沙箱 */
     uint64_t     syscall_mask;  /* 允许的 legacy syscall 位图（bit = syscall 号） */
     uint32_t     native_mask;   /* native ABI 允许位图，见 native.c 的映射 */
+    int32_t      cpu_pin;       /* -1 = 任意 CPU；>=0 = 亲和到该 CPU */
+    uint32_t     last_cpu;      /* 最近一次在哪个 CPU 上运行（0xFFFFFFFF=从未） */
 } proc_t;
 
 /* 初始化进程表 */
@@ -100,7 +102,7 @@ void proc_exit(int code) __attribute__((noreturn));
 
 /* 主动让出 CPU */
 void proc_yield(void);
-/* AP timer 调用：没有 current 时从 AP-safe 队列取 heartbeat；有 current 时轮转。 */
+/* AP timer / IPI 调用：没有 current 时从本 CPU runqueue 取活；有 current 时轮转。 */
 void sched_ap_tick(void);
 
 /* 在当前线程上阻塞，直到有人向 chan 调 proc_wakeup。

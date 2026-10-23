@@ -306,7 +306,6 @@ void kernel_main(void)
     pci_init();                 /* PCI 总线枚举 */
     if (e1000_init() == E_OK) {
         (void)e1000_send_test();    /* 发一帧，验证 DMA/TX 链路 */
-        net_init();                 /* ARP + ICMP RX 验证 */
     }
     acpi_init();                /* 找 FADT，为关机做准备 */
     madt_init();                /* 解析 MADT：CPU 列表 + IOAPIC */
@@ -380,6 +379,14 @@ void kernel_main(void)
     }
     if (proc_spawn("userdemo") == 0) {
         panic("cannot spawn userdemo program");
+    }
+
+    /* 多核调度回归：4 个忙等线程由负载放置决定落在哪颗核上（不看名字）。
+       它们 2 秒后自行退出，不会影响后续交互。 */
+    if (smp_cpu_count > 1U) {
+        for (uint32_t i = 0; i < 4U; i++) {
+            (void)proc_spawn("spin");
+        }
     }
 
     console_set_status("ready - ring3 shell");

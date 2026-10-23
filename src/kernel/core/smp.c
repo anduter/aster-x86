@@ -96,6 +96,9 @@ void smp_ipi_tick(void)
     c->ipi++;
     c->tlb_seen = smp_tlb_seq;
     apic_eoi();
+
+    /* IPI 也用作"有新活"的唤醒：让 AP 回到调度器看一眼自己的 runqueue */
+    sched_ap_tick();
 }
 
 uint32_t smp_tlb_shootdown(void)

@@ -582,14 +582,19 @@ ushell: argc=2 argv0=foo
 49. `cap: table selftest ok`（通用 per-process capability 表 install/transfer/close）；
 50. `native: process_create/wait ok`（按注册程序名创建子进程并等待，子进程可在 AP 运行）；
 51. `user: entering ring3 (builtin demo ... cpu=1)`（ring3 userdemo 在 AP 执行）。
+52. `sched: pid N (spin) running on cpu 1`（负载放置：不看程序名，按 runqueue 负载把线程放到 AP）。
 
 失败时返回非 0，可直接接到 CI。
 
 ## 已知限制
 
-- **SMP 目前是 2 核受限并行**：BSP + 1 个 AP，per-CPU GDT/TSS、共享 IDT、LAPIC
-  timer、IPI/TLB shootdown 已就绪；但 AP 只能调度白名单内核线程（`heartbeat`/`hello`），
-  没有 per-CPU runqueue 迁移、没有负载均衡，用户进程默认仍在 BSP；
+- **SMP 是 2 核共享内存多处理（受限）**：BSP + 1 个 AP，per-CPU GDT/TSS、共享 IDT、
+  LAPIC timer、IPI/TLB shootdown、**per-CPU runqueue 与按负载放置/迁移**都已落地；
+  `heartbeat` 用程序标志（`PROG_F_PIN_AP`）亲和到 AP 作为探针，其余进程由
+  `sched_place()` 按负载选核，`sched_balance()` 在负载差 ≥2 时迁移 READY 进程；
+- **SMP 未完成的部分**：fs、对象表、pipe 等子系统仍无锁，用户进程真正跨核并发
+  访问时存在竞态；下一步是给这些共享子系统加锁（或先上一把内核大锁），
+  再放开用户进程的跨核放置；
 - 文件系统在内存中 + `ata0` 硬盘镜像（`dist/disk.img`，重启保留）或 `ram0` 内存盘：
   最多 4 个驱动器、64 个节点、名字 ≤64 字符、单文件 16KB、路径 ≤255 字符；
   驱动号是保留名，顶层不能建同名目录；

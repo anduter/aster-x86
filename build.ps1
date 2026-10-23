@@ -343,7 +343,8 @@ if ($Test -or $Shot) {
             @{ Name = '权限模型可用';             Ok = ($out -match 'auth: permission model ok') },
             @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: 2 cpu') },
             @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*2 cpu\(s\) discovered.*AP startup pending') },
-            @{ Name = 'AP 进入 idle';             Ok = ($out -match 'smp: 2/2 cpus online, 1 AP GDT/TSS/IDT ready, AP ticks=[1-9]\d* ipi=[1-9]\d* tlb=[1-9]\d*') }
+            @{ Name = 'AP 进入 idle';             Ok = ($out -match 'smp: 2/2 cpus online, 1 AP GDT/TSS/IDT ready, AP ticks=[1-9]\d* ipi=[1-9]\d* tlb=[1-9]\d*') },
+            @{ Name = '负载放置把线程送上 AP';    Ok = ($out -match 'sched: pid \d+ \(spin\) running on cpu 1') }
         )
 
         Write-Host "=== checks ===" -ForegroundColor Cyan

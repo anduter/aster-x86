@@ -109,8 +109,10 @@ static void *build_stack(void *stack_base)
 
 proc_t *proc_spawn(const char *program_name)
 {
-    const program_t *prog = prog_lookup(program_name);
+    const program_t *prog;
     proc_t *p = 0;
+
+    prog = prog_lookup(program_name);
 
     if (prog == 0 || prog->entry == 0) {
         return 0;
@@ -131,6 +133,8 @@ proc_t *proc_spawn(const char *program_name)
     p->state      = PROC_READY;
     p->name       = prog->name;
     p->entry      = prog->entry;
+    p->cpu_pin    = -1;             /* 默认允许在任意 CPU 上运行 */
+    p->last_cpu   = 0xFFFFFFFFU;    /* 还没跑过 */
     p->stack_base = stack;
     p->stack_top  = (void *)((uintptr_t)stack + PROC_STACK_SIZE);
     p->esp        = build_stack(stack);
@@ -181,17 +185,15 @@ proc_t *proc_spawn(const char *program_name)
 
     native_proc_init(p);                        /* Native ABI self handle */
 
-    /* heartbeat 固定到 AP；其余进程默认 BSP。 */
-    {
-        uint32_t cpu = 0;
-        if (smp_cpu_count > 1U && per_cpu[1].ready &&
-            (strcmp(prog->name, "heartbeat") == 0 ||
-             strcmp(prog->name, "hello") == 0 ||
-             strcmp(prog->name, "userdemo") == 0)) {
-            cpu = 1;
-        }
-        sched_enqueue(p, cpu);
+    /* 亲和：带 PROG_F_PIN_AP 的探针程序固定到 AP，其余按负载放置 */
+    if ((prog->flags & PROG_F_PIN_AP) != 0U &&
+        smp_cpu_count > 1U && per_cpu[1].ready) {
+        p->cpu_pin = 1;
     }
+
+    /* 按当前负载选 CPU：不再按程序名写死，哪颗核闲就放哪颗。
+     * 用户进程和内核线程走同一条路径，是否安全由各子系统的锁保证。 */
+    sched_enqueue(p, sched_place(p));
 
     kprintf("proc: spawned pid %u (%s@%u)\n", p->pid, prog->name, prog->version);
     return p;
@@ -214,6 +216,7 @@ void proc_switch_to(proc_t *next)
     unsigned int flags;
 
     if (next == 0 || next == prev) return;
+    this_cpu()->idle_active = false;
 
     /* 内核栈向下溢出会最先覆盖 stack_base 处的 canary。 */
     if (prev != 0 && prev->stack_base != 0 &&
@@ -303,6 +306,7 @@ proc_t *proc_fork(struct interrupt_frame *f)
     child->page_dir   = vmm_new_dir();
     child->timeslice  = PROC_TIMESLICE;
     child->exit_code  = 0;
+    child->cpu_pin    = parent->cpu_pin;   /* 继承亲和（默认 -1 = 任意 CPU） */
     child->parent_pid = parent->pid;
     child->user_eip   = f->eip;
     child->user_esp   = f->useresp;
@@ -343,12 +347,13 @@ proc_t *proc_fork(struct interrupt_frame *f)
 
     kprintf("proc: forked pid %u from %u (eip=%p)\n",
             child->pid, parent->pid, (void *)(uintptr_t)f->eip);
-    sched_enqueue(child, 0);
+    sched_enqueue(child, sched_place(child));
     return child;
 }
 
 static void proc_reap(proc_t *p)
 {
+    sched_dequeue(p);
     if (p->stack_base != 0) free(p->stack_base);
     if (p->page_dir != 0) vmm_destroy_dir((pde_t *)p->page_dir);
     native_proc_free(p);
@@ -584,6 +589,7 @@ void proc_exit(int code)
     if (p != 0) {
         p->state = PROC_ZOMBIE;
         p->exit_code = code;
+        sched_dequeue(p);               /* 从所有 runqueue 摘掉 */
 
         /* 释放 fd：文件句柄减引用，管道写端减引用（读端看到 EOF） */
         for (int i = 0; i < PROC_FD_MAX; i++) {
@@ -607,16 +613,16 @@ void proc_exit(int code)
         proc_t *next = sched_next(p);
 
         if (next == 0) {
-            if (smp_cpu_id() != 0U) {
-                /* AP 没有可运行线程：回到 idle，等 timer/IPI 再调度。 */
-                this_cpu()->current = 0;
-                for (;;) {
-                    __asm__ volatile ("sti; hlt");
-                }
+            /* 本 CPU 没有可运行线程：进入 idle。
+             * 必须开中断睡眠——timer/IPI 进来后 sched_tick() 会从 runqueue 取活。
+             * 关中断的 cli;hlt 会让本核 timer 停摆，NMI 看门狗会误判为挂死。 */
+            this_cpu()->current = 0;
+            this_cpu()->idle_active = true;
+            if (smp_cpu_id() == 0U) {
+                kprintln("sched: system idle");
             }
-            kprintln("sched: no runnable process, system idle");
             for (;;) {
-                __asm__ volatile ("cli; hlt");
+                __asm__ volatile ("sti; hlt");
             }
         }
         proc_switch_to(next);

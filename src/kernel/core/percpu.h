@@ -20,6 +20,7 @@ typedef struct {
     struct process *current; /* 本 CPU 当前进程 */
     void    *bootstrap_esp;  /* 本 CPU 第一次调度前的占位上下文 */
     uint32_t runq_mask;      /* 本 CPU 的 READY 进程位图 */
+    bool     idle_active;    /* 本 CPU 正停在 idle 的 hlt 循环里（可被 timer 拉起） */
 } per_cpu_t;
 
 extern per_cpu_t per_cpu[SMP_MAX_CPUS];

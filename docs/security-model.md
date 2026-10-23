@@ -254,7 +254,7 @@ trust: tampered image rejected
 | 沙箱策略硬编码 | 按程序名设置 allowlist，尚未由 manifest/句柄权限驱动 | capability 沙箱 |
 | 签名测试密钥在仓库 | 仅用于教学/回归，不能用于生产 | 离线私钥/HSM + 撤销/公证 |
 | 能力表容量固定 | 每进程 16 项、generation 16 位；安装策略仍按程序名 allowlist | P4 动态容量 + manifest/句柄权限驱动 |
-| 多核仅受限并行 | AP 只调度 `heartbeat`/`hello` 白名单内核线程；已有 per-CPU runq_mask、全局调度锁、IPI 与 TLB shootdown，但无用户进程迁移/负载均衡 | per-CPU runqueue + 迁移 + 负载均衡 |
+| SMP 共享状态锁不足 | 调度器已支持 per-CPU runqueue、按负载放置与迁移，但 fs、对象表、pipe 等子系统仍无锁，用户进程跨核并发存在竞态 | 给共享子系统加锁或先引入内核大锁（BKL） |
 | boot sector/loader 仍是信任根 | 替换整个 bootloader 可绕过 kernel 签名；无硬件 Secure Boot | UEFI Secure Boot/TPM measured boot |
 | 没有审计/速率限制 | 拒绝服务与探测较容易 | 日志计数器 + 配额 |
 | 没有内核栈保护 | 内核栈溢出可能破坏相邻内存 | guard page + canary |

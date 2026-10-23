@@ -6,6 +6,7 @@
 #include "../mm/memtest.h"
 #include "../apps/shell.h"
 #include "../apps/heartbeat.h"
+#include "../apps/spin.h"
 #include "../user/user_mode.h"
 
 static program_t programs[PROG_MAX];
@@ -49,6 +50,21 @@ void prog_init(void)
     prog_register("memtest", 1, "run the memory tests", prog_memtest_entry);
     prog_register("heartbeat", 1, "print a heartbeat every second", heartbeat_entry);
     prog_register("userdemo",  1, "run a tiny ring3 program", prog_userdemo_entry);
+    prog_register("spin",      1, "busy-wait 2s (scheduler load test)", spin_entry);
+
+    /* heartbeat 是验证 AP 调度/计时器的探针，亲和到 AP；其余程序按负载放置。 */
+    (void)prog_set_flags("heartbeat", PROG_F_PIN_AP);
+}
+
+int prog_set_flags(const char *name, uint32_t flags)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (strcmp(programs[i].name, name) == 0) {
+            programs[i].flags |= flags;
+            return E_OK;
+        }
+    }
+    return E_NOENT;
 }
 
 int prog_register(const char *name, uint32_t version, const char *desc,
