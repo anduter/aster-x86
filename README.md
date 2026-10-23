@@ -590,9 +590,24 @@ ushell: argc=2 argv0=foo
 54. `sectest: mmap ok`（匿名 mmap 映射、写读、munmap）；
 55. `native: channel ok`（成对 channel endpoint 的 send/recv）；
 56. `native: port ok`（Port create → connect → accept → channel 数据）；
-57. channel/port 阻塞 recv/accept 已接入 `proc_block` + send/connect wakeup。
+57. channel/port 阻塞 recv/accept 已接入 `proc_block` + send/connect wakeup；
+58. `native: channel block ok`（fork 子进程 sleep 后 send，父进程阻塞 recv 被唤醒）。
 
 失败时返回非 0，可直接接到 CI。
+
+**网络端到端自检（绕过 slirp）**：
+
+```powershell
+.\tools\net_peer_test.ps1        # 20 秒，期望 NET PEER PASS
+```
+
+它用 QEMU 的 socket 网络后端，自己扮演对端：收到 ARP 请求就回 ARP 应答、
+收到 ICMP echo 就回 echo reply、收到 UDP 就原样回显，然后断言串口里出现
+`net: ARP reply gw=` / `net: ICMP echo reply` / `net: UDP echo reply`。
+
+为什么不用 `-nic user`：slirp 会替网关回 ARP/ICMP，但**不会**把 guest 发往
+`10.0.2.2` 的 UDP 交给宿主监听端口，UDP 回显没法稳定断言。socket 后端完全确定、
+不依赖外网。
 
 ## 已知限制
 

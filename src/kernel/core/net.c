@@ -121,6 +121,63 @@ static int net_parse_icmp(const uint8_t *f, uint32_t len)
     return 1;
 }
 
+/* ---- UDP 回显：宿主侧需要有一个回显端口（tools/test_udp.ps1 会起） ---- */
+#define NET_UDP_PORT 12345U
+
+static const char net_udp_payload[] = "aster-udp-echo";
+
+static void net_udp_send(void)
+{
+    uint8_t f[64];
+    uint8_t *ip = f + 14;
+    uint8_t *udp = ip + 20;
+    uint32_t plen = (uint32_t)(sizeof(net_udp_payload) - 1U);
+
+    /* 没解析到网关 MAC 就发不出去 */
+    if ((gw_mac[0] | gw_mac[1] | gw_mac[2] | gw_mac[3] | gw_mac[4] | gw_mac[5]) == 0) return;
+
+    memset(f, 0, sizeof(f));
+    memcpy(f, gw_mac, 6);
+    e1000_mac(f + 6);
+    f[12] = 0x08; f[13] = 0x00;
+
+    ip[0] = 0x45;
+    wr16(ip + 2, (uint16_t)(20U + 8U + plen));
+    wr16(ip + 4, ++ip_id);
+    ip[8] = 64;
+    ip[9] = 17;                          /* UDP */
+    memcpy(ip + 12, local_ip, 4);
+    memcpy(ip + 16, gw_ip, 4);
+    wr16(ip + 10, checksum(ip, 20));
+
+    wr16(udp + 0, NET_UDP_PORT);         /* 源端口 = 目的端口，方便回显 */
+    wr16(udp + 2, NET_UDP_PORT);
+    wr16(udp + 4, (uint16_t)(8U + plen));
+    wr16(udp + 6, 0);                    /* 校验和 0：IPv4 允许不校验 */
+    memcpy(udp + 8, net_udp_payload, plen);
+
+    (void)e1000_send_frame(f, 14U + 20U + 8U + plen);
+}
+
+static int net_parse_udp(const uint8_t *f, uint32_t len)
+{
+    const uint8_t *ip;
+    const uint8_t *udp;
+    uint32_t ihl;
+    uint32_t plen = (uint32_t)(sizeof(net_udp_payload) - 1U);
+
+    if (len < 14U + 20U + 8U || rd16(f + 12) != 0x0800U) return 0;
+    ip = f + 14;
+    if ((ip[0] >> 4) != 4U || ip[9] != 17U) return 0;
+    ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
+    if (ihl < 20U || 14U + ihl + 8U + plen > len) return 0;
+    udp = ip + ihl;
+    if (rd16(udp + 0) != NET_UDP_PORT || rd16(udp + 2) != NET_UDP_PORT) return 0;
+    if (memcmp(udp + 8, net_udp_payload, plen) != 0) return 0;
+    kprintln("net: UDP echo reply");
+    return 1;
+}
+
 void net_init(void)
 {
     uint8_t buf[NET_RX_MAX];
@@ -161,4 +218,12 @@ void net_init(void)
     if (!got_icmp) {
         kprintln("net: ICMP echo timeout");
     }
+
+    /* UDP 回显：没有宿主回显端口时会超时（这是预期的，不算失败）。 */
+    net_udp_send();
+    for (volatile uint32_t n = 0; n < 30000000U; n++) {
+        int len = e1000_rx_poll(buf, sizeof(buf));
+        if (len > 0 && net_parse_udp(buf, (uint32_t)len)) return;
+    }
+    kprintln("net: UDP echo timeout (no host echo port)");
 }
