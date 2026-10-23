@@ -129,9 +129,15 @@ void net_init(void)
 
     if (!e1000_present()) return;
 
+    /* 轮询窗口按"迭代次数"给是不准的：实测 500 万次只有几十毫秒，
+     * 网关的 ARP 应答还没回来就超时了。这里放大到约 1~2 秒，
+     * 收到应答会立刻退出。 */
     net_arp_request();
-    for (volatile uint32_t n = 0; n < 30000000U && !got_arp; n++) {
-        int len = e1000_rx_poll(buf, sizeof(buf));
+    for (volatile uint32_t n = 0; n < 200000000U && !got_arp; n++) {
+        int len;
+
+        if ((n % 20000000U) == 0U && n != 0U) net_arp_request();
+        len = e1000_rx_poll(buf, sizeof(buf));
         if (len > 0) {
             static int logged;
             if (!logged) {
@@ -143,12 +149,12 @@ void net_init(void)
         }
     }
     if (!got_arp) {
-        kprintln("net: ARP reply timeout");
+        kprintln("net: ARP reply timeout (RDH/RDT check)");
         return;
     }
 
     net_icmp_request();
-    for (volatile uint32_t n = 0; n < 8000000U && !got_icmp; n++) {
+    for (volatile uint32_t n = 0; n < 100000000U && !got_icmp; n++) {
         int len = e1000_rx_poll(buf, sizeof(buf));
         if (len > 0) got_icmp = net_parse_icmp(buf, (uint32_t)len);
     }

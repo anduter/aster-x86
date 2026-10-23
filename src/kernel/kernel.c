@@ -306,6 +306,7 @@ void kernel_main(void)
     pci_init();                 /* PCI 总线枚举 */
     if (e1000_init() == E_OK) {
         (void)e1000_send_test();    /* 发一帧，验证 DMA/TX 链路 */
+        net_init();                 /* ARP + ICMP RX 验证 */
     }
     acpi_init();                /* 找 FADT，为关机做准备 */
     madt_init();                /* 解析 MADT：CPU 列表 + IOAPIC */

@@ -41,7 +41,7 @@ ELF 段权限分离、代码页只读、COW 只作用于可写页、明确限制
 | 屏幕小部件 | 右下角心跳 `hb N *`、左侧 `uptime N s`；周期输出只更新状态栏，内容区保持静止 |
 | 文件系统 | **驱动器为根**（Windows 风格 `system:/bin`、`data:/a.txt`）：顶层是卷表本身，没有虚拟 `/` |
 | 块设备 / 持久化 | `DEV_BLOCK` + **ATA PIO（`ata0` XFS1 系统盘 + `ata1` FAT16 交换盘）+ `ram0` 内存盘**；`XFS1` v3；**重启后文件还在**；`fat:/` 可直接和宿主交换文件 |
-| 平台 / 外设 | **串口输入（IRQ4）、PCI 枚举、ACPI S5 关机、LAPIC 探测 + NMI 看门狗、PS/2 鼠标（IRQ12，`mouse`）、e1000 网卡（MAC/链路/TX 测试帧）** |
+| 平台 / 外设 | **串口输入（IRQ4）、PCI 枚举、ACPI S5 关机、LAPIC 探测 + NMI 看门狗、PS/2 鼠标（IRQ12，`mouse`）、e1000 网卡（MAC/链路、ARP、ICMP echo 收发）** |
 
 ## 快速开始
 
@@ -175,9 +175,12 @@ BIOS -> LBA0 boot.bin (0x7C00)
   NMI 处理函数比较 `timer_ticks + syscall_count`：连续 4 次没前进（约 1 秒）→ panic。
   **NMI 不受 IF 影响**，所以 `cli; hlt` 卡死也能被发现；`hang` 命令可验证：
   `NMI watchdog: no progress for ~1s (eip=...)`；
-- **e1000 网卡（基础）**：PCI 找 8086:100e → 映射 BAR0 → 读 MAC/链路 →
-  初始化 TX 描述符环 → 发一帧 60 字节广播测试帧（`TDH==TDT` 确认硬件已消费）；
-  **RX 与协议栈未实现**；
+- **e1000 网卡**：PCI 找 8086:100e → **打开 CMD 的 MEMORY+BUS MASTER**
+  （不打开总线主控时 TX 的 `TDH` 照样前进，但帧根本不上线——这是之前 RX/TX 都"看起来成功"的根因）
+  → 映射 BAR0 → 读 MAC/链路 → 初始化 TX/RX 描述符环 →
+  **ARP 解析网关 MAC + IPv4/ICMP echo 收发**（启动日志 `net: ARP reply gw=…`、
+  `net: ICMP echo reply seq=1`，两条都进了自动回归）；
+  UDP 与协议栈分层仍未实现；
   （浸泡测试 180 秒无串口输出判定挂死）。
 
 ## 中断
@@ -582,7 +585,12 @@ ushell: argc=2 argv0=foo
 49. `cap: table selftest ok`（通用 per-process capability 表 install/transfer/close）；
 50. `native: process_create/wait ok`（按注册程序名创建子进程并等待，子进程可在 AP 运行）；
 51. `user: entering ring3 (builtin demo ... cpu=1)`（ring3 userdemo 在 AP 执行）。
-52. `sched: pid N (spin) running on cpu 1`（负载放置：不看程序名，按 runqueue 负载把线程放到 AP）。
+52. `sched: pid N (spin) running on cpu 1`（负载放置：不看程序名，按 runqueue 负载把线程放到 AP）；
+53. `native: handle table ok`（native handle restrict/transfer/generation 自检）；
+54. `sectest: mmap ok`（匿名 mmap 映射、写读、munmap）；
+55. `native: channel ok`（成对 channel endpoint 的 send/recv）；
+56. `native: port ok`（Port create → connect → accept → channel 数据）；
+57. channel/port 阻塞 recv/accept 已接入 `proc_block` + send/connect wakeup。
 
 失败时返回非 0，可直接接到 CI。
 
@@ -592,9 +600,9 @@ ushell: argc=2 argv0=foo
   LAPIC timer、IPI/TLB shootdown、**per-CPU runqueue 与按负载放置/迁移**都已落地；
   `heartbeat` 用程序标志（`PROG_F_PIN_AP`）亲和到 AP 作为探针，其余进程由
   `sched_place()` 按负载选核，`sched_balance()` 在负载差 ≥2 时迁移 READY 进程；
-- **SMP 未完成的部分**：fs、对象表、pipe 等子系统仍无锁，用户进程真正跨核并发
-  访问时存在竞态；下一步是给这些共享子系统加锁（或先上一把内核大锁），
-  再放开用户进程的跨核放置；
+- **SMP 共享状态**：对象表、管道、文件系统（ramfs 一把全局锁，公开入口统一包装）
+  都已串行化；仍未逐项加锁的是进程表的部分遍历（`proc_wakeup`/`proc_find`）和
+  内核页表修改路径，跨核高并发下仍有理论竞态，也没有做过压力验证；
 - 文件系统在内存中 + `ata0` 硬盘镜像（`dist/disk.img`，重启保留）或 `ram0` 内存盘：
   最多 4 个驱动器、64 个节点、名字 ≤64 字符、单文件 16KB、路径 ≤255 字符；
   驱动号是保留名，顶层不能建同名目录；

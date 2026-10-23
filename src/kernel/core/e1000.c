@@ -115,6 +115,42 @@ static uint32_t pci_bar0(const pci_dev_t *d)
     return val & 0xFFFFFFF0U;
 }
 
+static uint32_t pci_cfg_addr(const pci_dev_t *d, uint32_t off)
+{
+    return 0x80000000U
+         | ((uint32_t)d->bus << 16)
+         | ((uint32_t)d->dev << 11)
+         | ((uint32_t)d->func << 8)
+         | (off & 0xFCU);
+}
+
+static uint32_t pci_read32(const pci_dev_t *d, uint32_t off)
+{
+    uint32_t val;
+
+    __asm__ volatile("outl %0, %1" :: "a"(pci_cfg_addr(d, off)), "d"((unsigned short)0xCF8));
+    __asm__ volatile("inl %1, %0" : "=a"(val) : "d"((unsigned short)0xCFC));
+    return val;
+}
+
+static void pci_write32(const pci_dev_t *d, uint32_t off, uint32_t val)
+{
+    __asm__ volatile("outl %0, %1" :: "a"(pci_cfg_addr(d, off)), "d"((unsigned short)0xCF8));
+    __asm__ volatile("outl %0, %1" :: "a"(val), "d"((unsigned short)0xCFC));
+}
+
+/* 打开 PCI 命令寄存器里的"内存空间 + 总线主控"。
+ * 没有 bus master，网卡读不到描述符、也写不回接收缓冲：
+ * 表现就是 TX 的 TDH 照常推进（描述符被取走），但帧根本没上线。 */
+static uint32_t pci_enable_dma(const pci_dev_t *d)
+{
+    uint32_t cmd = pci_read32(d, 0x04U);
+
+    cmd |= 0x0006U;                 /* bit1 = MEMORY, bit2 = BUS MASTER */
+    pci_write32(d, 0x04U, cmd);
+    return pci_read32(d, 0x04U);
+}
+
 int e1000_init(void)
 {
     pci_dev_t d;
@@ -126,6 +162,14 @@ int e1000_init(void)
     if (!pci_find_e1000(&d)) {
         kprintln("e1000: not found");
         return E_NOENT;
+    }
+
+    {
+        uint32_t cmd = pci_enable_dma(&d);
+
+        kprintf("e1000: PCI CMD=%x (memory=%u busmaster=%u)\n",
+                (unsigned int)cmd,
+                (unsigned int)((cmd >> 1) & 1U), (unsigned int)((cmd >> 2) & 1U));
     }
 
     bar = pci_bar0(&d);
