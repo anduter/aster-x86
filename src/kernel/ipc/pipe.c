@@ -6,6 +6,7 @@
  * ============================================================================= */
 #include "pipe.h"
 #include "../proc/proc.h"
+#include "../core/spinlock.h"
 #include "../lib/string.h"
 
 #define PIPE_MAX   8
@@ -19,77 +20,116 @@ typedef struct {
 } pipe_t;
 
 static pipe_t pipes[PIPE_MAX];
+/* SMP：管道缓冲是全局共享的，读/写/引用计数都要串行化。
+ * 阻塞前必须放锁——proc_block 会切到别的线程，它可能也要用同一根管道。 */
+static spinlock_t pipe_lock = SPINLOCK_INIT;
 
 int pipe_create(void)
 {
+    uint32_t flags;
+
+    flags = spin_lock_irqsave(&pipe_lock);
     for (int i = 0; i < PIPE_MAX; i++) {
         if (!pipes[i].used) {
             memset(&pipes[i], 0, sizeof(pipes[i]));
             pipes[i].used = true;
             pipes[i].writers = 1U;      /* 创建时算一个写端 */
+            spin_unlock_irqrestore(&pipe_lock, flags);
             return i;
         }
     }
+    spin_unlock_irqrestore(&pipe_lock, flags);
     return -1;
 }
 
 int pipe_read(int idx, char *dst, uint32_t len)
 {
-    pipe_t *pp = &pipes[idx];
+    pipe_t *pp;
     uint32_t n = 0;
 
-    while (n < len) {
-        if (pp->count == 0U) {
-            if (pp->writers == 0U) break;   /* 所有写端都关了 -> EOF */
-            proc_block(PROC_WAIT_PIPE);
-            continue;
+    if (idx < 0 || idx >= PIPE_MAX) return -1;
+    pp = &pipes[idx];
+
+    for (;;) {
+        uint32_t flags = spin_lock_irqsave(&pipe_lock);
+
+        while (n < len && pp->count > 0U) {
+            dst[n++] = (char)pp->buf[pp->tail];
+            pp->tail = (pp->tail + 1U) % PIPE_SIZE;
+            pp->count--;
         }
-        dst[n++] = (char)pp->buf[pp->tail];
-        pp->tail = (pp->tail + 1U) % PIPE_SIZE;
-        pp->count--;
+        /* 读够了，或者所有写端都关了 -> EOF */
+        if (n >= len || pp->writers == 0U) {
+            spin_unlock_irqrestore(&pipe_lock, flags);
+            break;
+        }
+        spin_unlock_irqrestore(&pipe_lock, flags);
+        proc_block(PROC_WAIT_PIPE);
     }
+
     proc_wakeup(PROC_WAIT_PIPE);
     return (int)n;
 }
 
 int pipe_write(int idx, const char *src, uint32_t len)
 {
-    pipe_t *pp = &pipes[idx];
+    pipe_t *pp;
     uint32_t n = 0;
 
-    while (n < len) {
-        if (pp->count == PIPE_SIZE) {
-            proc_block(PROC_WAIT_PIPE);
-            continue;
+    if (idx < 0 || idx >= PIPE_MAX) return -1;
+    pp = &pipes[idx];
+
+    for (;;) {
+        uint32_t flags = spin_lock_irqsave(&pipe_lock);
+
+        while (n < len && pp->count < PIPE_SIZE) {
+            pp->buf[pp->head] = (uint8_t)src[n++];
+            pp->head = (pp->head + 1U) % PIPE_SIZE;
+            pp->count++;
         }
-        pp->buf[pp->head] = (uint8_t)src[n++];
-        pp->head = (pp->head + 1U) % PIPE_SIZE;
-        pp->count++;
+        if (n >= len) {
+            spin_unlock_irqrestore(&pipe_lock, flags);
+            break;
+        }
+        spin_unlock_irqrestore(&pipe_lock, flags);
+        proc_block(PROC_WAIT_PIPE);
     }
+
     proc_wakeup(PROC_WAIT_PIPE);
     return (int)n;
 }
 
 void pipe_ref_write(int idx)
 {
-    if (idx < 0 || idx >= PIPE_MAX || !pipes[idx].used) return;
-    pipes[idx].writers++;
+    uint32_t flags;
+
+    if (idx < 0 || idx >= PIPE_MAX) return;
+    flags = spin_lock_irqsave(&pipe_lock);
+    if (pipes[idx].used) pipes[idx].writers++;
+    spin_unlock_irqrestore(&pipe_lock, flags);
 }
 
 void pipe_unref_write(int idx)
 {
-    if (idx < 0 || idx >= PIPE_MAX || !pipes[idx].used) return;
-    if (pipes[idx].writers > 0U) pipes[idx].writers--;
+    uint32_t flags;
+
+    if (idx < 0 || idx >= PIPE_MAX) return;
+    flags = spin_lock_irqsave(&pipe_lock);
+    if (pipes[idx].used && pipes[idx].writers > 0U) pipes[idx].writers--;
+    spin_unlock_irqrestore(&pipe_lock, flags);
     proc_wakeup(PROC_WAIT_PIPE);
 }
 
 void pipe_unref_read(int idx)
 {
+    uint32_t flags;
+
     if (idx < 0 || idx >= PIPE_MAX) return;
-    if (!pipes[idx].used) return;
-    if (pipes[idx].writers == 0U && pipes[idx].count == 0U) {
+    flags = spin_lock_irqsave(&pipe_lock);
+    if (pipes[idx].used && pipes[idx].writers == 0U && pipes[idx].count == 0U) {
         pipes[idx].used = false;
     }
+    spin_unlock_irqrestore(&pipe_lock, flags);
     proc_wakeup(PROC_WAIT_PIPE);
 }
 
