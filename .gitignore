@@ -1,0 +1,28 @@
+# ---- 构建产物 ----
+/dist/
+/obj/
+*.img
+*.o
+*.bin
+*.elf
+*.map
+
+# ---- 交叉工具链：约 3.5GB，按 README 自备或使用仓库外副本 ----
+/tools/
+
+# ---- 运行时 / 调试产物 ----
+/*.log
+/serial.log
+/test-run.log
+/test_net.log
+/test_net_serial.log
+/t.log
+/gdb.txt
+/*.ppm
+/test_runs_*/
+/.acl-recovery/
+
+# ---- 系统垃圾 ----
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,538 @@
+/* =============================================================================
+ * fs/fat16.c - FAT16 只根目录实现（读 + 写 + 删除）
+ *
+ * 目标是“和宿主交换文件”，所以刻意保持简单：
+ *   - 只支持根目录（FAT16 根目录是固定区域，不用簇链，最容易写对）
+ *   - 8.3 短名，不做 LFN；名字自动转大写
+ *   - 簇大小按 BPB 读，512 字节簇的 8MB 盘就是标准 FAT16
+ *   - 两份 FAT 都回写；写完清空块缓存（块设备层写穿透会自动失效）
+ * ============================================================================= */
+#include "fat16.h"
+#include "../block/block.h"
+#include "../core/error.h"
+#include "../lib/string.h"
+#include "../lib/kprintf.h"
+
+#define FAT16_MAX_HANDLES 8
+
+typedef struct {
+    uint8_t  name[11];
+    uint8_t  attr;
+    uint8_t  ntres;
+    uint8_t  crt_tenth;
+    uint16_t crt_time;
+    uint16_t crt_date;
+    uint16_t acc_date;
+    uint16_t cluster_hi;
+    uint16_t wtime;
+    uint16_t wdate;
+    uint16_t cluster_lo;
+    uint32_t size;
+} __attribute__((packed)) fat_dirent_t;
+
+typedef struct {
+    bool     used;
+    bool     write;
+    uint8_t  name[11];
+    uint32_t dir_lba;      /* 目录项所在扇区 */
+    uint32_t dir_idx;      /* 扇区内第几项 */
+    uint32_t first_cluster;
+    uint32_t cur_cluster;
+    uint32_t offset;
+    uint32_t size;
+} fat_handle_t;
+
+static struct {
+    block_device_t *dev;
+    uint32_t sector_size;
+    uint32_t sec_per_cluster;
+    uint32_t reserved;
+    uint32_t fats;
+    uint32_t root_entries;
+    uint32_t fat_sectors;
+    uint32_t total_sectors;
+    uint32_t root_start;
+    uint32_t root_sectors;
+    uint32_t data_start;
+    uint32_t cluster_count;
+    char     drive[FS_DRIVE_MAX];
+    bool     mounted;
+} fat;
+
+static fat_handle_t handles[FAT16_MAX_HANDLES];
+static uint8_t sec_buf[512];
+
+bool fat16_mounted(void) { return fat.mounted; }
+const char *fat16_drive(void) { return fat.drive; }
+
+static uint32_t rd16(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8); }
+static uint32_t rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static void wr16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)((v >> 8) & 0xFF); }
+static void wr32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF); p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static int read_sector(uint32_t lba, void *buf)
+{
+    if (fat.dev == 0) return -1;
+    return (blk_read(fat.dev, lba, buf) == E_OK) ? 0 : -1;
+}
+
+static int write_sector(uint32_t lba, const void *buf)
+{
+    if (fat.dev == 0) return -1;
+    return (blk_write(fat.dev, lba, buf) == E_OK) ? 0 : -1;
+}
+
+/* ---- FAT 表项 ---- */
+static uint32_t cluster_lba(uint32_t cluster)
+{
+    return fat.data_start + (cluster - 2U) * fat.sec_per_cluster;
+}
+
+static uint16_t fat_get(uint32_t cluster)
+{
+    uint32_t off = cluster * 2U;
+    uint32_t lba = fat.reserved + off / fat.sector_size;
+    uint32_t idx = (off % fat.sector_size) / 2U;
+
+    if (read_sector(lba, sec_buf) != 0) return 0xFFFFU;
+    return (uint16_t)(sec_buf[idx * 2U] | ((uint16_t)sec_buf[idx * 2U + 1U] << 8));
+}
+
+static int fat_set(uint32_t cluster, uint16_t value)
+{
+    uint32_t off = cluster * 2U;
+    uint32_t fat_lba = fat.reserved + off / fat.sector_size;
+    uint32_t idx = (off % fat.sector_size) / 2U;
+
+    if (read_sector(fat_lba, sec_buf) != 0) return -1;
+    sec_buf[idx * 2U] = (uint8_t)(value & 0xFF);
+    sec_buf[idx * 2U + 1U] = (uint8_t)(value >> 8);
+
+    for (uint32_t f = 0; f < fat.fats; f++) {
+        if (write_sector(fat_lba + f * fat.fat_sectors, sec_buf) != 0) return -1;
+    }
+    return 0;
+}
+
+/* 分配一个空闲簇并清零 */
+static uint32_t cluster_alloc(void)
+{
+    for (uint32_t c = 2; c < fat.cluster_count + 2U; c++) {
+        if (fat_get(c) == 0U) {
+            if (fat_set(c, 0xFFFFU) != 0) return 0;
+            /* 清零 */
+            for (uint32_t s = 0; s < fat.sec_per_cluster; s++) {
+                memset(sec_buf, 0, sizeof(sec_buf));
+                if (write_sector(cluster_lba(c) + s, sec_buf) != 0) return 0;
+            }
+            return c;
+        }
+    }
+    return 0;
+}
+
+static void cluster_free_chain(uint32_t first)
+{
+    uint32_t c = first;
+    uint32_t guard = 0;
+
+    while (c >= 2U && c < fat.cluster_count + 2U && guard++ < fat.cluster_count) {
+        uint16_t next = fat_get(c);
+        fat_set(c, 0);
+        c = next;
+    }
+}
+
+/* ---- 名字转换 ---- */
+static char upper_ch(char c)
+{
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+static int to_83(const char *name, uint8_t out[11])
+{
+    uint32_t i = 0, j = 0;
+
+    while (*name == '/') name++;
+    if (*name == '\0') return -1;
+
+    for (i = 0; i < 11; i++) out[i] = ' ';
+
+    i = 0;
+    while (*name != '\0' && *name != '.') {
+        char c = upper_ch(*name);
+        if (i >= 8U) return -1;
+        if (c == ' ' || c == '/' || c == '\\' || c == ':') return -1;
+        out[i++] = (uint8_t)c;
+        name++;
+    }
+    if (*name == '.') {
+        name++;
+        j = 0;
+        while (*name != '\0') {
+            char c = upper_ch(*name);
+            if (j >= 3U) return -1;
+            out[8 + j++] = (uint8_t)c;
+            name++;
+        }
+    }
+    return 0;
+}
+
+/* 目录项 -> 可显示名字 */
+static void from_83(const uint8_t *in, char *out, uint32_t max)
+{
+    uint32_t n = 0;
+
+    while (n < 8U && in[n] != ' ' && n + 1U < max) { out[n] = (char)in[n]; n++; }
+    if (in[8] != ' ') {
+        if (n + 1U < max) out[n++] = '.';
+        for (uint32_t i = 8; i < 11U && in[i] != ' ' && n + 1U < max; i++) out[n++] = (char)in[i];
+    }
+    out[n] = '\0';
+}
+
+/* 找根目录里的一项；返回目录项位置，item 可空 */
+static int find_root_entry(const char *rel, fat_dirent_t *item,
+                           uint32_t *out_lba, uint32_t *out_idx)
+{
+    uint8_t want[11];
+    int found = 0;
+
+    if (to_83(rel, want) != 0) return -1;
+
+    for (uint32_t s = 0; s < fat.root_sectors; s++) {
+        if (read_sector(fat.root_start + s, sec_buf) != 0) return -1;
+        for (uint32_t i = 0; i < fat.sector_size / 32U; i++) {
+            fat_dirent_t *de = (fat_dirent_t *)(void *)(sec_buf + i * 32U);
+            if ((uint8_t)de->name[0] == 0x00U) return found ? 0 : E_NOENT;
+            if ((uint8_t)de->name[0] == 0xE5U) continue;
+            if ((de->attr & 0x0FU) == 0x0FU) continue;      /* LFN */
+            if ((de->attr & 0x08U) != 0U) continue;         /* 卷标 */
+
+            if (memcmp(de->name, want, 11) == 0) {
+                found = 1;
+                if (item != 0) *item = *de;
+                if (out_lba != 0) *out_lba = fat.root_start + s;
+                if (out_idx != 0) *out_idx = i;
+                return 0;
+            }
+        }
+    }
+    return found ? 0 : E_NOENT;
+}
+
+/* 找一个空目录项（0x00 或 0xE5） */
+static int find_free_entry(uint32_t *out_lba, uint32_t *out_idx)
+{
+    for (uint32_t s = 0; s < fat.root_sectors; s++) {
+        if (read_sector(fat.root_start + s, sec_buf) != 0) return -1;
+        for (uint32_t i = 0; i < fat.sector_size / 32U; i++) {
+            uint8_t first = sec_buf[i * 32U];
+            if (first == 0x00U || first == 0xE5U) {
+                *out_lba = fat.root_start + s;
+                *out_idx = i;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+/* ==================== 挂载 ==================== */
+
+int fat16_mount(const char *blk_name, const char *drive)
+{
+    block_device_t *dev = blk_lookup(blk_name);
+    uint32_t root_secs, data_start, clusters;
+
+    if (dev == 0) return E_NOENT;
+    if (dev->sector_size != 512U) return E_INVAL;
+
+    if (blk_read(dev, 0, sec_buf) != E_OK) return E_INVAL;
+    if (sec_buf[510] != 0x55U || sec_buf[511] != 0xAAU) return E_INVAL;
+
+    fat.dev = dev;
+    fat.sector_size = rd16(sec_buf + 11);
+    fat.sec_per_cluster = sec_buf[13];
+    fat.reserved = rd16(sec_buf + 14);
+    fat.fats = sec_buf[16];
+    fat.root_entries = rd16(sec_buf + 17);
+    fat.total_sectors = rd16(sec_buf + 19);
+    fat.fat_sectors = rd16(sec_buf + 22);
+    if (fat.total_sectors == 0U) fat.total_sectors = rd32(sec_buf + 32);
+
+    if (fat.sector_size != 512U || fat.sec_per_cluster == 0U ||
+        fat.fats == 0U || fat.fat_sectors == 0U || fat.root_entries == 0U) {
+        return E_INVAL;
+    }
+
+    root_secs = (fat.root_entries * 32U + fat.sector_size - 1U) / fat.sector_size;
+    data_start = fat.reserved + fat.fats * fat.fat_sectors + root_secs;
+    if (fat.total_sectors <= data_start) return E_INVAL;
+    clusters = (fat.total_sectors - data_start) / fat.sec_per_cluster;
+
+    /* 4085..65524 才是 FAT16；否则是 FAT12/FAT32 */
+    if (clusters < 4085U || clusters > 65524U) {
+        kprintf("fat16: not FAT16 (clusters=%u)\n", (unsigned int)clusters);
+        fat.dev = 0;
+        return E_INVAL;
+    }
+
+    fat.root_start = fat.reserved + fat.fats * fat.fat_sectors;
+    fat.root_sectors = root_secs;
+    fat.data_start = data_start;
+    fat.cluster_count = clusters;
+    memset(handles, 0, sizeof(handles));
+    strncpy(fat.drive, drive, FS_DRIVE_MAX - 1U);
+    fat.drive[FS_DRIVE_MAX - 1U] = '\0';
+    fat.mounted = true;
+
+    kprintf("fat16: %s mounted as %s:/ (%u clusters, %u KB)\n",
+            blk_name, fat.drive, (unsigned int)clusters,
+            (unsigned int)(clusters * fat.sec_per_cluster / 2U));
+    return E_OK;
+}
+
+/* ==================== 目录 / 元数据 ==================== */
+
+static const char *rel_of(const char *rel)
+{
+    while (*rel == '/') rel++;
+    return rel;
+}
+
+int fat16_listdir(const char *rel, uint32_t index, char *name, uint32_t max,
+                  fs_stat_t *out)
+{
+    uint32_t seen = 0;
+
+    if (!fat.mounted) return E_NOENT;
+    if (rel != 0 && *rel_of(rel) != '\0') return E_NOENT;   /* 只有根目录 */
+
+    for (uint32_t s = 0; s < fat.root_sectors; s++) {
+        if (read_sector(fat.root_start + s, sec_buf) != 0) return E_NOENT;
+        for (uint32_t i = 0; i < fat.sector_size / 32U; i++) {
+            fat_dirent_t *de = (fat_dirent_t *)(void *)(sec_buf + i * 32U);
+            if ((uint8_t)de->name[0] == 0x00U) return E_NOENT;
+            if ((uint8_t)de->name[0] == 0xE5U) continue;
+            if ((de->attr & 0x0FU) == 0x0FU) continue;
+            if ((de->attr & 0x08U) != 0U) continue;
+
+            if (seen == index) {
+                if (name != 0 && max > 0U) from_83(de->name, name, max);
+                if (out != 0) {
+                    out->type = ((de->attr & 0x10U) != 0U) ? FS_TYPE_DIR : FS_TYPE_FILE;
+                    out->size = de->size;
+                    out->mtime = 0;
+                }
+                return E_OK;
+            }
+            seen++;
+        }
+    }
+    return E_NOENT;
+}
+
+int fat16_stat(const char *rel, fs_stat_t *out)
+{
+    fat_dirent_t de;
+    int r = find_root_entry(rel, &de, 0, 0);
+
+    if (r != 0) return r;
+    if (out != 0) {
+        out->type = ((de.attr & 0x10U) != 0U) ? FS_TYPE_DIR : FS_TYPE_FILE;
+        out->size = de.size;
+        out->mtime = 0;
+    }
+    return E_OK;
+}
+
+int fat16_unlink(const char *rel)
+{
+    fat_dirent_t de;
+    uint32_t lba = 0, idx = 0;
+
+    if (!fat.mounted) return E_NOENT;
+    if (find_root_entry(rel, &de, &lba, &idx) != 0) return E_NOENT;
+
+    cluster_free_chain(de.cluster_lo);
+
+    if (read_sector(lba, sec_buf) != 0) return E_INVAL;
+    sec_buf[idx * 32U] = 0xE5U;
+    return (write_sector(lba, sec_buf) == 0) ? E_OK : E_INVAL;
+}
+
+int fat16_mkdir(const char *rel)
+{
+    (void)rel;
+    return E_NOSPC;             /* 只支持根目录里的文件 */
+}
+
+/* ==================== 文件句柄 ==================== */
+
+int fat16_open(const char *rel, uint32_t flags)
+{
+    fat_dirent_t de;
+    int h = -1;
+    int r;
+
+    if (!fat.mounted) return -1;
+
+    for (int i = 0; i < FAT16_MAX_HANDLES; i++) {
+        if (!handles[i].used) { h = i; break; }
+    }
+    if (h < 0) return -1;
+
+    memset(&handles[h], 0, sizeof(handles[h]));
+    handles[h].used = true;
+
+    if ((flags & FS_OPEN_CREAT) != 0U || (flags & FS_OPEN_WRITE) != 0U) {
+        handles[h].write = true;
+
+        r = find_root_entry(rel, &de, &handles[h].dir_lba, &handles[h].dir_idx);
+        if (r == 0) {
+            /* 已存在：截断 */
+            if ((de.attr & 0x10U) != 0U) { handles[h].used = false; return -1; }
+            cluster_free_chain(de.cluster_lo);
+            if (read_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
+            wr16(sec_buf + handles[h].dir_idx * 32U + 26U, 0);
+            wr32(sec_buf + handles[h].dir_idx * 32U + 28U, 0);
+            if (write_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
+        } else {
+            /* 新建目录项 */
+            if (to_83(rel, handles[h].name) != 0) { handles[h].used = false; return -1; }
+            if (find_free_entry(&handles[h].dir_lba, &handles[h].dir_idx) != 0) {
+                handles[h].used = false;
+                return -1;
+            }
+            if (read_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
+            uint8_t *slot = sec_buf + handles[h].dir_idx * 32U;
+            memset(slot, 0, 32);
+            memcpy(slot, handles[h].name, 11);
+            slot[11] = 0x20U;                   /* archive */
+            if (write_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
+        }
+        return h;
+    }
+
+    /* 只读打开 */
+    r = find_root_entry(rel, &de, &handles[h].dir_lba, &handles[h].dir_idx);
+    if (r != 0) { handles[h].used = false; return -1; }
+    if ((de.attr & 0x10U) != 0U) { handles[h].used = false; return -1; }
+
+    memcpy(handles[h].name, de.name, 11);
+    handles[h].first_cluster = de.cluster_lo;
+    handles[h].cur_cluster = de.cluster_lo;
+    handles[h].size = de.size;
+    handles[h].offset = 0;
+    return h;
+}
+
+int fat16_read(int h, void *buf, uint32_t len)
+{
+    fat_handle_t *fh;
+    uint8_t *p = (uint8_t *)buf;
+    uint32_t done = 0;
+
+    if (h < 0 || h >= FAT16_MAX_HANDLES || !handles[h].used) return -1;
+    fh = &handles[h];
+
+    while (done < len && fh->offset < fh->size) {
+        uint32_t cluster_off = fh->offset % (fat.sec_per_cluster * 512U);
+        uint32_t lba = cluster_lba(fh->cur_cluster) + cluster_off / 512U;
+        uint32_t within = fh->offset % 512U;
+        uint32_t n = 512U - within;
+
+        if (n > len - done) n = len - done;
+        if (n > fh->size - fh->offset) n = fh->size - fh->offset;
+
+        if (read_sector(lba, sec_buf) != 0) return -1;
+        memcpy(p + done, sec_buf + within, n);
+
+        done += n;
+        fh->offset += n;
+
+        if (fh->offset % (fat.sec_per_cluster * 512U) == 0U && fh->offset < fh->size) {
+            uint16_t next = fat_get(fh->cur_cluster);
+            if (next < 2U) break;
+            fh->cur_cluster = next;
+        }
+    }
+    return (int)done;
+}
+
+int fat16_write(int h, const void *buf, uint32_t len)
+{
+    fat_handle_t *fh;
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t done = 0;
+
+    if (h < 0 || h >= FAT16_MAX_HANDLES || !handles[h].used) return -1;
+    fh = &handles[h];
+    if (!fh->write) return -1;
+
+    while (done < len) {
+        uint32_t cluster_bytes = fat.sec_per_cluster * 512U;
+        uint32_t cluster_off = fh->offset % cluster_bytes;
+
+        if (fh->cur_cluster < 2U) {
+            uint32_t c = cluster_alloc();
+            if (c == 0U) return -1;
+            if (fh->first_cluster < 2U) {
+                fh->first_cluster = c;
+            } else if (fat_set(fh->cur_cluster, (uint16_t)c) != 0) {
+                return -1;
+            }
+            fh->cur_cluster = c;
+        }
+
+        uint32_t lba = cluster_lba(fh->cur_cluster) + cluster_off / 512U;
+        uint32_t within = fh->offset % 512U;
+        uint32_t n = 512U - within;
+
+        if (n > len - done) n = len - done;
+
+        if (read_sector(lba, sec_buf) != 0) return -1;
+        memcpy(sec_buf + within, p + done, n);
+        if (write_sector(lba, sec_buf) != 0) return -1;
+
+        done += n;
+        fh->offset += n;
+        if (fh->offset > fh->size) fh->size = fh->offset;
+
+        if (fh->offset % cluster_bytes == 0U) {
+            uint32_t c = cluster_alloc();
+            if (c == 0U) break;                 /* 盘满：已写部分保留 */
+            if (fat_set(fh->cur_cluster, (uint16_t)c) != 0) return -1;
+            fh->cur_cluster = c;
+        }
+    }
+    return (int)done;
+}
+
+int fat16_close(int h)
+{
+    fat_handle_t *fh;
+
+    if (h < 0 || h >= FAT16_MAX_HANDLES || !handles[h].used) return -1;
+    fh = &handles[h];
+
+    if (fh->write) {
+        if (read_sector(fh->dir_lba, sec_buf) != 0) return -1;
+        uint8_t *slot = sec_buf + fh->dir_idx * 32U;
+        wr16(slot + 26U, (uint32_t)(uint16_t)fh->first_cluster);
+        wr32(slot + 28U, fh->size);
+        if (write_sector(fh->dir_lba, sec_buf) != 0) return -1;
+    }
+
+    memset(fh, 0, sizeof(*fh));
+    return 0;
+}
