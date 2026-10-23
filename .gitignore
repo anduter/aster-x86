@@ -14,6 +14,8 @@
 
 # ---- 运行时 / 调试产物 ----
 /*.log
+/stress-*/
+/soak-run/
 /serial.log
 /test-run.log
 /test_net.log

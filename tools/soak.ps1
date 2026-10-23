@@ -25,7 +25,8 @@ param(
     [string]$OutDir = 'obj/soak',
     [string]$Image = 'dist/floppy.img',
     [string]$CommandList = 'ls,echo soak,pwd,fork,cat /docs/hello.txt',
-    [switch]$Inject = $false
+    [switch]$Inject = $false,
+    [int]$Smp = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +47,7 @@ Add-Content $progress ("soak: start {0} hours={1} image={2}" -f (Get-Date -Forma
 
 $qemu = Start-Process -FilePath 'qemu-system-i386' -ArgumentList @(
     '-fda', (Resolve-Path $Image).Path, '-boot', 'a', '-display', 'none',
+    '-smp', "$Smp",
     '-serial', ("tcp:127.0.0.1:{0},server=on,wait=on" -f $SerialPort),
     '-monitor', ("tcp:127.0.0.1:{0},server=on,wait=off" -f $MonitorPort)
 ) -PassThru -WindowStyle Hidden
