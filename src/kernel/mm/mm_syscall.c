@@ -45,9 +45,45 @@ static int sys_brk_user(uint32_t inc)
     return (int)neu;
 }
 
+/* mprotect(addr, len, prot)：只改当前进程用户页的 PTE 权限。
+ * 先整段校验（对齐/范围/已映射），再逐页修改；任何非法参数返回 -1 且不改页。
+ * prot 位与 VMM_PROT_*（= include/abi.h 的 PROT_*）一致。 */
+static int sys_mprotect_user(uint32_t addr, uint32_t len, uint32_t prot)
+{
+    proc_t *p = proc_current();
+
+    if (p == 0) return -1;
+    if (len == 0U) return -1;
+    if ((addr & 0xFFFU) != 0U) return -1;
+    if ((prot & ~(uint32_t)(VMM_PROT_READ | VMM_PROT_WRITE | VMM_PROT_EXEC)) != 0U) {
+        return -1;
+    }
+
+    /* 用户地址空间上界是 mmap 区末尾；下界是代码段起点 */
+    if (addr < USER_LAYOUT_CODE_BASE) return -1;
+    if (addr >= USER_LAYOUT_MMAP_END) return -1;
+    if (len > USER_LAYOUT_MMAP_END - addr) return -1;
+
+    /* 第一遍：整段都必须是已映射的用户页，避免改到一半才发现非法 */
+    for (uint32_t va = addr; va < addr + len; va += PAGE_SIZE) {
+        if ((vmm_user_flags(va) & (PTE_PRESENT | PTE_USER)) !=
+            (PTE_PRESENT | PTE_USER)) {
+            return -1;
+        }
+    }
+
+    /* 第二遍：逐页改权限；vmm_protect_page 内部做 COW 私有化和 invlpg */
+    for (uint32_t va = addr; va < addr + len; va += PAGE_SIZE) {
+        if (vmm_protect_page(va, prot) != 0) return -1;
+    }
+
+    return 0;
+}
+
 bool mm_syscall_owns(uint32_t nr)
 {
-    return nr == SYS_BRK || nr == SYS_MMAP || nr == SYS_MUNMAP;
+    return nr == SYS_BRK || nr == SYS_MMAP || nr == SYS_MUNMAP ||
+           nr == SYS_MPROTECT;
 }
 
 int mm_syscall(interrupt_frame_t *f)
@@ -131,6 +167,9 @@ mmap_out:
         ret = 0;
         break;
     }
+    case SYS_MPROTECT:
+        ret = sys_mprotect_user(f->ebx, f->ecx, f->edx);
+        break;
     default:
         return -1000;
     }

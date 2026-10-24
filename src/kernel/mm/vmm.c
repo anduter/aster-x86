@@ -225,6 +225,83 @@ uint32_t vmm_user_flags(uint32_t virt)
     return (uint32_t)(pte & 0xFFFU);
 }
 
+/* =============================================================================
+ * vmm_protect_page - 修改当前地址空间一个用户页的保护位（mprotect 底层）
+ *
+ * prot: VMM_PROT_READ/WRITE/EXEC 组合，0 = PROT_NONE（本实现等价只读+NX）。
+ *   - 只接受 PRESENT|USER 的 4KB 用户页；其它返回 -1（不拆大页、不建新页）；
+ *   - 请求写且页是 COW、或物理页仍被多个页表引用：先私有化当前进程的页，
+ *     避免两个进程写同一物理页；
+ *   - 清写时同时清 PTE_COW：显式只读必须真的不可写（否则 #PF 的 COW 路径
+ *     会把写静默放行）；共享页以后要写时，再走上面的“请求写先私有化”；
+ *   - 执行位用 NX（bit 63）表达；NX 不可用时忽略执行位差异；
+ *   - 改完 invlpg 当前 CPU。不做远端 shootdown（每个进程单线程 + CR3 切换
+ *     会刷新非全局 TLB；未来多线程/PCID 的远端策略见 docs/process-memory.md）。
+ * ============================================================================= */
+int vmm_protect_page(uintptr_t virt, uint32_t prot)
+{
+    pte_t *entry;
+    uint64_t e;
+    uint32_t flags;
+    uint32_t phys;
+
+    if ((virt & 0xFFFU) != 0U) return -1;
+    if ((prot & ~(uint32_t)(VMM_PROT_READ | VMM_PROT_WRITE | VMM_PROT_EXEC)) != 0U) {
+        return -1;
+    }
+
+    entry = get_pt_entry(virt, 0);
+    if (entry == 0) return -1;
+    e = *entry;
+    flags = (uint32_t)(e & 0xFFFU);
+    if ((flags & (PTE_PRESENT | PTE_USER)) != (PTE_PRESENT | PTE_USER)) return -1;
+
+    phys = (uint32_t)(e & PAE_ADDR_MASK);
+
+    if ((prot & VMM_PROT_WRITE) != 0U) {
+        bool added_cow = false;
+
+        /* “共享但没有 PTE_COW” 会出现在“先 mprotect 只读、再 fork”的路径，
+         * 这里临时打上 PTE_COW，让 vmm_cow_fault() 用同一套复制逻辑。 */
+        if ((flags & PTE_COW) == 0U && pmm_page_ref(phys) > 1U) {
+            *entry |= PTE_COW;
+            added_cow = true;
+            flags |= PTE_COW;
+        }
+
+        if ((flags & PTE_COW) != 0U) {
+            if (!vmm_cow_fault((uint32_t)virt)) {
+                if (added_cow) *entry &= ~(uint64_t)PTE_COW;   /* 回滚临时标记 */
+                return -1;
+            }
+            entry = get_pt_entry(virt, 0);
+            if (entry == 0) return -1;
+            e = *entry;
+            flags = (uint32_t)(e & 0xFFFU);
+            if ((flags & PTE_PRESENT) == 0U) return -1;
+            phys = (uint32_t)(e & PAE_ADDR_MASK);
+        }
+    }
+
+    /* 只改权限位，保留物理地址与 PWT/PCD/DIRTY 等既有位。
+     * 显式清写时必须同时清 PTE_COW：#PF 的写时复制路径看到 COW 就会把页
+     * 改成可写，那会让 mprotect(PROT_READ) 形同虚设。COW 只表示“fork 共享、
+     * 写时复制”，不能用来表达用户显式要求的只读。 */
+    e &= ~(uint64_t)(PTE_WRITE | PTE_COW);
+    if ((prot & VMM_PROT_WRITE) != 0U) {
+        e |= PTE_WRITE;
+    }
+
+    if (vmm_nx_enabled) {
+        if ((prot & VMM_PROT_EXEC) != 0U) e &= ~PTE_NX_BIT;
+        else e |= PTE_NX_BIT;
+    }
+
+    *entry = e;
+    __asm__ volatile ("invlpg (%0)" : : "r"(virt) : "memory");
+    return 0;
+}
+
 void vmm_map_range(uintptr_t virt, uintptr_t phys, size_t size, uint32_t flags)
 {
     if (size == 0) return;

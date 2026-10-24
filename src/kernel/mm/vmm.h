@@ -16,6 +16,13 @@
 #define PTE_COW      0x200   /* 软件位：该页是 fork COW 页，写入时允许复制 */
 #define PTE_NOEXEC   0x800   /* 软件位：映射时设置 NX（用于只读 rodata） */
 
+/* mprotect 的 prot 位：数值与 include/abi.h 的 PROT_* 保持一致。
+ * PROT_NONE=0 在本实现里等价“只读 + NX”（见 docs/process-memory.md §5.5）。 */
+#define VMM_PROT_NONE   0x0U
+#define VMM_PROT_READ   0x1U
+#define VMM_PROT_WRITE  0x2U
+#define VMM_PROT_EXEC   0x4U
+
 typedef uint64_t pde_t;
 typedef uint64_t pte_t;
 
@@ -58,6 +65,12 @@ int vmm_unmap_page(unsigned int virt);
 unsigned int vmm_get_phys(unsigned int virt);
 /* 查询虚拟页的低 12 位页表标志（用于区分只读代码页与 COW 页） */
 unsigned int vmm_user_flags(unsigned int virt);
+
+/* 修改当前地址空间一个用户页的保护位（mprotect 的底层实现）：
+ * prot 取 VMM_PROT_* 组合。请求写时若页是 COW/共享会先私有化；
+ * 清写且物理页仍被引用时置 PTE_COW；执行位用 NX 表达。
+ * 成功返回 0；非用户页/未映射/对齐或参数非法/COW 复制失败返回 -1。 */
+int vmm_protect_page(uintptr_t virt, uint32_t prot);
 
 /* 把一块虚拟页映射成“用户可访问”（PDE 与 PTE 都带 U/S 位） */
 int vmm_map_user_page(unsigned int virt, unsigned int phys, unsigned int flags);
