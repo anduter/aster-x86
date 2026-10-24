@@ -6,7 +6,7 @@
  * 没有阻塞 accept、命名空间和服务注册表，这些留给 supervisor。
  * ============================================================================= */
 #include "port.h"
-#include "channel.h"
+#include "include/svc.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
 #include "include/proc.h"

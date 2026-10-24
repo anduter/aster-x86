@@ -2,7 +2,7 @@
 #define PROC_PROC_H
 
 #include "../types.h"
-#include "cap.h"
+#include "include/security.h"
 
 /* 进程表上限与线程栈大小 */
 #define PROC_MAX          24

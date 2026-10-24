@@ -1,6 +1,6 @@
 #include "interrupt.h"
 #include "../../types.h"
-#include "../../panic.h"
+#include "include/kernel.h"
 #include "../proc.h"
 #include "../../user/user_mode.h"
 #include "../../core/ksym.h"

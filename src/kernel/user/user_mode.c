@@ -13,8 +13,8 @@
  * 这样 `_start(int argc, char **argv)` 用普通 cdecl 就能读到参数。
  * ============================================================================= */
 #include "user_mode.h"
-#include "user_layout.h"
-#include "gdt.h"
+#include "include/mm.h"
+#include "include/proc.h"
 #include "../types.h"
 #include "include/mm.h"
 #include "include/mm.h"

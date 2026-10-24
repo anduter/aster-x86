@@ -4,7 +4,7 @@
  * 链接地址 0x9800；loader 已把 kernel.bin 放在 0x100000。
  * 验证通过后跳到内核入口 0x100008；失败向 COM1 报错并停机。
  * ============================================================================= */
-#include "../kernel/core/trust.h"
+#include "../kernel/security/trust.h"
 #include "verify_support.h"
 
 extern const uint8_t kernel_signature[256];

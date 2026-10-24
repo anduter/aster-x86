@@ -24,7 +24,7 @@
 #include "../../dev/device.h"
 #include "../../dev/block/block.h"
 #include "../../fs/pipe.h"
-#include "../../panic.h"
+#include "include/kernel.h"
 #include "../../dev/rtc.h"
 #include "../../dev/pci.h"
 #include "../../dev/net/e1000.h"

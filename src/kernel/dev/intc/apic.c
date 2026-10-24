@@ -14,9 +14,9 @@
 #include "../../proc/smp.h"
 #include "../../core/error.h"
 #include "../../mm/vmm.h"
-#include "../../intr/interrupt.h"
-#include "../../intr/syscall.h"
-#include "../../panic.h"
+#include "include/proc.h"
+#include "include/proc.h"
+#include "include/kernel.h"
 #include "../../lib/kprintf.h"
 
 #define MSR_APIC_BASE    0x1BU

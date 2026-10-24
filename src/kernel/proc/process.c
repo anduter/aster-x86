@@ -12,7 +12,7 @@
 #include "include/proc.h"
 #include "include/proc.h"
 #include "include/fs.h"
-#include "../ipc/pipe.h"
+#include "include/fs.h"
 #include "include/proc.h"
 #include "include/proc.h"
 #include "include/mm.h"

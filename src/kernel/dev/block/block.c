@@ -7,7 +7,7 @@
  * ============================================================================= */
 #include "block.h"
 #include "../../lib/string.h"
-#include "../../core/device.h"
+#include "include/dev.h"
 #include "../../core/error.h"
 
 static block_device_t blk_table[BLK_MAX];
