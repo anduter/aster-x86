@@ -186,3 +186,23 @@ et.h（M5）、svc.h（M6）、security.h（M7）、userland.h（M8）、pps.h�
 - **结果：跨模块 include 违规 137 → 0**，回归 **97/97 PASS**。
 
 当前 35 个转发头仍在（部分同目录 include 仍指向它们）；删除它们需要先把 proc/proc.h 这类“同目录旧名”引用改到接口头，属于下一步清理。
+
+## 7. syscall 拆分完成（2026-10-24 21:2x）
+
+proc/trap/syscall.c：**978 → 75 行**，0 个 case SYS_，只剩入口 + 沙箱检查 + 7 个委派 + delegate_out。
+
+| 组 | 文件 | 行数 | 归属模块 |
+|---|---|---|---|
+| net | 
+et/net_syscall.c | 129 | M5 |
+| fs | s/fs_syscall.c | 373 | M4 |
+| proc | proc/proc_syscall.c | 125 | M1 |
+| mm | mm/mm_syscall.c | 123 | M2 |
+| svc | svc/svc_syscall.c | 132 | M6 |
+| security | security/security_syscall.c | 37 | M7 |
+| misc | core/misc_syscall.c | 173 | M0（调试/杂项） |
+
+规则：所有组统一 et = xxx_syscall(f); goto delegate_out;，唯一出口执行
+->eax = ret; proc_check_signals(f);；沙箱拒绝仍是直接 return（与拆分前一致）。
+共享辅助在 proc/trap/syscall_util.c（sys_getchar_block 等已导出，未复制实现）。
+1..57 号调用全部有归属（57/57）。
