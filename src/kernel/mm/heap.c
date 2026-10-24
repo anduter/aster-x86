@@ -84,6 +84,10 @@ static void* malloc_locked(size_t size)
 {
     if (size == 0) return NULL;
 
+    /* size + ALIGN_MASK 会回绕成小值，后面按小 size 分裂块就会把堆写穿。
+     * 单个块不可能超过整个堆，先挡掉明显越界的请求。 */
+    if (size > HEAP_SIZE - HEADER_SIZE) return NULL;
+
     /* 申请大小按 4 字节向上取整 */
     size = (size + ALIGN_MASK) & ~ALIGN_MASK;
 
@@ -130,9 +134,20 @@ static void* malloc_locked(size_t size)
 /* 释放内存（相邻空闲块会被合并） */
 static void free_locked(void* ptr)
 {
+    uintptr_t p;
+    uintptr_t base = (uintptr_t)HEAP_BASE;
+    block_t* block;
+
     if (!ptr) return;
 
-    block_t* block = (block_t*)((uint8_t*)ptr - HEADER_SIZE);
+    p = (uintptr_t)ptr;
+
+    /* 先把指针限制在堆范围内再解引用块头：野指针直接读 block->magic 可能
+     * 正好命中可读内存里的伪魔数，把无关数据当成块头改坏。 */
+    if (p < base + HEADER_SIZE || p >= base + HEAP_SIZE) return;
+    if (((p - base - HEADER_SIZE) & ALIGN_MASK) != 0U) return;  /* 不是 malloc 返回的地址 */
+
+    block = (block_t*)((uint8_t*)ptr - HEADER_SIZE);
 
     /* 校验魔数，拦住野指针和重复释放 */
     if (block->magic != BLOCK_MAGIC || !block->used) {

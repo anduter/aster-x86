@@ -121,7 +121,8 @@ static int fat_set(uint32_t cluster, uint16_t value)
     return 0;
 }
 
-/* 分配一个空闲簇并清零 */
+/* 分配一个空闲簇并清零；任何一步失败都把刚占用的 FAT 项还回去，
+ * 否则会留下"FAT 里已占用、目录里没人引用"的永久簇泄漏。 */
 static uint32_t cluster_alloc(void)
 {
     for (uint32_t c = 2; c < fat.cluster_count + 2U; c++) {
@@ -130,7 +131,10 @@ static uint32_t cluster_alloc(void)
             /* 清零 */
             for (uint32_t s = 0; s < fat.sec_per_cluster; s++) {
                 memset(sec_buf, 0, sizeof(sec_buf));
-                if (write_sector(cluster_lba(c) + s, sec_buf) != 0) return 0;
+                if (write_sector(cluster_lba(c) + s, sec_buf) != 0) {
+                    (void)fat_set(c, 0);        /* 回滚：别泄漏这个簇 */
+                    return 0;
+                }
             }
             return c;
         }
@@ -251,42 +255,57 @@ static int find_free_entry(uint32_t *out_lba, uint32_t *out_idx)
 int fat16_mount(const char *blk_name, const char *drive)
 {
     block_device_t *dev = blk_lookup(blk_name);
-    uint32_t root_secs, data_start, clusters;
+    uint8_t sb[512];
+    uint32_t sector_size, sec_per_cluster, reserved, fats, root_entries;
+    uint32_t total_sectors, fat_sectors, root_secs, data_start, clusters;
 
     if (dev == 0) return E_NOENT;
     if (dev->sector_size != 512U) return E_INVAL;
 
-    if (blk_read(dev, 0, sec_buf) != E_OK) return E_INVAL;
-    if (sec_buf[510] != 0x55U || sec_buf[511] != 0xAAU) return E_INVAL;
+    if (blk_read(dev, 0, sb) != E_OK) return E_INVAL;
+    if (sb[510] != 0x55U || sb[511] != 0xAAU) return E_INVAL;
 
-    fat.dev = dev;
-    fat.sector_size = rd16(sec_buf + 11);
-    fat.sec_per_cluster = sec_buf[13];
-    fat.reserved = rd16(sec_buf + 14);
-    fat.fats = sec_buf[16];
-    fat.root_entries = rd16(sec_buf + 17);
-    fat.total_sectors = rd16(sec_buf + 19);
-    fat.fat_sectors = rd16(sec_buf + 22);
-    if (fat.total_sectors == 0U) fat.total_sectors = rd32(sec_buf + 32);
+    /* 先解析到局部变量，全部校验通过后再提交。
+     * 原实现先把 fat.dev 等字段写成新盘的值再去校验，任一条失败都会留下
+     * "mounted 还是旧值、几何字段却是新盘/半解析"的状态；重新挂载失败时
+     * 甚至会把原本可用的挂载点弄坏。 */
+    sector_size = rd16(sb + 11);
+    sec_per_cluster = sb[13];
+    reserved = rd16(sb + 14);
+    fats = sb[16];
+    root_entries = rd16(sb + 17);
+    total_sectors = rd16(sb + 19);
+    fat_sectors = rd16(sb + 22);
+    if (total_sectors == 0U) total_sectors = rd32(sb + 32);
 
-    if (fat.sector_size != 512U || fat.sec_per_cluster == 0U ||
-        fat.fats == 0U || fat.fat_sectors == 0U || fat.root_entries == 0U) {
+    if (sector_size != 512U || sec_per_cluster == 0U ||
+        fats == 0U || fat_sectors == 0U || root_entries == 0U) {
         return E_INVAL;
     }
 
-    root_secs = (fat.root_entries * 32U + fat.sector_size - 1U) / fat.sector_size;
-    data_start = fat.reserved + fat.fats * fat.fat_sectors + root_secs;
-    if (fat.total_sectors <= data_start) return E_INVAL;
-    clusters = (fat.total_sectors - data_start) / fat.sec_per_cluster;
+    root_secs = (root_entries * 32U + sector_size - 1U) / sector_size;
+    data_start = reserved + fats * fat_sectors + root_secs;
+    if (total_sectors <= data_start || total_sectors > dev->sector_count) {
+        return E_INVAL;
+    }
+    clusters = (total_sectors - data_start) / sec_per_cluster;
 
     /* 4085..65524 才是 FAT16；否则是 FAT12/FAT32 */
     if (clusters < 4085U || clusters > 65524U) {
         kprintf("fat16: not FAT16 (clusters=%u)\n", (unsigned int)clusters);
-        fat.dev = 0;
         return E_INVAL;
     }
 
-    fat.root_start = fat.reserved + fat.fats * fat.fat_sectors;
+    /* 全部校验通过：这里才提交状态 */
+    fat.dev = dev;
+    fat.sector_size = sector_size;
+    fat.sec_per_cluster = sec_per_cluster;
+    fat.reserved = reserved;
+    fat.fats = fats;
+    fat.root_entries = root_entries;
+    fat.total_sectors = total_sectors;
+    fat.fat_sectors = fat_sectors;
+    fat.root_start = reserved + fats * fat_sectors;
     fat.root_sectors = root_secs;
     fat.data_start = data_start;
     fat.cluster_count = clusters;
@@ -318,7 +337,7 @@ int fat16_listdir(const char *rel, uint32_t index, char *name, uint32_t max,
     if (rel != 0 && *rel_of(rel) != '\0') return E_NOENT;   /* 只有根目录 */
 
     for (uint32_t s = 0; s < fat.root_sectors; s++) {
-        if (read_sector(fat.root_start + s, sec_buf) != 0) return E_NOENT;
+        if (read_sector(fat.root_start + s, sec_buf) != 0) return E_INVAL;
         for (uint32_t i = 0; i < fat.sector_size / 32U; i++) {
             fat_dirent_t *de = (fat_dirent_t *)(void *)(sec_buf + i * 32U);
             if ((uint8_t)de->name[0] == 0x00U) return E_NOENT;
@@ -359,15 +378,29 @@ int fat16_unlink(const char *rel)
 {
     fat_dirent_t de;
     uint32_t lba = 0, idx = 0;
+    int r;
 
     if (!fat.mounted) return E_NOENT;
-    if (find_root_entry(rel, &de, &lba, &idx) != 0) return E_NOENT;
+    r = find_root_entry(rel, &de, &lba, &idx);
+    if (r == E_NOENT) return E_NOENT;
+    if (r != 0) return E_INVAL;             /* 读盘失败 != 文件不存在 */
 
-    cluster_free_chain(de.cluster_lo);
+    /* 打开中的目录项不能删：删掉后簇链被回收，读句柄仍按旧的 first_cluster
+     * 继续读，读到的是已被别的文件复用的簇（数据串台）。 */
+    for (int i = 0; i < FAT16_MAX_HANDLES; i++) {
+        if (handles[i].used && handles[i].dir_lba == lba && handles[i].dir_idx == idx) {
+            return E_BUSY;
+        }
+    }
 
+    /* 先让目录项失效，再回收簇链：反过来的话，写完目录项失败会留下
+     * "目录项仍有效、簇却已释放"的半删除状态，原文件从此读出来是垃圾。 */
     if (read_sector(lba, sec_buf) != 0) return E_INVAL;
     sec_buf[idx * 32U] = 0xE5U;
-    return (write_sector(lba, sec_buf) == 0) ? E_OK : E_INVAL;
+    if (write_sector(lba, sec_buf) != 0) return E_INVAL;
+
+    cluster_free_chain(de.cluster_lo);
+    return E_OK;
 }
 
 int fat16_mkdir(const char *rel)
@@ -399,14 +432,17 @@ int fat16_open(const char *rel, uint32_t flags)
 
         r = find_root_entry(rel, &de, &handles[h].dir_lba, &handles[h].dir_idx);
         if (r == 0) {
-            /* 已存在：截断 */
+            /* 已存在：截断。先清目录项再释放旧簇链，避免写目录项失败后
+             * 留下"目录项仍指向已释放簇"的半截文件。 */
+            uint32_t old_chain = de.cluster_lo;
+
             if ((de.attr & 0x10U) != 0U) { handles[h].used = false; return -1; }
-            cluster_free_chain(de.cluster_lo);
             if (read_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
             wr16(sec_buf + handles[h].dir_idx * 32U + 26U, 0);
             wr32(sec_buf + handles[h].dir_idx * 32U + 28U, 0);
             if (write_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
-        } else {
+            cluster_free_chain(old_chain);
+        } else if (r == E_NOENT) {
             /* 新建目录项 */
             if (to_83(rel, handles[h].name) != 0) { handles[h].used = false; return -1; }
             if (find_free_entry(&handles[h].dir_lba, &handles[h].dir_idx) != 0) {
@@ -419,6 +455,10 @@ int fat16_open(const char *rel, uint32_t flags)
             memcpy(slot, handles[h].name, 11);
             slot[11] = 0x20U;                   /* archive */
             if (write_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
+        } else {
+            /* 读盘失败：绝不能当成"文件不存在"去新建目录项，否则会重复建项 */
+            handles[h].used = false;
+            return -1;
         }
         return h;
     }
@@ -478,6 +518,8 @@ int fat16_write(int h, const void *buf, uint32_t len)
     if (h < 0 || h >= FAT16_MAX_HANDLES || !handles[h].used) return -1;
     fh = &handles[h];
     if (!fh->write) return -1;
+    if (buf == 0 && len != 0U) return -1;
+    if (len == 0U) return 0;
 
     while (done < len) {
         uint32_t cluster_bytes = fat.sec_per_cluster * 512U;
@@ -485,10 +527,12 @@ int fat16_write(int h, const void *buf, uint32_t len)
 
         if (fh->cur_cluster < 2U) {
             uint32_t c = cluster_alloc();
-            if (c == 0U) return -1;
+            /* 盘满且一个字节都没写出去：返回错误而不是 0（0 会被当成"成功写了 0 字节"） */
+            if (c == 0U) return (done > 0U) ? (int)done : -1;
             if (fh->first_cluster < 2U) {
                 fh->first_cluster = c;
             } else if (fat_set(fh->cur_cluster, (uint16_t)c) != 0) {
+                (void)fat_set(c, 0);            /* 回滚：这个簇还没挂上链 */
                 return -1;
             }
             fh->cur_cluster = c;
@@ -510,8 +554,11 @@ int fat16_write(int h, const void *buf, uint32_t len)
 
         if (fh->offset % cluster_bytes == 0U) {
             uint32_t c = cluster_alloc();
-            if (c == 0U) break;                 /* 盘满：已写部分保留 */
-            if (fat_set(fh->cur_cluster, (uint16_t)c) != 0) return -1;
+            if (c == 0U) break;                 /* 盘满：已写部分保留，不预分配 */
+            if (fat_set(fh->cur_cluster, (uint16_t)c) != 0) {
+                (void)fat_set(c, 0);
+                return -1;
+            }
             fh->cur_cluster = c;
         }
     }
@@ -521,20 +568,26 @@ int fat16_write(int h, const void *buf, uint32_t len)
 int fat16_close(int h)
 {
     fat_handle_t *fh;
+    int r = 0;
 
     if (h < 0 || h >= FAT16_MAX_HANDLES || !handles[h].used) return -1;
     fh = &handles[h];
 
     if (fh->write) {
-        if (read_sector(fh->dir_lba, sec_buf) != 0) return -1;
-        uint8_t *slot = sec_buf + fh->dir_idx * 32U;
-        wr16(slot + 26U, (uint32_t)(uint16_t)fh->first_cluster);
-        wr32(slot + 28U, fh->size);
-        if (write_sector(fh->dir_lba, sec_buf) != 0) return -1;
+        if (read_sector(fh->dir_lba, sec_buf) != 0) {
+            r = -1;
+        } else {
+            uint8_t *slot = sec_buf + fh->dir_idx * 32U;
+            wr16(slot + 26U, (uint32_t)(uint16_t)fh->first_cluster);
+            wr32(slot + 28U, fh->size);
+            if (write_sector(fh->dir_lba, sec_buf) != 0) r = -1;
+        }
     }
 
+    /* 无论持久化成败都必须还槽位：原实现失败时直接 return -1，
+     * 这个 fd 槽就永久泄漏，反复失败会把 FAT16 8 个句柄耗尽。 */
     memset(fh, 0, sizeof(*fh));
-    return 0;
+    return r;
 }
 
 /* =============================================================================

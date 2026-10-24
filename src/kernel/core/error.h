@@ -11,5 +11,6 @@
 #define E_EXIST  (-6)   /* 已存在 */
 #define E_FULL   (-7)   /* 表已满 */
 #define E_ACCES  (-8)   /* 权限不足 */
+#define E_BUSY   (-9)   /* 对象仍被引用/占用（例如删除打开中的文件） */
 
 #endif

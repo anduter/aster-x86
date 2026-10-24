@@ -103,6 +103,7 @@ static int svc_close(int h)
     uint8_t req[64];
     uint32_t client = 0;
     svc_handle_t *s;
+    int r = 0;
 
     if (h < 0 || h >= (int)SVC_MAX_HANDLES || !handles[h].used) return -1;
     s = &handles[h];
@@ -115,18 +116,27 @@ static int svc_close(int h)
             client = 0;
             proc_sleep_ticks(1U);
         }
-        if (client == 0U) return -1;
-        req[0] = 'w';
-        memcpy(req + 1, s->data, n);
-        (void)chan_send(client, req, n + 1U);
-        (void)chan_recv_block(client, req, sizeof(req));
-        chan_release(client);
+        if (client == 0U) {
+            r = -1;                     /* 服务不可用：数据没写出去，但槽位必须还 */
+        } else {
+            req[0] = 'w';
+            memcpy(req + 1, s->data, n);
+            /* 原实现忽略 send/recv 的返回值：命令只发了一半、或服务端没确认，
+             * close 仍返回 0，脏数据被静默丢弃。这里向上报错。 */
+            if (chan_send(client, req, n + 1U) != (int)(n + 1U)) {
+                r = -1;
+            } else if (chan_recv_block(client, req, sizeof(req)) < 0) {
+                r = -1;
+            }
+            chan_release(client);
+        }
     }
 
+    /* 无论成功与否都释放槽位，否则失败一次就永久少一个 svc: 句柄 */
     s->used = false;
     s->dirty = false;
     s->len = s->off = 0;
-    return 0;
+    return r;
 }
 
 static int svc_ref(int h)

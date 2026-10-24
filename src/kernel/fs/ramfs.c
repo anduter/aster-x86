@@ -316,6 +316,17 @@ static fs_file_t *handle_from(uint32_t handle)
     return (fs_file_t *)data;
 }
 
+/* 节点是否还有打开的句柄。删除一个仍被引用的节点会把槽位清零，
+ * node_alloc() 随后可能把同一槽位复用给新文件——旧句柄就会静默读写到
+ * 别人的数据（跨文件数据泄漏/状态损坏）。所以删除前必须拒绝。 */
+static bool node_is_open(const fs_node_t *node)
+{
+    for (uint32_t i = 0; i < FS_MAX_OPEN; i++) {
+        if (handles[i].used && handles[i].node == node) return true;
+    }
+    return false;
+}
+
 /* ==================== 卷管理 ==================== */
 
 void fs_init(void)
@@ -552,6 +563,10 @@ int fs_read(uint32_t handle, void *buf, uint32_t len)
     if (f == 0 || buf == 0) return E_TYPE;
     if ((f->flags & FS_OPEN_READ) == 0U) return E_INVAL;
 
+    /* 偏移超出节点当前大小说明节点被截断/回收过：无符号相减会下溢成巨大值，
+     * 直接拒绝，避免越界读（正常路径 offset 永远 <= size）。 */
+    if (f->offset > f->node->size) return E_INVAL;
+
     n = f->node->size - f->offset;
     if (n > len) n = len;
 
@@ -568,15 +583,21 @@ int fs_write(uint32_t handle, const void *buf, uint32_t len)
     if (f == 0 || buf == 0) return E_TYPE;
     if ((f->flags & FS_OPEN_WRITE) == 0U) return E_INVAL;
 
-    space = FS_FILE_MAX - f->offset;
-    if (len > space) len = space;
+    /* 超过单文件上限时整次写入失败，一个字节都不写。
+     * 不能"截断后返回短计数"：内核侧调用点大多把"返回值 == len"当成功，
+     * 截断写入会让文件停在半截状态；而返回 0 又和"成功写了 0 字节"混淆。
+     * 也不允许先写满再让下一次失败——那样原文件内容已被部分覆盖。 */
+    space = (f->offset < FS_FILE_MAX) ? (FS_FILE_MAX - f->offset) : 0U;
+    if (len > space) return E_NOSPC;
 
     memcpy(f->node->data + f->offset, buf, len);
     f->offset += len;
     if (f->offset > f->node->size) {
         f->node->size = f->offset;
     }
-    f->node->mtime = rtc_now();         /* 记录最后修改时间 */
+    if (len != 0U) {
+        f->node->mtime = rtc_now();     /* 记录最后修改时间 */
+    }
     return (int)len;
 }
 
@@ -676,6 +697,7 @@ int fs_unlink(const char *path, uint32_t uid, uint32_t gid)
 
     node = find_child(dir, name);
     if (node == 0) return E_NOENT;
+    if (node_is_open(node)) return E_BUSY;
     if (node->type == FS_TYPE_DIR && node->first_child != 0) return E_NOSPC;
 
     unlink_child(dir, node);
@@ -925,6 +947,8 @@ int fs_format_disk(const char *blk_name)
     uint8_t zero[BLK_SECTOR];
 
     if (blk == 0) return E_NOENT;
+    /* 设备至少要能放下超级块 + inode 表 + 一个数据扇区，否则格式不完整。 */
+    if (blk->sector_count < DISK_DATA_LBA + 1U) return E_NOSPC;
 
     memset(&super, 0, sizeof(super));
     super.magic[0] = 'X'; super.magic[1] = 'F'; super.magic[2] = 'S'; super.magic[3] = '1';
@@ -954,6 +978,7 @@ int fs_sync(const char *blk_name)
     uint32_t data_lba = DISK_DATA_LBA;
 
     if (blk == 0) return E_NOENT;
+    if (blk->sector_count < DISK_DATA_LBA + 1U) return E_NOSPC;
 
     dump_count = 0;
     memset(dump_inodes, 0, sizeof(dump_inodes));
@@ -992,6 +1017,19 @@ int fs_sync(const char *blk_name)
     return blk_write(blk, 0U, &super);
 }
 
+/* 从盘恢复失败时把内存树清回一致的空状态。
+ * 恢复是先清空再逐条建节点，中途失败会留下"半个文件树"：卷根已建立、
+ * 部分子节点缺失、by_index 里还有悬空父指针；之后再 open/stat 会把它当
+ * 正常卷使用，表现为偶发 E_NOENT 或访问到不该存在的目录。
+ * 这里选择"清空"而不是恢复旧树：旧树已被覆盖，清空至少是自洽状态。 */
+static int mount_disk_fail(void)
+{
+    memset(nodes, 0, sizeof(nodes));
+    memset(volumes, 0, sizeof(volumes));
+    memset(handles, 0, sizeof(handles));
+    return E_INVAL;
+}
+
 int fs_mount_disk(const char *blk_name)
 {
     block_device_t *blk = blk_lookup(blk_name);
@@ -1011,6 +1049,16 @@ int fs_mount_disk(const char *blk_name)
         return E_INVAL;
     }
 
+    /* 几何字段必须自洽且落在设备范围内。否则按 data_lba 读会越界（块层会拒绝），
+     * 但那时内存树已经清空、节点建了一半；先在"还没动内存状态"时拒绝。 */
+    if (blk->sector_count < DISK_DATA_LBA ||
+        super.inode_lba != DISK_INODE_LBA ||
+        super.inode_lba + DISK_INODE_SECT > blk->sector_count ||
+        super.data_lba < DISK_DATA_LBA ||
+        super.data_lba >= blk->sector_count) {
+        return E_INVAL;
+    }
+
     /* 清空内存里的树和句柄，准备从盘恢复 */
     memset(nodes, 0, sizeof(nodes));
     memset(volumes, 0, sizeof(volumes));
@@ -1020,7 +1068,7 @@ int fs_mount_disk(const char *blk_name)
     memset(inode_buf, 0, sizeof(inode_buf));
     for (uint32_t s = 0; s < DISK_INODE_SECT; s++) {
         if (blk_read(blk, super.inode_lba + s, inode_buf + s * BLK_SECTOR) != E_OK) {
-            return E_INVAL;
+            return mount_disk_fail();
         }
     }
     inodes = (disk_inode_t *)inode_buf;
@@ -1032,7 +1080,10 @@ int fs_mount_disk(const char *blk_name)
         if (in->used == 0U) continue;
 
         n = node_alloc();
-        if (n == 0) return E_FULL;
+        if (n == 0) {
+            (void)mount_disk_fail();
+            return E_FULL;
+        }
 
         n->type = (fs_type_t)in->type;
         n->size = in->size;
@@ -1050,7 +1101,9 @@ int fs_mount_disk(const char *blk_name)
                 uint32_t off = s * BLK_SECTOR;
                 uint32_t nbytes = n->size - off;
                 if (nbytes > BLK_SECTOR) nbytes = BLK_SECTOR;
-                if (blk_read(blk, in->data_lba + s, buf) != E_OK) return E_INVAL;
+                if (blk_read(blk, in->data_lba + s, buf) != E_OK) {
+                    return mount_disk_fail();
+                }
                 memcpy(n->data + off, buf, nbytes);
             }
         }
@@ -1069,7 +1122,7 @@ int fs_mount_disk(const char *blk_name)
         } else if (in->parent < DISK_INODE_MAX && by_index[in->parent] != 0) {
             link_child(by_index[in->parent], n);
         } else {
-            return E_INVAL;
+            return mount_disk_fail();     /* 父节点不存在的孤儿：整次挂载失败 */
         }
     }
 

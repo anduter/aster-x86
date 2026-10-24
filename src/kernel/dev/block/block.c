@@ -41,12 +41,21 @@ static block_device_t ram0 = {
 
 int blk_register(block_device_t *dev)
 {
+    int r;
+
     if (dev == 0 || dev->read == 0 || dev->write == 0) return E_INVAL;
+    if (dev->sector_size != BLK_SECTOR) return E_INVAL;   /* 本层固定 512 字节扇区 */
     if (blk_lookup(dev->name) != 0) return E_EXIST;
     if (blk_count_used >= BLK_MAX) return E_FULL;
 
+    /* 先登记到设备表：失败就不要占块设备槽位。
+     * 原实现先写 blk_table 再忽略 dev_register 的返回值，设备表满时会留下
+     * "块层能读写、但 dev_open/枚举看不到"的半注册设备。E_EXIST 表示设备表
+     * 里已经有同名项（重复初始化），可以继续登记块设备。 */
+    r = dev_register(dev->name, DEV_BLOCK, 0, 0);
+    if (r != E_OK && r != E_EXIST) return r;
+
     blk_table[blk_count_used++] = *dev;
-    dev_register(dev->name, DEV_BLOCK, 0, 0);   /* 也让设备表能看到 */
     return E_OK;
 }
 
@@ -121,6 +130,8 @@ int blk_read(block_device_t *dev, uint32_t lba, void *buf)
     int i;
 
     if (dev == 0 || buf == 0) return E_INVAL;
+    if (dev->sector_size != BLK_SECTOR) return E_INVAL;
+    if (lba >= dev->sector_count) return E_INVAL;   /* 越界请求不落到驱动 */
 
     i = cache_find(dev, lba);
     if (i >= 0) {
@@ -136,6 +147,8 @@ int blk_read(block_device_t *dev, uint32_t lba, void *buf)
 int blk_write(block_device_t *dev, uint32_t lba, const void *buf)
 {
     if (dev == 0 || buf == 0) return E_INVAL;
+    if (dev->sector_size != BLK_SECTOR) return E_INVAL;
+    if (lba >= dev->sector_count) return E_INVAL;   /* 越界请求不落到驱动 */
 
     if (dev->write(dev, lba, buf) != 0) return E_INVAL;
     cache_invalidate(dev, lba);

@@ -53,6 +53,12 @@ int pipe_read(int idx, char *dst, uint32_t len)
     for (;;) {
         uint32_t flags = spin_lock_irqsave(&pipe_lock);
 
+        /* 槽位可能已被回收并复用给别的管道：继续按 idx 读写会串到别人的数据 */
+        if (!pp->used) {
+            spin_unlock_irqrestore(&pipe_lock, flags);
+            return -1;
+        }
+
         while (n < len && pp->count > 0U) {
             dst[n++] = (char)pp->buf[pp->tail];
             pp->tail = (pp->tail + 1U) % PIPE_SIZE;
@@ -81,6 +87,12 @@ int pipe_write(int idx, const char *src, uint32_t len)
 
     for (;;) {
         uint32_t flags = spin_lock_irqsave(&pipe_lock);
+
+        /* 同 pipe_read：槽位被回收后不能再往里写 */
+        if (!pp->used) {
+            spin_unlock_irqrestore(&pipe_lock, flags);
+            return -1;
+        }
 
         while (n < len && pp->count < PIPE_SIZE) {
             pp->buf[pp->head] = (uint8_t)src[n++];

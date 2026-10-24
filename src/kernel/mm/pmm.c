@@ -114,6 +114,7 @@ void pmm_init(uint8_t* bitmap_addr, size_t mem_size)
     if (mem_size <= base) {
         pmm.total_pages = 0;
         pmm.free_pages = 0;
+        pmm_bitmap_pages = 0;       /* 别把上一次初始化留下的保留页数带进 page_is_used() */
         return;
     }
 
