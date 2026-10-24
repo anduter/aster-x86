@@ -67,3 +67,23 @@ fs: backend selftest ok
 - 本会话只写 `src/kernel/fs/*`、`docs/*`（新增文档）、`tools/*.ps1`；
 - 共享文件（`kernel.c`、`build.ps1`、`syscall.c`、`process.c`、`proc.h`）每次改动都在会话消息里声明，且只提交明确路径；
 - 自 11:16 起遵循 `docs/parallel-sessions.md`：`[fs]` 前缀、禁止 `git add -A`、构建前确认无 QEMU 且对方不在构建。
+
+---
+
+## 6. 更新（12:05）：回归基线恢复
+
+`build.ps1` 的收尾逻辑改成**按串口静默判完成**，全量回归回到全绿：
+
+```
+=== TEST PASS (89/89) ===
+```
+
+改动（提交 `b9df248 [test]`）：
+
+1. 注入命令后不再等固定秒数/固定标志，而是每 300ms 看 `serial.log` 长度，
+   **连续 3 秒不增长**即认为命令执行完（上限 90 秒）；
+2. `QMP quit` 之后**等进程真正退出（最多 5 秒）**再读日志，避免
+   `-serial file:` 缓冲尾部丢失导致的“假失败”。
+
+该提交只动 `build.ps1`，但文件里同时含有并行会话的未提交改动
+（`-Cpu qemu32,+nx,+smep,+smap`、UDP/TCP echo job），已在会话中声明。
