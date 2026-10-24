@@ -165,3 +165,14 @@ ative.h、syscall.h、uaccess.h）；
 3. 拆 syscall.c（57 分支）与 
 ative.c 到各模块 *_syscall.c；
 4. 全部调用点切换后删除 33 个转发头。
+
+### 第五批（17:0x）
+
+- kernel.c、panic.c/h、ersion.h 收进 core/；根目录只留 head.asm、linker.ld、io.c/h、	ypes.h 与 4 个转发头（console.h、b.h、heap.h、panic.h、ersion.h）；
+- 搬运后回归 **97/97 PASS**。
+
+指标说明：违规数从 88 变为 95，原因是 core/kernel.c 作为**组装根**现在直接 include 了 dev/proc/mm/security 等模块（core→dev 11、core→proc 7）。这属于预期的“待收口”项：
+
+1. 建 include/ 接口头（include/mm.h、include/trap.h、include/dev.h、include/fs.h、include/net.h、include/svc.h、include/security.h、include/userland.h）；
+2. core/kernel.c 改为只调各模块 *_init()（注册表式），各模块自己 include 内部头；
+3. 完成后违规应降到接近 0，再删 35 个转发头。
