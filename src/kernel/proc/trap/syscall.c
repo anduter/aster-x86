@@ -131,8 +131,8 @@ void syscall_dispatch(interrupt_frame_t *f)
 
     /* 网络组（UDP/socket）已迁到 net/net_syscall.c（M5） */
     if (net_syscall_owns(f->eax)) {
-        f->eax = (uint32_t)net_syscall(f);
-        return;
+        ret = net_syscall(f);
+        goto delegate_out;
     }
 
     /* 文件系统组已迁到 fs/fs_syscall.c（M4） */
