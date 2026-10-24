@@ -86,6 +86,19 @@ Add-Result 'tx reclaim' $m.Success (Match-Detail $m 'missing net: e1000 tx recla
 $m = [regex]::Match($text, 'net: e1000 stats rx=(\d+) tx=(\d+) irq=(\d+) polls=(\d+) drop=(\d+) reset=(\d+)')
 Add-Result 'stats' $m.Success (Match-Detail $m 'missing net: e1000 stats line')
 
+# ---- watchdog: must be deferred + completed, never the old inline form ----
+$wdDeferred = [regex]::Matches($text, 'net: e1000 tx watchdog reset \(deferred\)').Count
+$wdInline = [regex]::Matches($text, '(?m)^net: e1000 tx watchdog reset\r?$').Count
+$wdDone = [regex]::Match($text, 'net: e1000 tx watchdog reset done').Success
+if ($wdDeferred -gt 0) {
+    $detail = "deferred={0} inline={1} done={2}" -f $wdDeferred, $wdInline, $wdDone
+    Add-Result 'watchdog' (($wdInline -eq 0) -and $wdDone) $detail
+} elseif ($wdInline -gt 0) {
+    Add-Result 'watchdog' $false 'found old inline reset log (must be deferred)'
+} else {
+    Add-Result 'watchdog' $true 'not triggered this run (reset=0, bounded deferred path armed)'
+}
+
 # ---- existing protocol selftests must still be there ----
 $m = [regex]::Match($text, 'net: ARP reply gw=([0-9a-f:]+)')
 Add-Result 'ARP reply' $m.Success (Match-Detail $m 'missing net: ARP reply')

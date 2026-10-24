@@ -91,6 +91,15 @@
 
 #define E1000_DESC_STATUS_DD 0x01U
 
+/* watchdog 复位策略：
+ *  - 只在本轮 NAPI 处理里"标记"需要复位，退出 e1000_lock 后由
+ *    e1000_reset_service() 做一次；
+ *  - CTRL.RST 自清等待有界（20k 次 MMIO 读，毫秒级），远小于 NMI 看门狗
+ *    约 1s 的无进展判定，避免在持锁 + 关中断路径里长时间不返回；
+ *  - 复位后 5s（500 tick）冷却，防止硬件真坏时复位风暴。 */
+#define E1000_CTRL_RST_POLL       20000U
+#define E1000_TX_RESET_COOLDOWN   500U
+
 typedef struct {
     uint64_t addr;
     uint16_t length;
@@ -124,6 +133,8 @@ static uint32_t tx_bufs_phys;
 static uint32_t tx_head;
 static uint32_t tx_tail;
 static uint32_t tx_stall_since;          /* 在途帧开始积压的 tick（0=没有积压） */
+static volatile int tx_reset_pending;    /* 1 = 已判定需要 watchdog 复位，待锁外执行 */
+static uint32_t tx_reset_cooldown;       /* 复位后到该 tick 之前不再触发 */
 
 /* RX */
 static e1000_rx_desc_t *rx_ring;
@@ -156,6 +167,8 @@ static spinlock_t     e1000_lock = SPINLOCK_INIT;
 
 static uint32_t reg_read(uint32_t off) { return bar0[off / 4U]; }
 static void     reg_write(uint32_t off, uint32_t v) { bar0[off / 4U] = v; }
+
+static uint32_t e1000_tx_reclaim_locked(void);
 
 static int pci_find_e1000(pci_dev_t *out)
 {
@@ -275,22 +288,51 @@ static void e1000_ring_init(void)
     reg_write(E1000_IMC, 0xFFFFFFFFU);
 }
 
-/* watchdog 软复位：重新初始化环和寄存器，保留 DMA 页与 IRQ 注册。 */
+/* watchdog 软复位：重新初始化环和寄存器，保留 DMA 页与 IRQ 注册。
+ * 调用者持有 e1000_lock；等待循环有界（毫秒级），不得长时间阻塞。 */
 static void e1000_reset_locked(void)
 {
     uint32_t spin;
+    uint32_t dropped;
+    uint32_t lost_rx;
+
+    /* 先尽量回收已完成帧，剩下的才算真正丢弃 */
+    (void)e1000_tx_reclaim_locked();
+    dropped = (tx_tail + TX_DESC_COUNT - tx_head) % TX_DESC_COUNT;
+    lost_rx = rx_fifo.count;
 
     stats.resets++;
+    stats.tx_errors += dropped;
+    stats.rx_dropped += lost_rx;
 
     reg_write(E1000_CTRL, reg_read(E1000_CTRL) | E1000_CTRL_RST);
-    for (spin = 0; spin < 2000000U; spin++) {
+    /* CTRL.RST 在 QEMU 上立即自清：最多 20k 次读。旧实现 2M 次读在
+     * 持锁 + IF=0 的 NAPI 路径里可能超过 NMI 看门狗 1s 判定。 */
+    for (spin = 0; spin < E1000_CTRL_RST_POLL; spin++) {
         if ((reg_read(E1000_CTRL) & E1000_CTRL_RST) == 0U) break;
     }
 
     napi_scheduled = 0;
+    tx_reset_pending = 0;
     e1000_ring_init();
+    tx_stall_since = 0;
+    tx_reset_cooldown = timer_ticks() + E1000_TX_RESET_COOLDOWN;
     link = (reg_read(E1000_STATUS) & E1000_STATUS_LU) != 0U;
     if (irq_armed) reg_write(E1000_IMS, E1000_RX_INT_MASK);
+
+    kprintf("net: e1000 tx watchdog reset done (dropped_tx=%u dropped_rx=%u reset=%u)\n",
+            (unsigned int)dropped, (unsigned int)lost_rx, (unsigned int)stats.resets);
+}
+
+/* 锁外执行一次挂起的复位：NAPI/发送路径只标记，真正复位在这里做。 */
+static void e1000_reset_service(void)
+{
+    uint32_t flags;
+
+    if (!present) return;
+    flags = spin_lock_irqsave(&e1000_lock);
+    if (tx_reset_pending) e1000_reset_locked();
+    spin_unlock_irqrestore(&e1000_lock, flags);
 }
 
 /* ==================== IRQ：注册与延迟武装 ==================== */
@@ -389,11 +431,14 @@ static uint32_t e1000_tx_reclaim_locked(void)
             kprintf("net: e1000 tx reclaim ok (freed=%u)\n", (unsigned int)freed);
         }
     }
+    if (tx_head == tx_tail) tx_stall_since = 0;
     return freed;
 }
 
-/* 在途帧连续超过阈值（200 tick）没有回收就软复位。挂在 NAPI 调用点，
- * 不新增定时器基础设施。tick 尚未启动（boot 期）时不做判断。 */
+/* 在途帧连续超过阈值（200 tick = 2s）没有推进就标记软复位。
+ * 这里只标记并打印 (deferred)，复位在退出 e1000_lock 后由
+ * e1000_reset_service() 执行，避免在收包路径里持锁做长时间硬件操作。
+ * tick 尚未启动（boot 期）时不做判断。 */
 static void e1000_tx_watchdog_locked(void)
 {
     uint32_t ticks = timer_ticks();
@@ -404,15 +449,16 @@ static void e1000_tx_watchdog_locked(void)
         return;
     }
     if (ticks == 0U) return;                 /* boot 期 timer_ticks() 不前进 */
+    if (tx_reset_pending) return;
+    if (tx_reset_cooldown != 0U && ticks < tx_reset_cooldown) return;
     if (tx_stall_since == 0U) {              /* 本轮积压的起点 */
         tx_stall_since = ticks;
         return;
     }
     if ((ticks - tx_stall_since) <= E1000_TX_WATCHDOG_TICKS) return;
 
-    kprintln("net: e1000 tx watchdog reset");
-    stats.tx_errors += pending;
-    e1000_reset_locked();
+    tx_reset_pending = 1;
+    kprintln("net: e1000 tx watchdog reset (deferred)");
 }
 
 /* ==================== NAPI 式收包 ==================== */
@@ -484,11 +530,16 @@ int e1000_napi_poll(uint32_t budget)
 {
     uint32_t flags;
     int done;
+    int need_reset;
 
     if (!present) return 0;
     flags = spin_lock_irqsave(&e1000_lock);
     done = e1000_napi_poll_locked(budget);
+    need_reset = tx_reset_pending;
     spin_unlock_irqrestore(&e1000_lock, flags);
+
+    /* watchdog 只标记；退出锁后再做一次有界复位（见 e1000_reset_locked） */
+    if (need_reset) e1000_reset_service();
     return done;
 }
 
@@ -525,9 +576,10 @@ int e1000_init(void)
     }
     bar0 = (volatile uint32_t *)(uintptr_t)bar;
 
-    /* 先复位设备：BIOS/固件可能留下了半初始化的状态 */
+    /* 先复位设备：BIOS/固件可能留下了半初始化的状态。
+     * 等待有界（与 watchdog 复位共用同一上限），boot 期不会卡住启动。 */
     reg_write(E1000_CTRL, reg_read(E1000_CTRL) | E1000_CTRL_RST);
-    for (volatile uint32_t spin = 0; spin < 2000000U; spin++) {
+    for (volatile uint32_t spin = 0; spin < E1000_CTRL_RST_POLL; spin++) {
         if ((reg_read(E1000_CTRL) & E1000_CTRL_RST) == 0U) break;
     }
 
@@ -573,6 +625,9 @@ int e1000_init(void)
     memset(tx_buffers, 0, TX_DESC_COUNT * TX_BUF_SIZE);
     memset(rx_buffers, 0, RX_DESC_COUNT * RX_BUF_SIZE);
     memset(&stats, 0, sizeof(stats));
+    tx_reset_pending = 0;
+    tx_reset_cooldown = 0;
+    tx_stall_since = 0;
     e1000_ring_init();
 
     link = (reg_read(E1000_STATUS) & E1000_STATUS_LU) != 0U;
@@ -640,6 +695,9 @@ int e1000_send_frame(const void *frame, uint32_t len)
     if (n < 60U) n = 60U;
     if (n > TX_BUF_SIZE) return E_INVAL;
 
+    /* 已判定需要复位：先把复位做完（退出锁、有界），不要把新帧发进将死的环 */
+    if (tx_reset_pending) e1000_reset_service();
+
     flags = spin_lock_irqsave(&e1000_lock);
 
     /* 环满：先回收一轮；仍满就丢弃并计数（不再原地自旋）。 */
@@ -669,7 +727,6 @@ int e1000_send_frame(const void *frame, uint32_t len)
     mb();                               /* 描述符先可见，再敲门铃 TDT */
     reg_write(E1000_TDT, tx_tail);
 
-    if (tx_stall_since == 0U && timer_ticks() != 0U) tx_stall_since = timer_ticks();
     stats.tx_packets++;
     stats.tx_bytes += n;
 
@@ -683,6 +740,7 @@ int e1000_rx_poll(void *buf, uint32_t max_len)
 {
     uint32_t flags;
     uint32_t len;
+    int need_reset;
 
     if (!present || buf == 0) return 0;
 
@@ -690,8 +748,10 @@ int e1000_rx_poll(void *buf, uint32_t max_len)
     if (rx_fifo.count == 0U) {
         (void)e1000_napi_poll_locked(E1000_NAPI_BUDGET);
     }
+    need_reset = tx_reset_pending;
     if (rx_fifo.count == 0U) {
         spin_unlock_irqrestore(&e1000_lock, flags);
+        if (need_reset) e1000_reset_service();
         return 0;
     }
 
@@ -701,6 +761,8 @@ int e1000_rx_poll(void *buf, uint32_t max_len)
     rx_fifo.head = (rx_fifo.head + 1U) % RX_FIFO_FRAMES;
     rx_fifo.count--;
     spin_unlock_irqrestore(&e1000_lock, flags);
+
+    if (need_reset) e1000_reset_service();
     return (int)len;
 }
 
