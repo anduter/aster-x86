@@ -191,13 +191,10 @@ pmm: double-free detected
 heap: check ok (...)
 ```
 
-## 5. B 部分设计：waitpid(WNOHANG) / SIGCHLD / getppid / mprotect（待实施）
+## 5. B 部分：waitpid(WNOHANG) / SIGCHLD / getppid / mprotect（设计与实现）
 
-> 状态：设计冻结，等 API 会话（7ebab102）提交 `include/abi.h` 单一来源、
-> `ulib.*` / `user_shell.c` 迁移后实施。本节只写设计，代码尚未提交。
-> `proc/process.c`、`mm/vmm.c` 已干净、可由本会话直接修改；
-> `proc/proc_syscall.c`、`mm/mm_syscall.c`、`include/abi.h`、`src/user/*`
-> 需要等对应会话让出。
+> 状态：**已实现并合入**（ABI v1.1，minor=1）。实现记录与实测串口行见 §5.8。
+> 本节保留设计理由，便于后续维护；与实现不一致的地方以 §5.8 为准。
 
 ### 5.1 ABI：只追加编号，不改既有语义
 
@@ -330,10 +327,16 @@ unsigned int prot)`，`mm/vmm.h` 声明）：
 
 **COW 处理**（关键，否则会破坏 fork 语义）：
 
-- 请求 `PROT_WRITE` 且 PTE 带 `PTE_COW`：先 `vmm_cow_fault(va)` 私有化当前
-  进程的页（可能分配新页、清 COW、置 WRITE）；失败（OOM）→ -1。
-- 清除 `PROT_WRITE` 且 `pmm_page_ref(phys) > 1`：置 `PTE_COW`，保证将来任一
-  进程写时走 COW，而不是两个进程写同一物理页。
+- 请求 `PROT_WRITE` 且 PTE 带 `PTE_COW`（fork 共享页）：先
+  `vmm_cow_fault(va)` 私有化当前进程的页（分配新页、清 COW、置 WRITE）；
+  失败（OOM）→ -1，并回滚临时置的 COW 位。
+- 请求 `PROT_WRITE` 但 PTE 没有 COW、而 `pmm_page_ref(phys) > 1`（“先
+  mprotect 只读、再 fork”会把页变成共享只读且无 COW）：先临时打上
+  `PTE_COW` 再走 `vmm_cow_fault()`，保证复制后才可写。
+- **清除 `PROT_WRITE` 时必须同时清 `PTE_COW`**：`#PF` 的写时复制路径看到
+  COW 就会把页改成可写，如果保留 COW，`mprotect(PROT_READ)` 就形同虚设。
+  显式只读的页以后要写，必须再次 `mprotect(PROT_WRITE)`（或 fork 后的写
+  缺页），由上面的“请求写先私有化”保证不会写坏共享者。
 - 保留 `PWT/PCD/DIRTY` 等既有位，只改 `WRITE/COW/NX`。
 
 **TLB flush 策略**：
@@ -393,9 +396,9 @@ int mprotect(void *addr, unsigned int len, int prot);
 int signal(int sig, unsigned int handler);     /* SIG_DFL/SIG_IGN/用户地址 */
 ```
 
-> 以下自检是**伪代码草案**：沿用 `user_shell.c` 现有的 `sc()/putstr()/printf()`
-> 风格；`fork()/exit()/mmap()/sleep_ms()` 是现有 `sc(SYS_*)` 的简写，
-> `sleep_ms()` 可用 `sc(SYS_SLEEP, ms, 0, 0)` 代替。
+> 以下自检是**实现时的设计草案**，最终代码已按它落地（见 §5.8）；输出行保持一致。
+> 沿用 `user_shell.c` 现有的 `sc()/putstr()/printf()` 风格；`fork()/exit()/
+> mmap()/sleep_ms()` 是现有 `sc(SYS_*)` 的简写。
 
 #### 测试 1：getppid（用管道把子进程看到的 parent pid 带回父进程比较）
 
@@ -570,11 +573,67 @@ sectest: mprotect invalid ok
   不给 teardown/fork 增加新状态。
 - 新 syscall 编号只追加，`SYS_ABI_VERSION` minor++，不改任何既有编号。
 
+### 5.8 实现记录（2026-10-24，ABI v1.1）
+
+落地内容：
+
+- `include/abi.h`：`SYS_WAITPID=60`、`SYS_GETPPID=61`、`SYS_MPROTECT=62`、
+  `WNOHANG`/`PROT_*`/`SIGCHLD`/`SIG_DFL`/`SIG_IGN`，`SYS_NR_MAX=62`，
+  `OS_ABI_VERSION_MINOR` 0→1。`SYS_WAIT`(20) 未改。
+- `proc/process.c`：`proc_wait_options()`（`proc_wait()` 为 options=0 包装）、
+  `proc_getppid()`；`proc_exit_finish()` 发布 ZOMBIE 后按 `parent_pid` 发
+  SIGCHLD（ppid 在发布前取好，避免父进程并发 reap 后读到清空值）；
+  `proc_check_signals()` 对 `SIGCHLD + SIG_DFL` 清 pending 返回。
+- `proc/proc_syscall.c`：`SYS_WAITPID`/`SYS_GETPPID` 的 owns+switch。
+- `mm/vmm.c`：`vmm_protect_page()`；`mm/mm_syscall.c`：`SYS_MPROTECT`
+  （整段校验 → 逐页改，COW 私有化，NX，`invlpg`）。
+- `src/user/ulib.*`：`waitpid/getppid/mprotect/signal` 封装；
+  `src/user/user_shell.c`：`sectest` 末尾增加 11 项 B 自检。
+
+实测（`serial-pm.log`，连续 2 次 98/98）：
+
+```
+sectest: getppid ok (child sees 6, self 6)
+sectest: waitpid wnohang ok
+sectest: waitpid no-child ok
+sectest: sigchld default ignored ok
+sectest: sigchld handler ok (sigchld=1 wait=31)
+sectest: sigchld ignored ok
+sectest: mprotect ro deny ok (status=142)
+sectest: mprotect exec ok (status=0)
+sectest: mprotect nx deny ok (status=142)
+sectest: mprotect cow ok (parent byte=0xab status=0)
+sectest: mprotect invalid ok (bad=4)
+```
+
+实现中踩到/确认的点：
+
+1. **COW 语义修正**：清写必须同时清 `PTE_COW`（详见 §5.5），否则
+   `mprotect(PROT_READ)` 的页会在写缺页时被静默复制成可写；共享页要写时
+   由“请求写先私有化”路径处理。
+2. **shell 的 32KB 上限**：`/bin/shell` 装在 ramfs，单文件上限
+   `FS_FILE_MAX = 32768`。B 自检在 -O0 下把 `.text` 顶过 `0x40004000`，
+   `.rodata` 后移一页，ELF 变成 34856 字节，安装失败（`installed (-3 bytes)`，
+   shell 回退到内核内建版本、`ushell: ready` 检查失败）。
+   处理：只对“sectest 区块 + `cmd_sectest`”加
+   `#pragma GCC push_options / optimize("Os") / pop_options`（语义不变，
+   仅体积），`.text` 16311、ELF 30632，回到上限内；其余 shell 仍 -O0。
+   改动这段代码后务必用
+   `i686-elf-size -A .obj-pm/user_shell.elf` 确认 < 32768。
+3. **WNOHANG 测试节奏**：子进程先 `SYS_SLEEP 200ms`，父进程轮询用
+   `SYS_SLEEP 10ms` 循环（纯 `SYS_YIELD` 会在子进程醒来前就转完 2000 次）。
+4. **exec 自检写法**：mmap 页写一条 `ret`，`mprotect(READ|EXEC)` 后
+   `call` 它；能正常返回 = 执行权已打开，`#PF(142)` = NX 仍生效。
+5. `SYS_NR_MAX` 59→62 只用于编号校验和注释；`syscall_mask` 是 64 位，
+   bit62 仍安全，没有按旧上限分配的数组/位图。
+6. 已知限制沿用 §5.3：SIGCHLD 单 pending 槽会合并；SIG_IGN 不自动回收；
+   父进程先退出的孤儿僵尸仍不会被回收。
+
 ## 6. 已知边界 / 待办
 
-- **B 部分**：设计见 §5，尚未提交代码。阻塞方是 API 会话（7ebab102）的
-  `include/abi.h` / `src/user/ulib.*` / `user_shell.c` 迁移；`process.c` /
-  `vmm.c` 已干净可用，`proc_syscall.c` / `mm_syscall.c` 待 474e5d40 让出。
+- **B 部分**：已实现并验证（见 §5.8）。剩余可做项：`PROT_NONE` 真正的
+  present=0、SIG_IGN 自动回收、孤儿 reparent、多线程/PCID 下的远端
+  TLB shootdown、用户态 `setpriority` 与 fork 优先级继承。
 - 优先级目前只在内核内部（`sched_set_priority`）可调，还没有用户态
   `setpriority` 系统调用；fork 子进程走 `sched_enqueue` 的默认优先级 4，
   暂不继承父进程优先级（需要改 `process.c`）。
