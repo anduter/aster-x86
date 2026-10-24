@@ -588,6 +588,8 @@ int net_tcp_echo_test(void)
                 (void)net_tcp_send(src, seq + 4U, peer + (uint32_t)n + 1U, TCP_ACK, 0, 0);
                 if (n == 3 && memcmp(buf, "tcp", 3) == 0) {
                     kprintln("net: TCP echo reply");
+                    /* 此时中断已武装，再打一行统计，给测试脚本 irq>0 的证据 */
+                    e1000_stats_print();
                     return 0;
                 }
             }
@@ -626,6 +628,7 @@ void net_init(void)
     }
     if (!got_arp) {
         kprintln("net: ARP reply timeout (RDH/RDT check)");
+        e1000_stats_print();
         return;
     }
 
@@ -663,4 +666,7 @@ void net_init(void)
     /* 真实可用性自检：DHCP 取址 -> DNS 解析 -> 主动 ping 网关。
      * 全部有界超时（DHCP <= 3s），失败只降级、保留静态配置，不阻塞启动。 */
     net_boot_selftest();
+
+    /* ethtool 式统计：驱动内部计数，一行给测试脚本断言（不新增 syscall）。 */
+    e1000_stats_print();
 }
