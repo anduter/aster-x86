@@ -54,19 +54,19 @@
 src/
 ├─ boot/  loader/                  M0 启动链
 ├─ kernel/
-│  ├─ include/                     九个对外头（唯一跨模块入口）
-│  ├─ core/                        M0：kernel.c / panic / ksym / version / splash
+│  ├─ include/                     十个对外头（唯一跨模块入口）
+│  ├─ core/                        M0：kernel.c / bootseq / panic / ksym / version / splash / M0 原语 / misc_syscall
 │  ├─ lib/                         M0：kprintf、string
 │  ├─ proc/                        M1：进程、调度、switch、gdt、smp、trap/
 │  ├─ mm/                          M2：pmm、vmm、heap、object、user_layout
-│  ├─ dev/                         M3：device/pci/acpi/rtc、block/、char/、intc/
+│  ├─ dev/                         M3：device/pci/acpi/rtc、block/、char/、intc/、net/
 │  ├─ fs/                          M4：vfs、ramfs、fat16、svcfs、blkfs、pipe
 │  ├─ net/                         M5：net 协议栈（e1000 在 dev/net）
 │  ├─ svc/                         M6：service、supervisor、channel、port
 │  ├─ security/                    M7：trust、cap、cpu features
 │  ├─ user/                        M8 内核侧：loader、entry、program registry
 │  └─ apps/                        内核启动的服务程序
-└─ user/                           M8 用户态：ulib、programs/、services/
+└─ user/                           M8 用户态：ulib、user_shell、链接脚本
 ```
 
 依赖方向（单向）：
@@ -76,7 +76,7 @@ M0 → M2 → M1 → M3 → M4
               ↘ M5
 M6 →（M1/M2/M4/M5）
 M7 →（M1/M2/M4）
-M8 → 只依赖 include/abi.h
+M8 → 只依赖用户态 ABI（src/user/ulib.h）
 ```
 
 ## 4. 硬指标
@@ -84,10 +84,10 @@ M8 → 只依赖 include/abi.h
 | 指标 | 阈值 | 检查方式 |
 |---|---|---|
 | `core/kernel.c` | ≤ 120 行，只含注册表 + init 调用 | 人工 + 行数 |
-| `core/` 内容 | 只允许 kernel.c / panic / ksym / version / splash | 目录清单 |
-| 跨模块 include | 只能走 `include/<mod>.h` | `tools/check-deps.ps1` |
+| `core/` 内容 | kernel.c / bootseq.c / panic / ksym / splash / version / M0 原语 / misc_syscall | 目录清单 |
+| 跨模块 include | 只能走 `include/<mod>.h`（syscall 子系统 11 条白名单见第 8 节） | `tools/check-deps.ps1` |
 | 每模块文档 | `docs/modules/<mod>.md`（职责/接口/依赖/不变量/拒绝） | 目录检查 |
-| ring3 程序位置 | `src/user/programs/` 或 `src/user/services/` | 目录检查 |
+| ring3 程序位置 | `src/user/`（ulib、user_shell）；内核侧加载器在 `kernel/user/` | 目录检查 |
 | 自检代码 | 各模块 `*_selftest.c`，不得进 `kernel.c` | 人工 |
 
 ## 5. 迁移清单（按风险从低到高）
@@ -95,114 +95,149 @@ M8 → 只依赖 include/abi.h
 | 步 | 动作 | 状态 |
 |---|---|---|
 | 0 | 本文 + `tools/check-deps.ps1` 基线 | ✅ |
-| 1 | M2：`heap`、`object`、`user_layout` 迁入 `mm/` | 进行中 |
-| 2 | M7：`trust`、`cap`、`cpu` 迁入 `security/` | 待做 |
-| 3 | M3：`block/`、`device/pci/acpi/rtc`、`fb/console`、`intc/` 迁入 `dev/` | 待做 |
-| 4 | M6：`service`、`channel` 迁入 `svc/` | 待做 |
-| 5 | M5：`net` 迁入 `net/`，`e1000` 迁入 `dev/net/` | 待做（`net.c` 在别的会话工作区） |
-| 6 | M1：`smp/percpu`、`idl/fault/trap`、`gdt` 迁入 `proc/` | 待做 |
-| 7 | M8：三个程序目录合并到 `src/user/`，ABI 头唯一化 | 待做（`user_mode`/`user_demo` 在别的会话工作区） |
-| 8 | 拆 `syscall.c` / `native.c` 到各模块 `*_syscall.c` | 待做 |
+| 1 | M2：`heap`、`object`、`user_layout` 迁入 `mm/` | ✅ |
+| 2 | M7：`trust`、`cap`、`cpu` 迁入 `security/` | ✅ |
+| 3 | M3：`block/`、`device/pci/acpi/rtc`、`fb/console`、`intc/` 迁入 `dev/` | ✅ |
+| 4 | M6：`service`、`channel` 迁入 `svc/` | ✅ |
+| 5 | M5：`net` 迁入 `net/`，`e1000` 迁入 `dev/net/` | ✅ |
+| 6 | M1：`smp/percpu`、`idt/fault/trap`、`gdt` 迁入 `proc/` | ✅ |
+| 7 | M8：内核侧加载器归 `kernel/user/`，用户态 ulib/shell 归 `src/user/` | ✅（程序注册表仍需再收口） |
+| 8 | 拆 `syscall.c` 到各模块 `*_syscall.c` | ✅（978 → 75 行） |
+| 9 | M6 `port` 并入 `svc/`，删除 `ipc/` | ✅（第 8 节） |
 
-> 规则：**处于其它会话未提交状态（`git status` 显示 M/??）的文件，等归属会话提交后再搬**，避免路径冲突。
-
-## 6. 迁移进展（2026-10-24 16:50）
+## 6. 迁移进展（截至 2026-10-24 21:5x）
 
 | 项 | 迁移前 | 现在 |
 |---|---|---|
-| 内核目录 | core 45 文件混杂 | core 25 文件（18 个转发头 + ksym/splash/atomics/error/ab 桩） |
+| 内核目录 | core 45 文件混杂 | core 15 文件（启动骨架 + M0 原语 + misc_syscall 组） |
 | 新模块目录 | — | `mm/ proc/ dev/{block,net,intc,char} net/ svc/ security/` |
-| 跨模块 include 违规 | 137 | **88**（已排除 33 个转发头、以及 error/atomic/spinlock 原语） |
-| 回归 | 94/94 | **97/97 PASS**（每批搬完后复测） |
+| 跨模块 include 违规 | 137 | **0**（含 11 条显式白名单，见第 8 节） |
+| 回归 | 94/94 | **97/97 PASS** |
 
 已落地：
 
-- **M2 内存**：`heap.c/h`、`object.c/h`、`user_layout.h` → `mm/`（`docs/modules.md` 步骤 1）；
+- **M2 内存**：`heap.c/h`、`object.c/h`、`user_layout.h` → `mm/`；
 - **M7 安全**：`trust`、`cpu`、`cap` → `security/`；
 - **M3 设备**：`device/pci/acpi/rtc` → `dev/`；`ata/block` → `dev/block/`；`apic/ioapic/madt` → `dev/intc/`；`e1000` → `dev/net/`；
-- **M6 服务**：`service`、`service_selftest`、`channel` → `svc/`；
+- **M6 服务**：`service`、`service_selftest`、`channel`、`port` → `svc/`；
 - **M1 进程**：`smp`、`percpu`、`gdt` → `proc/`；
-- **M0**：`demo` → `apps/`。
-
-暂缓（文件处于其它会话未提交状态，等提交后再搬）：
-
-- `core/net.c`（M5 网络）、`core/supervisor.c`（M6）、`core/program.c`（M8）；
-- `fs/fs.h`、`fs/vfs.c`、`fs/svcfs.c`、`fs/blkfs.c`（M4，其中后两个是新增未跟踪文件）；
-- `intr/syscall.c`、`intr/syscall.h`、`proc/proc.h`、`proc/process.c`、`ipc/port.h`、`user/user_mode.*`、`user/user_demo.asm`、`apps/svcwatch.c`、`kernel.c`、`version.h`。
-
-下一步（按风险）：
-
-1. `console.c`/`fb.c` → `dev/char/`（根目录深度变化，需要转发头 + 内部 include 调整）；
-2. `intr/{idt,fault,interrupt,uaccess*}` → `proc/trap/`（M1 陷阱入口）；
-3. `core/net.c` → `net/`（等 net 会话提交）；
-4. 拆 `syscall.c` 到各模块 `*_syscall.c`（最大收益，最后做）；
-5. 全部调用点切到新路径后，删除 19 个转发头与 `core/` 里的空壳。
-
-### 第三批（16:5x）
-
-- console.c/h、b.c/h → dev/char/（根目录转发头保留）；
-- ipc/pipe.c/h → s/（pipe 属 fd 语义）；
-- core/net.c/h → 
-et/；
-- core/supervisor.c/h → svc/；
-- core/program.c/h → user/（M8 程序注册表）；
-- 新增 	ools/fix-includes.ps1：按 basename 自动重写相对 include（跳过转发头，冲突只报告不改）。
-
-剩余：intr/（trap/异常/系统调用门）→ proc/trap/；根目录 kernel.c/panic.c/heap.h 收口；syscall.c 拆分。
-
-### 第四批（17:0x）
-
-- intr/ 全部迁入 proc/trap/：idt.c、ault.c、interrupt.h、irq.c、isr.asm、
-ative.c/h、syscall.c/h、uaccess*.c/asm；
-- intr/ 只剩 5 个转发头（ault.h、interrupt.h、
-ative.h、syscall.h、uaccess.h）；
-- 搬运后回归 **97/97 PASS**，跨模块违规降到 **88**。
-
-剩余工作：
-
-1. 建 include/ 模块接口头（mm.h/intr.h/dev.h/fs.h/net.h/svc.h/security.h/userland.h），把现有 88 处直接 include 收口；
-2. 根目录 kernel.c、panic.c 收进 core/，heap.h 等旧转发头清理；
-3. 拆 syscall.c（57 分支）与 
-ative.c 到各模块 *_syscall.c；
-4. 全部调用点切换后删除 33 个转发头。
-
-### 第五批（17:0x）
-
-- kernel.c、panic.c/h、ersion.h 收进 core/；根目录只留 head.asm、linker.ld、io.c/h、	ypes.h 与 4 个转发头（console.h、b.h、heap.h、panic.h、ersion.h）；
-- 搬运后回归 **97/97 PASS**。
-
-指标说明：违规数从 88 变为 95，原因是 core/kernel.c 作为**组装根**现在直接 include 了 dev/proc/mm/security 等模块（core→dev 11、core→proc 7）。这属于预期的“待收口”项：
-
-1. 建 include/ 接口头（include/mm.h、include/trap.h、include/dev.h、include/fs.h、include/net.h、include/svc.h、include/security.h、include/userland.h）；
-2. core/kernel.c 改为只调各模块 *_init()（注册表式），各模块自己 include 内部头；
-3. 完成后违规应降到接近 0，再删 35 个转发头。
-
-### 第六批（17:2x）：接口层落地
-
-- 新建 src/kernel/include/ 十个接口头：kernel.h（M0）、proc.h（M1）、mm.h（M2）、dev.h（M3）、s.h（M4）、
-et.h（M5）、svc.h（M6）、security.h（M7）、userland.h（M8）、pps.h（内置程序）；
-- 	ools/converge-includes.ps1：按“解析真实目标模块”把跨模块 include 改写为 include/<mod>.h（跳过转发头）；
-- 手工收口剩余 27 处经转发头的 include；
-- **结果：跨模块 include 违规 137 → 0**，回归 **97/97 PASS**。
-
-当前 35 个转发头仍在（部分同目录 include 仍指向它们）；删除它们需要先把 proc/proc.h 这类“同目录旧名”引用改到接口头，属于下一步清理。
+- **M0**：`demo` → `apps/`，`kernel.c`、`bootseq.c`、`panic`、`ksym`、`version`、`splash` → `core/`；
+- **接口层**：`include/` 十个模块头，跨模块 include 全部改走接口头；
+- **转发头**：已全部删除（`FORWARD_H` 计数 0）。
 
 ## 7. syscall 拆分完成（2026-10-24 21:2x）
 
-proc/trap/syscall.c：**978 → 75 行**，0 个 case SYS_，只剩入口 + 沙箱检查 + 7 个委派 + delegate_out。
+`proc/trap/syscall.c`：**978 → 约 100 行**（按换行符计；`Get-Content | Measure-Object -Line`
+口径约 85 个非空行，旧记录 75 为不一致口径，不再使用），0 个 `case SYS_`，
+只剩入口 + 沙箱检查 + 7 个委派 + `delegate_out`。
 
-| 组 | 文件 | 行数 | 归属模块 |
+| 组 | 文件 | 归属模块 |
+|---|---|---|
+| net | `net/net_syscall.c` | M5 |
+| fs | `fs/fs_syscall.c` | M4 |
+| proc | `proc/proc_syscall.c` | M1 |
+| mm | `mm/mm_syscall.c` | M2 |
+| svc | `svc/svc_syscall.c` | M6 |
+| security | `security/security_syscall.c` | M7 |
+| misc | `core/misc_syscall.c` | M0（调试/杂项） |
+
+规则：所有组统一 `ret = xxx_syscall(f); goto delegate_out;`，唯一出口执行
+`f->eax = ret; proc_check_signals(f);`；沙箱拒绝仍是直接 `return`（与拆分前一致）。
+共享辅助在 `proc/trap/syscall_util.c`（`sys_getchar_buffer`/`copy_user_string`/`fd_*` 等已导出，未复制实现）。
+1..58 号调用全部有归属（58/58；58 号为 fs 会话的 rename，未含在本次提交）。
+
+## 8. 架构收尾（2026-10-24 21:5x）
+
+### 8.1 check-deps 重写与真实违规量
+
+旧版 `check-deps.ps1` 只匹配 `../<mod>/` 与 `<mod>/` 两种写法，凡是 `../../<mod>/` 全部漏计。
+本次改为「以包含文件所在目录解析相对路径，再回退 `-I src/kernel`」，`../`、`../../`、`include/...` 一视同仁。
+
+按新规则复测，收尾前真实跨模块 include 共 **60 处**：
+
+- 35 处为旧版报告（7 个新拆 `*_syscall.c` 直接 include `../proc/...`、`../fs/...` 等）；
+- 25 处为旧版漏计：19 处在 `proc/trap/{native,irq,idt,uaccess,syscall_util}.c` 与
+  `dev/{intc/apic,intc/ioapic,net/e1000}.c`，6 处是 `proc/trap/syscall.c` 对六个组头的 include。
+
+处理结果：**49 处改为接口头（或删除冗余 include），11 处进入白名单，剩余 0 处**。
+
+### 8.2 白名单（逐条，脚本与本节必须同步）
+
+规则 A：`proc/trap/syscall_internal.h` 是 syscall 层内部共享辅助头（`copy_user_string`、
+`make_abs_path`、`fd_alloc` 等），只允许 syscall 组文件 `*_syscall.c`（以及 `syscall.c`、
+`syscall_util.c`）包含。它不是模块公开 API，不放进 `include/`。
+
+| # | 包含方 | 被包含头 | 理由 |
 |---|---|---|---|
-| net | 
-et/net_syscall.c | 129 | M5 |
-| fs | s/fs_syscall.c | 373 | M4 |
-| proc | proc/proc_syscall.c | 125 | M1 |
-| mm | mm/mm_syscall.c | 123 | M2 |
-| svc | svc/svc_syscall.c | 132 | M6 |
-| security | security/security_syscall.c | 37 | M7 |
-| misc | core/misc_syscall.c | 173 | M0（调试/杂项） |
+| 1 | `core/misc_syscall.c` | `../proc/trap/syscall_internal.h` | syscall 子系统共享辅助（规则 A） |
+| 2 | `fs/fs_syscall.c` | `../proc/trap/syscall_internal.h` | syscall 子系统共享辅助（规则 A） |
+| 3 | `mm/mm_syscall.c` | `../proc/trap/syscall_internal.h` | syscall 子系统共享辅助（规则 A） |
+| 4 | `net/net_syscall.c` | `../proc/trap/syscall_internal.h` | syscall 子系统共享辅助（规则 A） |
+| 5 | `svc/svc_syscall.c` | `../proc/trap/syscall_internal.h` | syscall 子系统共享辅助（规则 A） |
 
-规则：所有组统一 et = xxx_syscall(f); goto delegate_out;，唯一出口执行
-->eax = ret; proc_check_signals(f);；沙箱拒绝仍是直接 return（与拆分前一致）。
-共享辅助在 proc/trap/syscall_util.c（sys_getchar_block 等已导出，未复制实现）。
-1..57 号调用全部有归属（57/57）。
+规则 B：七个 `*_syscall.h` 是 syscall 子系统的**组分发接口**（`xxx_syscall_owns` /
+`xxx_syscall`），由唯一分发器 `proc/trap/syscall.c` 包含；它们是 syscall 子系统的内部契约，
+不是各模块对外的公开头。
+
+| # | 包含方 | 被包含头 | 理由 |
+|---|---|---|---|
+| 6 | `proc/trap/syscall.c` | `../../net/net_syscall.h` | syscall 组分发（规则 B） |
+| 7 | `proc/trap/syscall.c` | `../../fs/fs_syscall.h` | syscall 组分发（规则 B） |
+| 8 | `proc/trap/syscall.c` | `../../mm/mm_syscall.h` | syscall 组分发（规则 B） |
+| 9 | `proc/trap/syscall.c` | `../../svc/svc_syscall.h` | syscall 组分发（规则 B） |
+| 10 | `proc/trap/syscall.c` | `../../security/security_syscall.h` | syscall 组分发（规则 B） |
+| 11 | `proc/trap/syscall.c` | `../../core/misc_syscall.h` | syscall 组分发（规则 B） |
+
+（`proc/proc_syscall.h` 属同模块 include，不占白名单。）
+
+白名单之外的放行项只有：同模块 include、`include/<mod>.h`、`lib/`、M0 原语
+（`core/error.h`、`core/atomic.h`、`core/spinlock.h`）。其余一律计违规。
+
+### 8.3 ipc → svc 搬迁
+
+- `src/kernel/ipc/port.c`、`port.h` → `src/kernel/svc/port.c`、`port.h`（`git mv`，保留历史）；
+- `include/svc.h` 的 `#include "ipc/port.h"` 改为 `#include "svc/port.h"`；
+- `proc/trap/native.c` 不再直接 include `../../ipc/port.h` / `../../svc/*.h`，统一走 `include/svc.h`；
+- `ipc/` 目录已删除，无兼容空壳；`build.ps1` 按目录递归收集 `.c`，`svc/port.c` 自动进构建；
+- 引用点复核：`git grep "ipc/"` 仅剩历史文档（`docs/driver-service.md`、`docs/status-2026-10-24.md`、
+  `docs/error-paths.md` 的旧记号），以及 `fs/pipe.c`、`svc/channel.c` 的文件头历史注释。
+
+### 8.4 接口头收口
+
+- `include/*.h` 不再包含任何 `*_internal.h`（checker 专项检查为 0）；
+- `include/proc.h` 新增 `proc_root_set()` 公开声明：`fs_syscall.c` 原先直接 include
+  `proc/proc_internal.h` 只为这一个函数，现改为 `include/proc.h`，实现仍留在 `proc/process.c`；
+- `fs/fs_syscall.c` 去掉重复的 `../dev/block/block.h`（`include/dev.h` 已包含）；
+- `dev/intc/apic.c` 去掉重复的 `include/proc.h` 与冗余 `../../proc/smp.h`；
+- `proc/trap/idt.c` 去掉冗余 `../../core/ksym.h`（`include/kernel.h` 已包含）。
+
+### 8.5 死文件与遗留 TODO 清单
+
+| 项 | 结论 |
+|---|---|
+| `TODO` / `FIXME` / `XXX`（`src/kernel`、`tools/`） | 0 处，无需清理 |
+| 空的 `apps/*.h` | 不存在；6 个头均有内容，且由 `include/apps.h` 统一导出 |
+| 零字节 / 仅 guard 的源文件 | 不存在 |
+| 转发头（`FORWARD_H`） | 0 个（此前已全部删除） |
+| `ipc/` 空目录 | 已删除 |
+| 未被任何代码引用的 `.c` | 未发现；`build.ps1` 递归编译 `src/kernel/**/*.c` |
+| 旧迁移脚本 `tools/converge-includes.ps1`、`fix-includes.ps1` | 一次性工具，现无调用点；保留作历史参考，不参与构建 |
+| 文档遗留 | `docs/driver-service.md` 仍写 `ipc/channel.c`；`docs/error-paths.md` 仍以 `ipc/port.c` 记录审计（历史快照）。本次不改（非本任务文档范围），留待文档会话统一 |
+
+### 8.6 验证
+
+- `tools/check-deps.ps1`：**module include violations: 0**，whitelisted 11，interface layer 0；
+- 连续两次 `tools\session-run.ps1 -Name arch -Test`：**97/97 PASS**（2026-10-24 21:2x，第二次接第一次无改动）；
+- 构建：`-Wall -Wextra -Werror`，**0 warning**；
+- 代码提交：`c3e6457`（[refactor] 模块边界收口，含 fs_syscall.c/h 的 include 收口）；
+  fs 的 rename 功能随后由 `ae20490` 合入主线；
+- 约束：未改 syscall 号 / ABI / 测试项 / `build.ps1`；未提交 `.obj-*`、`.dist-*`、
+  `serial*.log`、`logs*.log`、`.session/`。
+
+### 8.7 未完成 / 待并行会话
+
+- `net/net.c`、`net/net.h`、`proc/process.c`、`proc/switch.asm`、`mm/vmm.c`、`src/user/*` 的未提交改动
+  未触碰（属并行会话）；如它们合并后再出现新的跨模块 include，按同一 checker 规则处理；
+- M8 程序注册表（`kernel/user/program.c`）与用户态目录的最终合并仍可继续收口，但不影响模块边界；
+- 文档历史记号（`docs/driver-service.md` 的 `ipc/channel.c`、`docs/error-paths.md` 的 `ipc/port.c` 审计快照）
+  仍未改；属其它文档范围，已在 8.5 记录。
