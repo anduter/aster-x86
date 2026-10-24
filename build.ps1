@@ -211,7 +211,16 @@ foreach ($f in $asmFiles) {
     $rel = $f.FullName.Substring((Resolve-Path 'src/kernel').Path.Length + 1)
     $obj = Join-Path $objRoot ($rel -replace '\.asm$', '.o')
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $obj) | Out-Null
-    if (Test-ObjectFresh $obj $f.FullName) { $skipped++; $objs += $obj; continue }
+    # user_blob.asm incbin 了 user_shell.elf，但 elf 不在增量判据里：
+    # shell 变化后必须强制重汇编，否则嵌入旧 blob（trust 验签失败 / 假失败）。
+    $forceBlob = $false
+    if ($rel -eq 'user\user_blob.asm' -or $rel -eq 'user/user_blob.asm') {
+        $shellElf = Join-Path $objRoot 'user_shell.elf'
+        if ((Test-Path $shellElf) -and ((-not (Test-Path $obj)) -or ((Get-Item $shellElf).LastWriteTimeUtc -gt (Get-Item $obj).LastWriteTimeUtc))) {
+            $forceBlob = $true
+        }
+    }
+    if ((-not $forceBlob) -and (Test-ObjectFresh $obj $f.FullName)) { $skipped++; $objs += $obj; continue }
     Write-Host ("  [{0}]" -f $rel) -ForegroundColor DarkGray
     & nasm -f elf32 -i $objRoot -p $nasmInc $f.FullName -o $obj
 
