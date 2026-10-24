@@ -133,7 +133,7 @@ ring3 用户程序
 
 - 内核与用户态编译启用 `-Wall -Wextra -Werror`；
 - `build.ps1 -Test` 自动启动 QEMU、注入命令、断言串口日志；
-- 当前回归 83 项全绿；
+- 当前回归 88 项全绿；
 - 新增 W^X 加载断言；
 - P3.1 将用户地址布局收敛到 `user_layout.h`，栈、堆、蹦床页互不重叠。
 
@@ -203,7 +203,7 @@ ring3 用户程序
 - demo 尝试打开 `system:/bin/shell`（legacy）和 `HANDLE_DUP`（native）：
   - `sandbox: open denied`
   - `sandbox: native denied`
-- 当前回归 83 项，两项都是硬断言。
+- 当前回归 88 项，两项都是硬断言。
 - 局限：策略仍按程序名硬编码；尚未升级为基于句柄权限的 capability 沙箱。
 
 ### 4.12 RSA 签名包 / 执行时验签
@@ -304,9 +304,14 @@ data/stack/heap RW+NX。`err=15` 的栈/rodata 取指回归证明 NX 真正生�
 | Channel 阻塞唤醒 | `native: channel block ok`；子进程 sleep 后 send，父进程从 CHAN wait key 唤醒 |
 | Service registry | `native: service ok`；name → Port 注册/发现，再 connect/accept |
 | Supervisor | `native: supervisor ok`；服务循环 accept/查询 registry/回复，`proc_block` 不再假醒 |
+| Supervisor 服务 | `echosvc: online`；supervisor + echosvc 由 boot 启动，manifest 检查 echo |
+| Supervisor 自动重启 | `supervisor: restart echo -> pid N`；停止 echosvc、检测缺失、重新 spawn 并等注册 |
+| Restart 后可用 | `native: restart ok`；重新 service_connect echo 并完成 serv 往返 |
+| VFS namespace | `sectest: chroot ok`；per-process root 侧表，rooted 后拒绝 `..` 越界 |
 | ring3 AP | `ring3 AP probe ok`；最小 write/exit 用户程序固定 AP，独立于 fork/IPC |
 | Service manifest | `native: manifest ok`；supervisor 检查 supervisor + echo 服务清单 |
 | 网络 RX/UDP | `net: ARP reply`、`net: ICMP echo reply`、`net: UDP echo reply`；e1000 RX + ARP/ICMP/UDP |
+| TCP | 实验性：`net: TCP echo reply` 曾通过，但偶发丢 echo，当前不计入硬回归 |
 | 用户态 UDP | `sectest: udp ok`；SYS_UDP_SEND/RECV + 宿主回显 |
 | socket fd | `sectest: socket udp ok`；socket→sendto→recvfrom→close，fd rights |
 | Port IPC | `native: port ok`；create → connect → accept（含阻塞 accept）→ channel 数据 |

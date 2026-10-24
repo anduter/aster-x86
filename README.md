@@ -599,7 +599,11 @@ ushell: argc=2 argv0=foo
 63. `native: handle revoke ok`（revoke 后句柄失效，close 仍可释放对象引用）；
 64. `net: UDP echo reply`（QEMU 用户网络 + 宿主 PowerShell UDP 回显）；
 65. `sectest: udp ok`（ring3 通过 SYS_UDP_SEND/RECV 完成 UDP echo）；
-66. `sectest: socket udp ok`（socket → sendto → recvfrom → close）。
+66. `sectest: socket udp ok`（socket → sendto → recvfrom → close）；
+67. `supervisor: restart echo -> pid N`（supervisor 停止并重新拉起 echosvc）；
+68. `sectest: chroot ok`（per-process namespace，rooted 后 `..` 越界被拒绝）；
+69. `native: restart ok`（重启后重新连接 echo 并完成数据往返）；
+70. `net: TCP echo reply`（实验性最小 TCP client；偶发丢 echo，不计入硬回归）。
 
 失败时返回非 0，可直接接到 CI。
 

@@ -341,7 +341,7 @@ user_demo_start:
     mov eax, 0x50
     mov ecx, manifest_ok_len
     int 0x80
-    jmp .native_done
+    jmp .restart_test
 
 .restart_test:
     sub esp, 24
@@ -357,8 +357,8 @@ user_demo_start:
     mov ebx, [esp]
     mov ecx, ebp
     add ecx, restart_name - .here
-    mov edx, 7
-    mov eax, 0x31               ; CHANNEL_SEND "restart"
+    mov edx, 12
+    mov eax, 0x31               ; CHANNEL_SEND "restart-echo"
     int 0x80
     test eax, eax
     js .restart_fail
@@ -369,9 +369,38 @@ user_demo_start:
     mov edx, 8
     mov eax, 0x36               ; CHANNEL_RECV_BLOCK
     int 0x80
-    cmp eax, 7
+    cmp eax, 2
     jne .restart_fail
-    cmp dword [esp + 4], 0x77617073  ; "spaw"
+    cmp word [esp + 4], 0x6B6F   ; "ok"
+    jne .restart_fail
+
+    ; 重启后重新按名字连接 echo，确认新服务可用
+    mov ebx, ebp
+    add ebx, svc_name - .here
+    mov ecx, 4
+    mov eax, 0x39               ; SERVICE_CONNECT echo
+    int 0x80
+    test eax, eax
+    js .restart_fail
+    mov [esp], eax
+
+    mov ebx, [esp]
+    mov ecx, ebp
+    add ecx, svc_msg - .here
+    mov edx, 4
+    mov eax, 0x31
+    int 0x80
+    test eax, eax
+    js .restart_fail
+
+    mov ebx, [esp]
+    lea ecx, [esp + 4]
+    mov edx, 16
+    mov eax, 0x36
+    int 0x80
+    cmp eax, 4
+    jne .restart_fail
+    cmp dword [esp + 4], 0x76726573  ; "serv"
     jne .restart_fail
     add esp, 24
 
@@ -482,7 +511,7 @@ manifest_ok_msg:
 manifest_ok_len equ $ - manifest_ok_msg
 
 restart_name:
-    db "restart"
+    db "restart-echo"
 
 restart_ok_msg:
     db "native: restart ok", 10

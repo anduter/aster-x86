@@ -33,7 +33,7 @@ typedef enum {
 #define SIG_IGN  1U
 
 /* 每进程文件描述符表：0=stdin, 1=stdout, 2=stderr */
-#define PROC_FD_MAX 8
+#define PROC_FD_MAX 16
 
 /* fd 类型 */
 #define FD_KIND_FILE  0   /* handle = fs 句柄 */

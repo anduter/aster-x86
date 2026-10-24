@@ -9,6 +9,7 @@
 #include "../apps/heartbeat.h"
 #include "../apps/spin.h"
 #include "../apps/echosvc.h"
+#include "../apps/svcwatch.h"
 #include "../user/user_mode.h"
 
 static program_t programs[PROG_MAX];
@@ -63,6 +64,7 @@ void prog_init(void)
     prog_register("supervisor", 1, "service registry supervisor", supervisor_entry);
     prog_register("ring3probe", 1, "tiny ring3 AP probe", prog_ring3probe_entry);
     prog_register("echosvc",   1, "echo service for supervisor", echosvc_entry);
+    prog_register("svcwatch",  1, "periodic echo service watchdog", svcwatch_entry);
     prog_register("spin",      1, "busy-wait 2s (scheduler load test)", spin_entry);
 
     /* heartbeat 是验证 AP 调度/计时器的探针，亲和到 AP；其余程序按负载放置。 */

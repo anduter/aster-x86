@@ -22,6 +22,7 @@
 proc_t  proc_table[PROC_MAX];
 
 static uint32_t next_pid = 1;
+static char proc_roots[PROC_MAX][192];
 
 /* 用户栈/堆/蹦床页 ASLR：每个进程在各自区域内选择随机地址。 */
 static uint32_t aslr_state;
@@ -75,6 +76,7 @@ static uint32_t aslr_pick_slot(proc_t *self, uint32_t count, int kind)
 void proc_init(void)
 {
     memset(proc_table, 0, sizeof(proc_table));
+    memset(proc_roots, 0, sizeof(proc_roots));
     this_cpu()->current = 0;
     this_cpu()->bootstrap_esp = 0;
     next_pid = 1;
@@ -329,6 +331,7 @@ proc_t *proc_fork(struct interrupt_frame *f)
     child->user_trampoline = parent->user_trampoline;
 
     strcpy(child->cwd, parent->cwd);
+    proc_root_copy(parent, child);
     child->uid = parent->uid;               /* fork 继承身份 */
     child->gid = parent->gid;
     memcpy(child->fds, parent->fds, sizeof(child->fds));
@@ -450,7 +453,7 @@ void proc_wakeup(unsigned int chan)
     for (uint32_t i = 0; i < PROC_MAX; i++) {
         proc_t *p = &proc_table[i];
         if (p->state == PROC_BLOCKED && p->wait_chan == chan) {
-            p->state = PROC_READY;
+            sched_wake(p);
         }
     }
 }
@@ -475,7 +478,7 @@ void proc_wake_sleepers(uint32_t now)
         proc_t *p = &proc_table[i];
         if (p->state == PROC_BLOCKED && p->wait_chan == PROC_WAIT_SLEEP) {
             if ((int32_t)(now - p->wake_at) >= 0) {
-                p->state = PROC_READY;
+                sched_wake(p);
             }
         }
     }
@@ -497,7 +500,7 @@ void proc_send_signal(proc_t *p, int sig)
 
     /* 被阻塞的进程要醒过来才有机会处理信号 */
     if (p->state == PROC_BLOCKED) {
-        p->state = PROC_READY;
+        sched_wake(p);
     }
 }
 
@@ -644,6 +647,39 @@ void proc_exit(int code)
         }
         proc_switch_to(next);
     }
+}
+
+/* VFS namespace 侧表：按进程槽位保存 root，避免动 proc_t 布局。 */
+static int proc_slot(proc_t *p)
+{
+    if (p == 0 || p < proc_table || p >= proc_table + PROC_MAX) return -1;
+    return (int)(p - proc_table);
+}
+
+const char *proc_root_of(proc_t *p)
+{
+    int i = proc_slot(p);
+
+    return (i >= 0) ? proc_roots[i] : "";
+}
+
+int proc_root_set(proc_t *p, const char *root)
+{
+    int i = proc_slot(p);
+
+    if (i < 0 || root == 0) return -1;
+    strncpy(proc_roots[i], root, sizeof(proc_roots[i]) - 1U);
+    proc_roots[i][sizeof(proc_roots[i]) - 1U] = '\0';
+    return 0;
+}
+
+void proc_root_copy(proc_t *parent, proc_t *child)
+{
+    int pi = proc_slot(parent);
+    int ci = proc_slot(child);
+
+    if (pi < 0 || ci < 0) return;
+    memcpy(proc_roots[ci], proc_roots[pi], sizeof(proc_roots[ci]));
 }
 
 proc_t *proc_current(void)

@@ -41,6 +41,9 @@ void percpu_init_bsp(uint32_t apic_id, uint32_t discovered)
         per_cpu[i].runq_mask = 0;
         per_cpu[i].preempt_off = 0;
         per_cpu[i].ready = false;
+        per_cpu[i].current = 0;
+        per_cpu[i].bootstrap_esp = 0;
+        per_cpu[i].idle_active = false;
     }
 
     if (discovered == 0U) discovered = 1U;

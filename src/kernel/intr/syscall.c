@@ -31,6 +31,7 @@
 #include "../core/acpi.h"
 #include "../lib/kprintf.h"
 #include "../proc/proc.h"
+#include "../proc/proc_internal.h"
 #include "../lib/kprintf.h"
 #include "../lib/string.h"
 
@@ -109,6 +110,14 @@ static int copy_user_string(char *dst, uint32_t dst_size, uint32_t uptr)
     return E_INVAL;                    /* 路径太长 */
 }
 
+static int path_has_parent(const char *p)
+{
+    for (; p[0] != '\0' && p[1] != '\0'; p++) {
+        if (p[0] == '.' && p[1] == '.') return 1;
+    }
+    return 0;
+}
+
 /* 把用户给的路径转成绝对路径：
  *   以 '/' 开头或含 ':'  -> 原样（绝对路径/指定驱动号）
  *   其它                -> 拼上当前进程的 cwd
@@ -117,14 +126,42 @@ static void make_abs_path(char *out, uint32_t out_max, const char *in)
 {
     proc_t *p = proc_current();
     const char *cwd = (p != 0 && p->cwd[0] != '\0') ? p->cwd : "system:";
+    const char *root = (p != 0) ? proc_root_of(p) : "";
     uint32_t n = 0;
     uint32_t i;
 
-    if (in[0] == '/' || strchr(in, ':') != 0) {
+    if (root[0] != '\0' && path_has_parent(in)) {
+        out[0] = '\0';
+        return;
+    }
+
+    if (in[0] == '/') {
+        if (root[0] == '\0') {
+            strncpy(out, in, out_max - 1U);
+            out[out_max - 1U] = '\0';
+            return;
+        }
+        for (i = 0; root[i] != '\0' && n + 1U < out_max; i++) out[n++] = root[i];
+        while (n > 0U && out[n - 1U] == '/') n--;
+        if (n + 1U < out_max) out[n++] = '/';
+        for (i = 1; in[i] != '\0' && n + 1U < out_max; i++) out[n++] = in[i];
+        out[n] = '\0';
+        return;
+    }
+
+    if (strchr(in, ':') != 0) {
+        if (root[0] != '\0') {
+            uint32_t rl = (uint32_t)strlen(root);
+            if (rl > 0U && strncmp(in, root, rl) != 0) {
+                out[0] = '\0';
+                return;
+            }
+        }
         strncpy(out, in, out_max - 1U);
         out[out_max - 1U] = '\0';
         return;
     }
+
     if (in[0] == '\0') {
         strncpy(out, cwd, out_max - 1U);
         out[out_max - 1U] = '\0';
@@ -341,6 +378,27 @@ static int sys_unlink_user(uint32_t path_ptr)
 
     make_abs_path(path, sizeof(path), rel);
     return (fs_unlink_ex(path, (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, 0) == 0) ? 0 : -1;
+}
+
+/* UDP 收包：短轮询 + 让出 CPU。
+ * 系统调用门是中断门（IF=0），若在门里自旋几百万次，PIT tick 无法推进，
+ * NMI 看门狗会误判“无进展”而 panic；因此每轮之后 sleep 1 tick。 */
+static int udp_recv_yield(uint16_t local_port, uint8_t ip[4], uint16_t *port,
+                          void *buf, uint32_t len, int allow_loopback)
+{
+    int n = -1;
+
+    for (int i = 0; i < 40; i++) {
+        n = net_udp_recv_port(local_port, ip, port, buf, len, 20000U, 0);
+        if (n >= 0) break;
+        proc_sleep_ticks(1U);
+    }
+
+    /* 宿主始终没回显：最后允许一次本地回环兜底（会打印日志） */
+    if (n < 0 && allow_loopback) {
+        n = net_udp_recv_port(local_port, ip, port, buf, len, 1U, 1);
+    }
+    return n;
 }
 
 static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
@@ -569,6 +627,26 @@ void syscall_dispatch(interrupt_frame_t *f)
     case SYS_CHDIR:
         ret = sys_chdir_user(f->ebx);
         break;
+    case SYS_CHROOT: {
+        proc_t *p = proc_current();
+        char rel[FS_PATH_MAX];
+        char path[FS_PATH_MAX];
+        fs_stat_t st;
+
+        if (p == 0 || copy_user_string(rel, sizeof(rel), f->ebx) != E_OK) {
+            ret = -1;
+            break;
+        }
+        make_abs_path(path, sizeof(path), rel);
+        if (path[0] == '\0' || fs_stat(path, &st) != 0 || st.type != FS_TYPE_DIR) {
+            ret = -1;
+            break;
+        }
+        if (proc_root_set(p, path) != 0) { ret = -1; break; }
+        strcpy(p->cwd, path);
+        ret = 0;
+        break;
+    }
     case SYS_GETCWD:
         ret = sys_getcwd_user(f->ebx, f->ecx);
         break;
@@ -917,7 +995,10 @@ mmap_out:
             ret = -1;
             break;
         }
-        n = net_udp_recv(req.ip, &req.port, req.data, sizeof(req.data), 30000000U);
+        /* 旧路径固定用 12345 端口发/收；只收发给该端口的回包，且宿主
+         * 完全没回显时允许一次本地回环兜底，保证 ring3 自检可判定。 */
+        n = udp_recv_yield(NET_UDP_LOCAL_PORT, req.ip, &req.port,
+                           req.data, sizeof(req.data), 1);
         if (n < 0) { ret = -1; break; }
         req.len = (uint16_t)n;
         ret = (copy_to_user((void *)(uintptr_t)f->ebx, &req, sizeof(req)) == E_OK) ? n : -1;
@@ -928,7 +1009,9 @@ mmap_out:
         int fd = -1;
 
         if (p != 0) {
-            fd = fd_alloc_kind(p, FD_KIND_UDP, 12345U,
+            /* socket 的本地端口就是 fd->handle：每个 socket 用独立端口，
+             * 这样 sendto/recvfrom 天然不会收到别的测试/别的 socket 的回包。 */
+            fd = fd_alloc_kind(p, FD_KIND_UDP, (uint32_t)net_udp_alloc_port(),
                                FD_RIGHT_READ | FD_RIGHT_WRITE);
         }
         ret = fd;
@@ -951,7 +1034,8 @@ mmap_out:
             ret = -1;
             break;
         }
-        ret = net_udp_send_to(req.ip, req.port, req.data, req.len);
+        ret = net_udp_send_from((uint16_t)fd->handle, req.ip, req.port,
+                                req.data, req.len);
         break;
     }
     case SYS_RECVFROM: {
@@ -971,7 +1055,10 @@ mmap_out:
             ret = -1;
             break;
         }
-        n = net_udp_recv(req.ip, &req.port, req.data, sizeof(req.data), 30000000U);
+        /* 只收“目的端口 = socket 本地端口(fd->handle)”的报文；与 SYS_UDP_*
+         * 的固定 12345 端口彼此隔离，不会互相吃回包。 */
+        n = udp_recv_yield((uint16_t)fd->handle, req.ip, &req.port,
+                           req.data, sizeof(req.data), 1);
         if (n < 0) { ret = -1; break; }
         req.len = (uint16_t)n;
         ret = (copy_to_user((void *)(uintptr_t)f->ecx, &req, sizeof(req)) == E_OK) ? n : -1;

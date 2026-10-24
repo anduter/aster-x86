@@ -7,6 +7,21 @@
 #include "../core/service.h"
 #include "../core/error.h"
 #include "../lib/kprintf.h"
+#include "../proc/proc.h"
+
+static int svc_port = -1;
+static volatile int svc_stop;
+
+void echosvc_request_stop(void)
+{
+    svc_stop = 1;
+    if (svc_port >= 0) {
+        uint32_t client = 0;
+        /* 用一个 dummy 连接唤醒阻塞在 accept 的服务线程。 */
+        (void)port_connect((uint32_t)svc_port, &client);
+        if (client != 0U) chan_release(client);
+    }
+}
 
 void echosvc_entry(void)
 {
@@ -16,6 +31,8 @@ void echosvc_entry(void)
         kprintln("echosvc: no port");
         return;
     }
+    svc_port = port;
+    svc_stop = 0;
     if (service_register("echo", (uint32_t)port) != E_OK) {
         kprintln("echosvc: echo already registered");
         return;
@@ -28,8 +45,18 @@ void echosvc_entry(void)
         int n;
 
         if (port_accept_block((uint32_t)port, &server) != 0) continue;
+        if (svc_stop) {
+            chan_release(server);
+            break;
+        }
         n = chan_recv_block(server, msg, sizeof(msg));
         if (n > 0) (void)chan_send(server, msg, (uint32_t)n);
         chan_release(server);
     }
+
+    service_unregister((uint32_t)port);
+    port_release((uint32_t)port);
+    svc_port = -1;
+    kprintln("echosvc: stopped");
+    proc_exit(0);
 }

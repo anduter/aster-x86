@@ -8,7 +8,7 @@
 #define FS_PATH_MAX     256
 #define FS_FILE_MAX     32768 /* 单个文件最大字节数（放得下 ELF 程序） */
 #define FS_MAX_NODES    64    /* 节点池（文件 + 目录，所有卷共用） */
-#define FS_MAX_OPEN     8     /* 同时打开的文件句柄数 */
+#define FS_MAX_OPEN     32    /* 同时打开的文件句柄数 */
 #define FS_MAX_VOLUMES  4     /* 最多挂载几个卷（C: D: ...） */
 #define FS_DRIVE_MAX    32    /* 盘符/卷名最长 32 字节（含结尾 0） */
 
