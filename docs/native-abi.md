@@ -22,6 +22,11 @@
 | Port / Channel / Memory | 未实现，编号保留 |
 | SealedImage / sandbox | 未实现，feature bits 暂为 0 |
 
+> 命名说明：本表的 `SYS_ABI_VERSION` 指 `int 0x80` 的
+> `NATIVE_SYS_ABI_VERSION`（`0x00`，写 `struct native_abi_version`）。
+> `int 0x81` 另有一个同名标量查询 `SYS_ABI_VERSION`（编号 59，返回
+> `(OS_ABI_VERSION << 16) | feature_bits`），两套门编号空间独立，见第 18 节。
+
 > 注意：当前 `SYS_HANDLE_INFO` 的句柄值尚未通过 bootstrap 交给用户程序；
 > 用户态程序暂时只能验证 ABI 版本、调试输出和退出。句柄表已在 ring0 自检和
 > 进程生命周期中接通，等 `process_create` + bootstrap 块落地后即可从 ring3 完整使用。
@@ -260,6 +265,10 @@ Event/Timer/File/Directory/Volume/Device 的类型标签先预留，创建或打
 - `0x42–0x4f`：时间扩展
 - `0x52–0x5f`：调试扩展
 - `0x63–0x6f`：设备/DMA 扩展
+
+> 本表是 `int 0x80` 的 Native 编号。`int 0x81` 的 legacy 表（1..58，以及
+> v1 新增的 `SYS_ABI_VERSION=59`）定义在 `include/abi.h`，不要与本表混用；
+> 两套门由不同的 IDT 向量进入。
 
 ---
 
@@ -534,14 +543,37 @@ supervisor
 
 ## 15. 版本与稳定性
 
-- v0.x：实验期，允许破坏性修改；每次修改更新 `minor`。
-- v1.0：在 Native shell + FS 服务 + 签名验证 + 沙箱 + 回归测试通过后冻结。
-- 冻结后：
-  - 系统调用编号只增不减。
-  - 结构体只能追加字段，并保留 `size` 字段做版本判断。
-  - 删除的调用保留编号，返回 `E_NOSYS`。
-  - 错误码语义不变。
+### 15.1 阶段
+
+- **v0.x（当前）**：Native ABI 实验期，允许破坏性修改；每次修改更新 `minor`。
+- **v1.0（冻结条件）**：Native shell + FS 服务 + 签名验证 + 沙箱 + 回归测试全部
+  通过后冻结。冻结动作 = 在本文顶部把状态改为“v1.0 已冻结”，并在
+  `include/abi.h` 记录 `OS_ABI_VERSION_MAJOR = 1`。
+
+### 15.2 冻结后的规则（新增只追加）
+
+1. 系统调用编号只增不减；删除的调用保留编号，返回 `E_NOSYS`。
+2. 结构体只能尾部追加字段，并保留 `size` 字段做版本判断；字段偏移不得改变。
+3. 错误码语义/数值不变；新增错误码只能追加。
+4. 旧 minor 版本的程序仍可启动；加载器只拒绝不兼容的 major。
+
+### 15.3 变更流程（Native ABI）
+
+1. 先改单一来源（`proc/trap/native.h` 的编号/结构体；用户可见结构同步到
+   `include/abi.h`），再改实现；
+2. 追加编号/字段，不重排；同步更新 `_Static_assert`；
+3. 更新本文的编号表与结构说明，bump `NATIVE_ABI_MINOR`；
+4. `tools\session-run.ps1 -Name api -Test` 连续两次通过；
+5. 提交信息写清 ABI 变化（前缀 `[api]`）。
+
+### 15.4 用户态头文件 ABI
+
+`include/abi.h` 是 `int 0x81` legacy 表的单一来源，已按 **v1 冻结**
+（编号 1..59、结构体布局、错误码值；新增只能追加）。它的版本与 Native ABI
+的 `NATIVE_ABI_*` 独立，详见第 18 节。
+
 - 每个程序在 manifest 中声明 `abi`；加载器拒绝不兼容的 major 版本。
+
 
 ---
 
@@ -599,3 +631,88 @@ supervisor
 5. `SYS_DEBUG_WRITE` 在生产构建中是否保留？
 6. 兼容层是否复用 `int 0x80` 编号空间，还是使用独立 gate？
 7. 是否在 v0 就引入 `SYS_CHANNEL_CALL` 内置请求/回复，还是由 ulib 组合？
+
+---
+
+## 18. 用户态 ABI 头 `include/abi.h`（v1 冻结）
+
+### 18.1 定位
+
+`include/abi.h` 是 **legacy `int 0x81` 调用表**的单一来源，同时被内核
+（经 `proc/trap/syscall.h` 转发）和用户库（经 `src/user/ulib.h`）包含。
+它只放跨边界契约，不放实现：
+
+| 内容 | 说明 |
+|---|---|
+| `SYS_*` 编号 | 1..58 为既有调用（只迁移不改语义），59 为 v1 新增 |
+| `OS_ABI_VERSION` / `OS_ABI_MAGIC` | 头文件 ABI 版本与魔数 `0x4F534142`（"OSAB"） |
+| `OS_ABI_F_*` | `SYS_ABI_VERSION` 返回的 feature bits |
+| `struct udp_req`、`sys_stat_t`、`sys_mouse_t`、`sys_resinfo_t` | 用户可见共享结构体 |
+| `E_*` 子集 | legacy 门可能原样返回的错误码 |
+
+`syscall.h` 现在只是兼容转发（`#include "../../include/abi.h"` 加 `sys_call()`），
+7 个 `*_syscall.c` 的 `case` 一行未改。
+
+### 18.2 版本与标识
+
+```c
+#define OS_ABI_MAGIC          0x4F534142u   /* "OSAB" */
+#define OS_ABI_VERSION        1u            /* major */
+#define OS_ABI_VERSION_MAJOR  1
+#define OS_ABI_VERSION_MINOR  0
+```
+
+- 破坏性变化才 +major；追加调用/字段只 +minor。
+- 编号一旦发布不改；新增 legacy 调用从 `SYS_NR_MAX + 1`（当前 60）开始。
+- 结构体只能尾部追加字段，并同步更新 `abi.h` 末尾的 `_Static_assert`。
+
+### 18.3 `SYS_ABI_VERSION`（int 0x81，编号 59）
+
+```c
+/* 无参数 */
+return (OS_ABI_VERSION << 16) | OS_ABI_FEATURES;
+```
+
+| 位 | 含义 |
+|---|---|
+| `31..16` | `OS_ABI_VERSION`（major，当前 1） |
+| `15..0` | feature bits：`NATIVE_GATE`(bit0)、`VERSIONED_OPS`(bit1)、`DEVICE_API_V1`(bit2)、`VFS_BACKEND_V1`(bit3)、`SERVICE_MANIFEST_V1`(bit4) |
+
+用户态封装：`ulib.c` 的 `abi_version()`。需要完整
+`major/minor/patch/features` 结构时仍走 `int 0x80` 的
+`NATIVE_SYS_ABI_VERSION`（0x00），两者不冲突。
+
+### 18.4 公共结构体（布局冻结）
+
+| 结构体 | 大小 | 使用者 | 断言 |
+|---|---|---|---|
+| `struct udp_req` | 72 | `SYS_UDP_SEND/RECV`、`SYS_SENDTO/RECVFROM` | `abi.h` 固定 4 个偏移 |
+| `sys_stat_t` | 24 | `SYS_STAT` | 6 × u32 偏移 0/4/8/12/16/20 |
+| `sys_mouse_t` | 12 | `SYS_MOUSE` | 3 × s32 |
+| `sys_resinfo_t` | 40 | `SYS_RESINFO` | 10 × u32，末字段偏移 36 |
+
+`_Static_assert` 在 `-Wall -Wextra -Werror` 下必须通过；布局改动会直接
+编译失败，这是 v1 冻结的机械保证。错误码同理：`E_OK..E_BUSY` 的数值被
+`_Static_assert` 钉死。
+
+### 18.5 冻结流程（新增只追加）
+
+1. 在 `abi.h` 追加新编号（`SYS_NR_MAX + 1`）或结构体尾部字段；
+2. 更新 `OS_ABI_VERSION_MINOR` 与 `OS_ABI_F_*`（如果新增能力需要 feature bit）；
+3. 更新 `_Static_assert`（新结构体/新字段偏移）；
+4. 在对应 `*_syscall.c` 组实现（不新建编号空间、不改旧编号）；
+5. 更新本文与 `docs/api.md` 的版本表/示例；
+6. `tools\session-run.ps1 -Name api -Test` 连续两次通过；
+7. 路径限定提交，前缀 `[api]`（涉及文档用 `[docs]`）。
+
+### 18.6 启动自检
+
+`core/abi_selftest.c` 在启动 `selftests` 阶段执行（只打印，不新增回归检查项）：
+
+```text
+abi: version ok magic=4f534142 abi=1.0 features=1f structs=udp_req:72,stat:24,mouse:12,resinfo:40 api=dev1/fs1/svc1
+```
+
+它同时用纯判定函数核对三套 experimental API 的版本规则：
+`fs_backend_version_ok()`、`service_manifest_version_ok()`，以及所有已注册
+设备的 `api_version == DEV_API_VERSION`。失败打印 `abi: version FAILED ...`。

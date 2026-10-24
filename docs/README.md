@@ -9,7 +9,8 @@
 |---|---|---|
 | [`system-model.md`](system-model.md) | 总体模型：设计公理、五类对象、句柄与权限、数据流、迁移路线 | 现行 |
 | [`architecture.md`](architecture.md) | 分层与命名空间、程序/设备/文件模型、与 Linux 的差异 | 现行 |
-| [`native-abi.md`](native-abi.md) | `int 0x80` 原生 ABI：类型、句柄、错误码、IPC 消息、内存接口 | v0 已实现 |
+| [`native-abi.md`](native-abi.md) | `int 0x80` 原生 ABI：类型、句柄、错误码、IPC 消息、内存接口；`include/abi.h` v1 冻结流程 | v0 已实现 / 头文件 ABI v1 |
+| [`api.md`](api.md) | 用户态 syscall ABI、设备 ops、VFS 后端、服务 manifest 的版本策略、校验落点与变更流程 | ABI v1 冻结 |
 | [`security-model.md`](security-model.md) | 威胁模型、信任边界、已实现控制、限制、安全测试矩阵 | 现行（回归 94/94） |
 | [`driver-service.md`](driver-service.md) | 驱动服务化设计：消息格式、生命周期、分阶段计划 | 规划中（e1000 仍在核内） |
 | [`modules.md`](modules.md) | 九模块划分契约：归属决策树、依赖规则、硬指标、迁移进展 | 现行（迁移进行中） |
