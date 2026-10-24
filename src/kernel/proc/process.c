@@ -547,8 +547,25 @@ int proc_signal_set(int sig, uint32_t handler)
     return (int)old;
 }
 
+/* 确保 [start, end) 覆盖的每个用户页对当前进程可写（COW 先私有化）。
+ * 失败返回 0：调用方必须放弃写用户内存，不能让它变成内核态 #PF。 */
+static int user_range_writable(uint32_t start, uint32_t end)
+{
+    if (end <= start) return 0;
+
+    for (uint32_t va = start & ~0xFFFU; va < end; va += PAGE_SIZE) {
+        if (vmm_make_writable(va) != 0) return 0;
+    }
+    return 1;
+}
+
 /* 在用户栈上压一帧：信号帧放在高地址，handler 的新栈在其下方，
- * 这样 handler 的栈增长不会踩到保存的现场。 */
+ * 这样 handler 的栈增长不会踩到保存的现场。
+ *
+ * 注意：这是内核替用户写栈。fork 之后父进程的栈页是 COW 只读页，
+ * 直接 memcpy 会以内核态写触发 #PF(err=3) → oops（曾把 shell 杀掉）。
+ * 所以写帧前先把覆盖到的栈页私有化成可写；失败就不写、返回 0，
+ * 由 proc_check_signals() 丢弃这次投递，绝不 oops。 */
 static int deliver_signal(struct interrupt_frame *f, int sig, uint32_t handler)
 {
     proc_t *p = proc_current();
@@ -556,13 +573,17 @@ static int deliver_signal(struct interrupt_frame *f, int sig, uint32_t handler)
     uint32_t sp;
 
     if (p == 0) return 0;
-    if (frame_addr < USER_LAYOUT_STACK_GUARD_END) return 0;
+    /* 返回地址/sig 参数还要在 frame 下面 8 字节，guard 页不参与 */
+    if (frame_addr < USER_LAYOUT_STACK_GUARD_END + 8U) return 0;
     if (frame_addr + (uint32_t)sizeof(*f) > p->user_stack_top) return 0;
+
+    sp = (frame_addr - 8U) & ~3U;
+
+    if (!user_range_writable(sp, frame_addr + (uint32_t)sizeof(*f))) return 0;
 
     user_access_begin();
     memcpy((void *)(uintptr_t)frame_addr, f, sizeof(*f));
 
-    sp = (frame_addr - 8U) & ~3U;
     *(uint32_t *)(uintptr_t)sp = (p->user_trampoline != 0U)
                                      ? p->user_trampoline
                                      : USER_LAYOUT_TRAMPOLINE; /* handler 的返回地址 */
@@ -600,11 +621,20 @@ void proc_check_signals(struct interrupt_frame *f)
         return;
     }
 
-    if (handler > SIG_IGN && f != 0 && (f->cs & 3U) == 3U) {
-        if (deliver_signal(f, (int)sig, handler)) {
+    if (handler > SIG_IGN) {
+        if (f != 0 && (f->cs & 3U) == 3U &&
+            deliver_signal(f, (int)sig, handler)) {
             p->pending_sig = 0U;        /* 已投递：跳到用户 handler */
             return;
         }
+
+        /* 自定义 handler 无法投递（用户栈不可写/OOM/非用户上下文）：
+         * 丢弃这次信号并继续跑，绝不能落到下面的“默认终止”——投递失败
+         * 不能当成致命错误（SIGCHLD 曾因此把 shell 杀掉）。 */
+        p->pending_sig = 0U;
+        kprintf("proc: pid %u signal %u dropped (handler not deliverable)\n",
+                p->pid, sig);
+        return;
     }
 
     p->pending_sig = 0U;

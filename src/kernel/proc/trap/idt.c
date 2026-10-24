@@ -233,6 +233,20 @@ void isr_dispatch(interrupt_frame_t *f)
         kill_current(f);
     }
 
+    /* 内核态写用户 COW 页的兜底：信号帧、copy_to_user 等“内核替用户写内存”
+     * 的路径可能正好落在 fork 后的 COW 只读页上，err=3（present+write+supervisor）。
+     * 只处理 cr2 在用户区间、当前有进程、且 vmm_cow_fault() 确认是 COW 页的
+     * 情况；其它内核态缺页仍然 oops，避免掩盖真正的内核 bug。 */
+    if (vec == 14U && (f->cs & 3U) == 0U && proc_current() != 0) {
+        uint32_t cr2;
+        __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+        if ((f->err & 3U) == 3U &&
+            cr2 >= USER_LAYOUT_CODE_BASE && cr2 < USER_LAYOUT_MMAP_END &&
+            vmm_cow_fault(cr2)) {
+            return;                     /* 复制/恢复可写后重试指令 */
+        }
+    }
+
     /* 内核态异常：oops 而不是停机 */
     if (proc_current() != 0) {
         kernel_oops(f);

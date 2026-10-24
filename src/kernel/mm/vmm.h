@@ -68,9 +68,14 @@ unsigned int vmm_user_flags(unsigned int virt);
 
 /* 修改当前地址空间一个用户页的保护位（mprotect 的底层实现）：
  * prot 取 VMM_PROT_* 组合。请求写时若页是 COW/共享会先私有化；
- * 清写且物理页仍被引用时置 PTE_COW；执行位用 NX 表达。
+ * 清写会同时清 PTE_COW（显式只读必须真的不可写）；执行位用 NX 表达。
  * 成功返回 0；非用户页/未映射/对齐或参数非法/COW 复制失败返回 -1。 */
 int vmm_protect_page(uintptr_t virt, uint32_t prot);
+
+/* 确保一个用户页对当前进程可写：COW/共享页先私有化；显式只读页返回 -1。
+ * 内核写用户内存的路径（信号帧、copy_to_user 兜底）用它，避免内核态
+ * 写 COW 只读页触发 #PF(err=3) → oops。 */
+int vmm_make_writable(uintptr_t virt);
 
 /* 把一块虚拟页映射成“用户可访问”（PDE 与 PTE 都带 U/S 位） */
 int vmm_map_user_page(unsigned int virt, unsigned int phys, unsigned int flags);

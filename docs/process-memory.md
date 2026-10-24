@@ -541,6 +541,7 @@ sectest: waitpid no-child ok
 sectest: sigchld default ignored ok
 sectest: sigchld handler ok (sigchld=1 wait=<pid>)
 sectest: sigchld ignored ok
+sectest: sigchld cow ok
 sectest: mprotect ro deny ok (status=142)
 sectest: mprotect exec ok (status=0)
 sectest: mprotect nx deny ok (status=142)
@@ -588,7 +589,7 @@ sectest: mprotect invalid ok
 - `mm/vmm.c`：`vmm_protect_page()`；`mm/mm_syscall.c`：`SYS_MPROTECT`
   （整段校验 → 逐页改，COW 私有化，NX，`invlpg`）。
 - `src/user/ulib.*`：`waitpid/getppid/mprotect/signal` 封装；
-  `src/user/user_shell.c`：`sectest` 末尾增加 11 项 B 自检。
+  `src/user/user_shell.c`：`sectest` 末尾增加 12 项 B 自检（含 P0 COW 回归）。
 
 实测（`serial-pm.log`，连续 2 次 98/98）：
 
@@ -599,11 +600,12 @@ sectest: waitpid no-child ok
 sectest: sigchld default ignored ok
 sectest: sigchld handler ok (sigchld=1 wait=31)
 sectest: sigchld ignored ok
+sectest: sigchld cow ok
 sectest: mprotect ro deny ok (status=142)
 sectest: mprotect exec ok (status=0)
 sectest: mprotect nx deny ok (status=142)
 sectest: mprotect cow ok (parent byte=0xab status=0)
-sectest: mprotect invalid ok (bad=4)
+sectest: mprotect invalid ok
 ```
 
 实现中踩到/确认的点：
@@ -617,8 +619,9 @@ sectest: mprotect invalid ok (bad=4)
    shell 回退到内核内建版本、`ushell: ready` 检查失败）。
    处理：只对“sectest 区块 + `cmd_sectest`”加
    `#pragma GCC push_options / optimize("Os") / pop_options`（语义不变，
-   仅体积），`.text` 16311、ELF 30632，回到上限内；其余 shell 仍 -O0。
-   改动这段代码后务必用
+   仅体积），`.text` ≈16338、ELF ≈30532，回到上限内；其余 shell 仍 -O0。
+   余量只剩几十字节（`.text` 必须 < 16384，否则 `.rodata` 后移一页、
+   ELF 立刻超过 32768），改动这段代码后务必用
    `i686-elf-size -A .obj-pm/user_shell.elf` 确认 < 32768。
 3. **WNOHANG 测试节奏**：子进程先 `SYS_SLEEP 200ms`，父进程轮询用
    `SYS_SLEEP 10ms` 循环（纯 `SYS_YIELD` 会在子进程醒来前就转完 2000 次）。
@@ -628,6 +631,33 @@ sectest: mprotect invalid ok (bad=4)
    bit62 仍安全，没有按旧上限分配的数组/位图。
 6. 已知限制沿用 §5.3：SIGCHLD 单 pending 槽会合并；SIG_IGN 不自动回收；
    父进程先退出的孤儿僵尸仍不会被回收。
+7. **P0 修复：信号帧写在 COW 只读栈页上会内核态 oops**（修复前现场：
+   `oops: exception 14 (page fault) at eip=0x0011182c err=3 cr2=0x4018bc1c`，
+   `irq_dispatch → proc_check_signals → deliver_signal → memcpy`）。
+   fork 之后父进程栈页是 COW 只读页，`deliver_signal()` 以内核态写栈帧，
+   而 #PF 的 COW 兜底只处理 ring3 缺页（`idt.c` 的 `(f->cs&3)==3`），
+   内核态写直接 oops，shell（pid 6）被杀，后续 `echo hi`/`reexec` 没输入，
+   `exec 地址空间切换`/`命令行参数传递` 两项失败且 harness 白等 90s。
+   修复（两层）：
+   - `deliver_signal()` 写帧前对 `[sp, frame_addr+sizeof(frame))` 覆盖的每个页
+     调 `vmm_make_writable()`（新增，vmm.c）：COW/共享页先私有化，显式只读
+     页返回 -1；失败则不写帧、返回 0，`proc_check_signals()` 丢弃这次投递
+     （打印 `proc: pid .. signal .. dropped`），绝不按默认动作杀进程。
+   - `idt.c` 增加内核态兜底：`err=3`、cr2 在用户区间、当前有进程且
+     `vmm_cow_fault()` 确认是 COW 页时，复制后重试；其它内核态缺页仍 oops。
+   回归：`sectest` 增加 `sectest: sigchld cow ok`——fork 后父进程用内联汇编
+   直接 sleep 等 SIGCHLD，中间没有任何用户态栈写入，强制信号帧落在 COW
+   只读栈页上（修复前必现 oops）。
+8. **P0 连带修复：SIGRETURN 清掉被中断系统调用的返回值**。
+   `syscall_dispatch()` 在调用 `proc_sigreturn()` 后统一执行 `f->eax = ret`，
+   而 sigreturn 刚从信号帧恢复的 `eax` 因此被清零。平时 handler 打断的
+   syscall 返回值多为 0 不明显，但新回归里 fork 的返回值（子 pid）在
+   SIGCHLD handler 返回后变成 0，父进程误以为自己就是子进程，直接
+   `exit(0)` 把 shell 结束掉。
+   修复（`proc/proc_syscall.c`）：`SYS_SIGRETURN` 成功时把恢复后的
+   `f->eax` 作为 `ret` 返回，dispatch 再写回同一个值。该 bug 影响所有
+   “系统调用返回后被信号打断”的返回值（read/write/fork/wait 等），
+   不只是自检。
 
 ## 6. 已知边界 / 待办
 

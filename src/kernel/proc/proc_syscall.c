@@ -95,6 +95,11 @@ int proc_syscall(interrupt_frame_t *f)
         break;
     case SYS_SIGRETURN:
         ret = proc_sigreturn((struct interrupt_frame *)f);
+        /* proc_sigreturn 已把保存的现场（含 eax）恢复到 f；syscall_dispatch
+         * 之后还会执行 f->eax = ret。这里把恢复出来的 eax 带回去，否则被
+         * 信号打断的系统调用返回值会被清 0（例：fork 返回子 pid、read 返回
+         * 字节数，handler 返回后都变成 0，父进程会误以为自己是子进程）。 */
+        if (ret == 0) ret = (int)f->eax;
         break;
     case SYS_FORK: {
         proc_t *child = proc_fork((struct interrupt_frame *)f);

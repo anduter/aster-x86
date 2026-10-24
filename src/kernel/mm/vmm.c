@@ -302,6 +302,48 @@ int vmm_protect_page(uintptr_t virt, uint32_t prot)
     return 0;
 }
 
+/* =============================================================================
+ * vmm_make_writable - 确保一个用户页对当前进程可写（COW 先私有化）
+ *
+ * 只处理“fork 共享/COW”这一类只读页；如果页是用户显式 mprotect 成的只读
+ * （没有 COW、引用计数为 1），返回 -1，绝不越权改权限。
+ * 供内核写用户内存的路径使用：信号帧（deliver_signal）、copy_to_user 兜底。
+ * ============================================================================= */
+int vmm_make_writable(uintptr_t virt)
+{
+    pte_t *entry;
+    uint64_t e;
+    uint32_t flags;
+    uint32_t phys;
+
+    if ((virt & 0xFFFU) != 0U) return -1;
+
+    entry = get_pt_entry(virt, 0);
+    if (entry == 0) return -1;
+    e = *entry;
+    flags = (uint32_t)(e & 0xFFFU);
+    if ((flags & (PTE_PRESENT | PTE_USER)) != (PTE_PRESENT | PTE_USER)) return -1;
+
+    /* 已经可写且不是 COW：直接成功 */
+    if ((flags & (PTE_WRITE | PTE_COW)) == PTE_WRITE) return 0;
+
+    phys = (uint32_t)(e & PAE_ADDR_MASK);
+
+    if ((flags & PTE_COW) == 0U) {
+        /* 共享但没有 COW（先 mprotect 只读、再 fork 会这样）：
+         * 引用计数为 1 说明是显式只读，不越权；>1 才临时标 COW 走复制。 */
+        if (pmm_page_ref(phys) <= 1U) return -1;
+        *entry |= PTE_COW;
+    }
+
+    if (!vmm_cow_fault((uint32_t)virt)) {
+        /* 失败保留 COW 标记：它本来就是共享页，标 COW 与 fork 语义一致，
+         * 下次写缺页仍会尝试复制。 */
+        return -1;
+    }
+    return 0;
+}
+
 void vmm_map_range(uintptr_t virt, uintptr_t phys, size_t size, uint32_t flags)
 {
     if (size == 0) return;

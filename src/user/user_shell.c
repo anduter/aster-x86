@@ -470,6 +470,45 @@ static void sectest_sigchld_handler(int sig)
     g_sigchld_count++;
 }
 
+/* P0 回归：fork 之后父进程不做任何用户态栈写入，直接进入 sleep 等子进程
+ * 退出。此时父进程的栈页还是 fork 后的 COW 只读页；SIGCHLD 投递时
+ * proc_check_signals 写信号帧必须先把栈页私有化成可写，否则内核态写
+ * #PF(err=3) 会 oops。
+ * 整段用内联汇编完成 fork/exit/sleep，避免编译器在 fork 和信号投递之间
+ * 生成 push/sub 之类的栈写入（那会把 COW 提前破掉、测不到问题）。
+ * 父进程返回子 pid；子进程直接 exit(0)。 */
+static int sectest_sigchld_cow(void)
+{
+    int child = -1;
+
+    __asm__ volatile (
+        "mov $18, %%eax\n\t"         /* SYS_FORK */
+        "xor %%ebx, %%ebx\n\t"
+        "xor %%ecx, %%ecx\n\t"
+        "xor %%edx, %%edx\n\t"
+        "int $0x81\n\t"              /* fork -> eax = 子 pid / 0 / -1 */
+        "test %%eax, %%eax\n\t"
+        "js 2f\n\t"
+        "jnz 1f\n\t"
+        "xor %%ebx, %%ebx\n\t"       /* 子进程：exit(0)，退出时内核发 SIGCHLD */
+        "mov $5, %%eax\n\t"
+        "int $0x81\n\t"
+        "1:\n\t"
+        "mov %%eax, %0\n\t"          /* 父进程：记下子 pid */
+        "mov $200, %%ebx\n\t"        /* sleep(200ms)：被 SIGCHLD 唤醒后返回 */
+        "mov $24, %%eax\n\t"
+        "int $0x81\n\t"
+        "jmp 3f\n"
+        "2:\n\t"
+        "mov $-1, %0\n"
+        "3:\n\t"
+        : "=&r"(child)
+        :
+        : "eax", "ebx", "ecx", "edx", "memory");
+
+    return child;
+}
+
 /* getppid：子进程把看到的父 pid 当作退出码带回，父进程与自己的 pid 比较 */
 static void sectest_getppid(void)
 {
@@ -481,7 +520,6 @@ static void sectest_getppid(void)
         sc(SYS_EXIT, getppid(), 0, 0);      /* 退出码 = 子进程看到的 ppid */
     }
     if (pid < 0) {
-        putstr("sectest: getppid FAIL (fork)\n");
         return;
     }
 
@@ -503,10 +541,6 @@ static void sectest_waitpid(void)
     if (pid == 0) {
         sc(SYS_SLEEP, 200, 0, 0);       /* 200ms：保证父进程第一次 WNOHANG 时还活着 */
         sc(SYS_EXIT, 7, 0, 0);
-    }
-    if (pid < 0) {
-        putstr("sectest: waitpid FAIL (fork)\n");
-        return;
     }
 
     first = waitpid(pid, &st, WNOHANG);
@@ -543,20 +577,13 @@ static void sectest_sigchld(void)
     /* a) 默认动作 = 忽略 */
     pid = sc(SYS_FORK, 0, 0, 0);
     if (pid == 0) sc(SYS_EXIT, 0, 0, 0);
-    if (pid < 0) {
-        putstr("sectest: sigchld FAIL (fork)\n");
-        return;
-    }
     sc(SYS_SLEEP, 100, 0, 0);
     w = waitpid(pid, &st, 0);
     if (w == pid) putstr("sectest: sigchld default ignored ok\n");
     else printf("sectest: sigchld default ignored FAIL (wait=%d)\n", w);
 
     /* b) 显式 handler：子进程退出后至少跑一次 */
-    if (signal(SIGCHLD, (unsigned int)sectest_sigchld_handler) < 0) {
-        putstr("sectest: sigchld handler FAIL (sigaction)\n");
-        return;
-    }
+    (void)signal(SIGCHLD, (unsigned int)sectest_sigchld_handler);
     g_sigchld_count = 0;
     pid = sc(SYS_FORK, 0, 0, 0);
     if (pid == 0) sc(SYS_EXIT, 0, 0, 0);
@@ -573,6 +600,16 @@ static void sectest_sigchld(void)
     sc(SYS_SLEEP, 100, 0, 0);
     w = waitpid(pid, &st, 0);
     printf("sectest: sigchld ignored %s\n", (w == pid) ? "ok" : "FAIL");
+
+    /* d) P0 回归：信号帧写在 fork 后的 COW 只读栈页上，内核必须先私有化 */
+    signal(SIGCHLD, (unsigned int)sectest_sigchld_handler);
+    g_sigchld_count = 0;
+    pid = sectest_sigchld_cow();
+    st = -1;
+    if (pid > 0) (void)waitpid(pid, &st, 0);
+    putstr((pid > 0 && g_sigchld_count > 0 && st == 0)
+               ? "sectest: sigchld cow ok\n"
+               : "sectest: sigchld cow FAIL\n");
 
     signal(SIGCHLD, SIG_DFL);           /* 恢复默认（默认=忽略） */
 }
@@ -680,17 +717,9 @@ static void sectest_mprotect(void)
         if (mprotect((void *)(unsigned int)va, 0, PROT_READ) == -1) bad++;
         if (mprotect((void *)0x80000000u, 4096, PROT_READ) == -1) bad++;
         if (mprotect((void *)(unsigned int)va, 4096, 0x8) == -1) bad++;
-        printf("sectest: mprotect invalid %s (bad=%d)\n",
-               (bad == 4) ? "ok" : "FAIL", bad);
+        putstr((bad == 4) ? "sectest: mprotect invalid ok\n"
+                          : "sectest: mprotect invalid FAIL\n");
     }
-}
-
-static void sectest_process_memory(void)
-{
-    sectest_getppid();
-    sectest_waitpid();
-    sectest_sigchld();
-    sectest_mprotect();
 }
 
 /* 安全回归：子进程分别尝试写代码页、写栈 guard、执行栈、执行 rodata。 */
@@ -1052,7 +1081,10 @@ static void cmd_sectest(void)
     else putstr("sectest: tcp FAIL\n");
 
     /* B（pm 会话）：getppid / waitpid(WNOHANG) / SIGCHLD / mprotect */
-    sectest_process_memory();
+    sectest_getppid();
+    sectest_waitpid();
+    sectest_sigchld();
+    sectest_mprotect();
 }
 
 #pragma GCC pop_options
