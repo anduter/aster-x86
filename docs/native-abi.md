@@ -676,7 +676,7 @@ return (OS_ABI_VERSION << 16) | OS_ABI_FEATURES;
 | 位 | 含义 |
 |---|---|
 | `31..16` | `OS_ABI_VERSION`（major，当前 1） |
-| `15..0` | feature bits：`NATIVE_GATE`(bit0)、`VERSIONED_OPS`(bit1)、`DEVICE_API_V1`(bit2)、`VFS_BACKEND_V1`(bit3)、`SERVICE_MANIFEST_V1`(bit4) |
+| `15..0` | feature bits：`NATIVE_GATE`(bit0)、`VERSIONED_OPS`(bit1)；bit2-4 仅表示内核内部版本检查（internal only，不是对外驱动/服务 API） |
 
 用户态封装：`ulib.c` 的 `abi_version()`。需要完整
 `major/minor/patch/features` 结构时仍走 `int 0x80` 的
@@ -713,6 +713,6 @@ return (OS_ABI_VERSION << 16) | OS_ABI_FEATURES;
 abi: version ok magic=4f534142 abi=1.0 features=1f structs=udp_req:72,stat:24,mouse:12,resinfo:40 api=dev1/fs1/svc1
 ```
 
-它同时用纯判定函数核对三套 experimental API 的版本规则：
-`fs_backend_version_ok()`、`service_manifest_version_ok()`，以及所有已注册
-设备的 `api_version == DEV_API_VERSION`。失败打印 `abi: version FAILED ...`。
+`abi=1.0` / `structs=...` 是本文 ABI v1 的契约；`api=dev1/fs1/svc1` 是内核
+内部版本一致性检查（internal only），不是对外 API，不承诺兼容，本文不展开
+驱动/服务内容。失败打印 `abi: version FAILED ...`。
