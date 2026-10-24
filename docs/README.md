@@ -12,6 +12,7 @@
 | [`native-abi.md`](native-abi.md) | `int 0x80` 原生 ABI：类型、句柄、错误码、IPC 消息、内存接口 | v0 已实现 |
 | [`security-model.md`](security-model.md) | 威胁模型、信任边界、已实现控制、限制、安全测试矩阵 | 现行（回归 94/94） |
 | [`driver-service.md`](driver-service.md) | 驱动服务化设计：消息格式、生命周期、分阶段计划 | 规划中（e1000 仍在核内） |
+| [`modules.md`](modules.md) | 九模块划分契约：归属决策树、依赖规则、硬指标、迁移进展 | 现行（迁移进行中） |
 
 ## 2. 工程记录
 
