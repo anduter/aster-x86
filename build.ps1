@@ -62,6 +62,35 @@ $CFLAGS = @(
     '-Wall', '-Wextra', '-Werror', '-g', '-O0', '-Isrc/kernel'
 )
 
+# ---- 增量构建：参数未变且对象比源文件新时跳过编译（头文件变化则全量重编） ----
+$swTotal = [Diagnostics.Stopwatch]::StartNew()
+New-Item -ItemType Directory -Force -Path $objRoot | Out-Null
+$flagsFile = Join-Path $objRoot '.flags'
+$flagsText = ($CFLAGS -join ' ') + '|' + $nasmInc + '|' + $FontScale
+$shaFlags = [Security.Cryptography.SHA256]::Create()
+$flagsHash = [BitConverter]::ToString($shaFlags.ComputeHash([Text.Encoding]::UTF8.GetBytes($flagsText)))
+$forceAll = $true
+if (Test-Path $flagsFile) {
+    $old = (Get-Content $flagsFile -Raw) -replace '\s', ''
+    if (($old -replace '-', '') -eq ($flagsHash -replace '-', '')) { $forceAll = $false }
+}
+Set-Content -Path $flagsFile -Value $flagsHash -Encoding ASCII
+$newestHeader = Get-ChildItem (Join-Path $root 'src\kernel') -Recurse -Filter *.h -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+$compiled = 0
+$skipped  = 0
+
+function Test-ObjectFresh([string]$obj, [string]$src) {
+    if ($forceAll) { return $false }
+    if (-not (Test-Path $obj)) { return $false }
+    $o = (Get-Item $obj).LastWriteTimeUtc
+    if ($o -lt (Get-Item $src).LastWriteTimeUtc) { return $false }
+    if ($newestHeader -and $o -lt $newestHeader.LastWriteTimeUtc) { return $false }
+    return $true
+}
+
+function T([string]$m) { Write-Host ("[t {0,6:N1}s] {1}" -f $swTotal.Elapsed.TotalSeconds, $m) -ForegroundColor DarkGray }
+
 function Invoke-Step {
     param([string]$Name, [string]$Exe, [string[]]$ArgList)
     Write-Host ("  [{0}]" -f $Name) -ForegroundColor DarkGray
@@ -179,8 +208,11 @@ foreach ($f in $asmFiles) {
     $rel = $f.FullName.Substring((Resolve-Path 'src/kernel').Path.Length + 1)
     $obj = Join-Path $objRoot ($rel -replace '\.asm$', '.o')
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $obj) | Out-Null
+    if (Test-ObjectFresh $obj $f.FullName) { $skipped++; $objs += $obj; continue }
     Write-Host ("  [{0}]" -f $rel) -ForegroundColor DarkGray
     & nasm -f elf32 -i $objRoot -p $nasmInc $f.FullName -o $obj
+
+    $compiled++
     if ($LASTEXITCODE -ne 0) { throw ("assemble failed: {0}" -f $rel) }
     $objs += $obj
 }
@@ -191,8 +223,11 @@ foreach ($f in $cFiles) {
     $rel = $f.FullName.Substring((Resolve-Path 'src/kernel').Path.Length + 1)
     $obj = Join-Path $objRoot ($rel -replace '\.c$', '.o')
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $obj) | Out-Null
+    if (Test-ObjectFresh $obj $f.FullName) { $skipped++; $objs += $obj; continue }
     Write-Host ("  [{0}]" -f $rel) -ForegroundColor DarkGray
     & i686-elf-gcc @CFLAGS -c $f.FullName -o $obj
+
+    $compiled++
     if ($LASTEXITCODE -ne 0) { throw ("compile failed: {0}" -f $rel) }
     $objs += $obj
 }
@@ -291,14 +326,19 @@ if ($Test -or $Shot) {
     if ($Test) {
         $udpEcho = Start-Job -ScriptBlock {
             $u = New-Object System.Net.Sockets.UdpClient(12345)
+            $u.Client.ReceiveTimeout = 250   # interruptible: Stop-Job must not wait on a blocked Receive
             try {
                 $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
-                for ($i = 0; $i -lt 16; $i++) {
-                    $data = $u.Receive([ref]$ep)
-                    [void]$u.Send($data, $data.Length, $ep)
+                $deadline = (Get-Date).AddSeconds(120)
+                $served = 0
+                while ((Get-Date) -lt $deadline -and $served -lt 16) {
+                    try {
+                        $data = $u.Receive([ref]$ep)
+                        [void]$u.Send($data, $data.Length, $ep)
+                        $served++
+                    } catch { }
                 }
-            } catch { }
-            $u.Close()
+            } finally { $u.Close() }
         }
     }
 
@@ -310,8 +350,12 @@ if ($Test -or $Shot) {
             $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 12345)
             try {
                 $l.Start()
-                for ($i = 0; $i -lt 8; $i++) {
+                $deadline = (Get-Date).AddSeconds(120)
+                $i = 0
+                while ((Get-Date) -lt $deadline -and $i -lt 8) {
+                    if (-not $l.Pending()) { Start-Sleep -Milliseconds 100; continue }
                     $c = $l.AcceptTcpClient()
+                    $c.ReceiveTimeout = 2000
                     "accept $i" | Add-Content -Path $log -Encoding ASCII
                     $s = $c.GetStream()
                     $buf = New-Object byte[] 64
@@ -319,13 +363,17 @@ if ($Test -or $Shot) {
                     "read $n" | Add-Content -Path $log -Encoding ASCII
                     if ($n -gt 0) { $s.Write($buf, 0, $n); $s.Flush() }
                     $c.Close()
+                    $i++
                 }
-            } catch { "error $_" | Add-Content -Path $log -Encoding ASCII }
-            $l.Stop()
+            } catch { "error $_" | Add-Content -Path $log -Encoding ASCII } finally { $l.Stop() }
         }
     }
 
-    if ($Test) { Start-Sleep -Seconds 2 }
+    # 等上一个 QEMU 退出（最多 5s），避免镜像/端口冲突；不再固定 sleep 2 秒
+    for ($i = 0; $i -lt 50; $i++) {
+        if (-not (Get-Process qemu-system-i386 -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 100
+    }
 
     $qargs = @(
         '-drive', ("file={0},format=raw,if=floppy" -f ($imgPath -replace '\\', '/')), '-boot', 'a',
@@ -338,6 +386,7 @@ if ($Test -or $Shot) {
         '-qmp', ("tcp:127.0.0.1:{0},server,nowait" -f $QmpPort)
     )
 
+    T 'before qemu'
     Write-Host "=== qemu (headless) ===" -ForegroundColor Cyan
     $q = Start-Process -FilePath 'qemu-system-i386' -ArgumentList $qargs -PassThru -WindowStyle Hidden
 
@@ -358,6 +407,7 @@ if ($Test -or $Shot) {
         }
     }
 
+    T 'boot ready'
     if ($Test) {
         try {
             Write-Host ("  [inject command: {0}]" -f $Keys) -ForegroundColor DarkGray
@@ -370,6 +420,7 @@ if ($Test -or $Shot) {
     # 等注入的命令跑完。不能用"串口静默"判断：内核每秒都打心跳，永远不会静默，
     # 那样每次都会白等到超时。用末条命令的产物做哨兵：
     # reexec 成功后 shell 会重新打印第二次 "ushell: ready"；没有 reexec 就固定等 5 秒。
+    T 'keys injected'
     if ($Keys -match 'reexec') {
         $doneDeadline = (Get-Date).AddSeconds(45)
         $doneTicks = 0
@@ -432,6 +483,7 @@ if ($Test -or $Shot) {
     }
 
     $out = if (Test-Path $serial) { Get-Content $serial -Raw } else { '' }
+    T 'teardown done'
     Write-Host "=== serial ===" -ForegroundColor Cyan
     Write-Host $out
 
@@ -545,6 +597,7 @@ if ($Test -or $Shot) {
             @{ Name = '负载放置把线程送上 AP';    Ok = ($out -match 'sched: pid \d+ \(spin\) running on cpu 1') }
         )
 
+        T 'checks begin'
         Write-Host "=== checks ===" -ForegroundColor Cyan
         $failed = 0
         foreach ($c in $checks) {
@@ -555,6 +608,9 @@ if ($Test -or $Shot) {
                 $failed++
             }
         }
+
+        Write-Host ("=== compile: {0} compiled, {1} skipped ===" -f $compiled, $skipped) -ForegroundColor DarkCyan
+        Write-Host ("=== elapsed: {0:N1}s ===" -f $swTotal.Elapsed.TotalSeconds) -ForegroundColor DarkCyan
 
         if ($failed -eq 0) {
             Write-Host ("=== TEST PASS ({0}/{0}) ===" -f $checks.Count) -ForegroundColor Green

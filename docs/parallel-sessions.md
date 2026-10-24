@@ -95,3 +95,21 @@
 - 已整理：根目录 50 个历史日志 → `logs/archive/`；`.gitignore` 增加 `/logs/`、`/.soak-smp/`；
 - 已记录风险：工作区 763 行未提交，`syscall.c`/`build.ps1`/`process.c`/`user_shell.c` 有跨会话混改；
 - 未能整理：`gdb.txt`、`windd.exe`（根目录 ACL 拒绝移动）。
+
+## 10. 回归效率与协作工具（2026-10-24 18:4x）
+
+| 优化 | 效果 |
+|---|---|
+| uild.ps1 增量编译（源文件/头文件未变则跳过；参数变化自动全量） | 全量构建 10.8s → **2.3s** |
+| 宿主回显改成可中断轮询（ReceiveTimeout + Pending()），收尾 Stop-Job 不再卡阻塞调用 | -Test **253s → 13.5s** |
+| 去掉固定 2s 等待，改为等待旧 QEMU 退出 | 少 2s |
+| 阶段计时 [t  N.Ns] + 末尾 compile/elapsed | 可直接定位慢点 |
+
+### 多会话工具
+
+- 	ools/session-status.ps1：一屏看板（git、运行中的 build/QEMU、端口占用、各 .obj-* 的 kernel.bin、最近 serial 日志与结论、测试锁）。
+- 	ools/session-run.ps1 -Name a -Test：自动用隔离目录（.obj-a/.dist-a/serial-a.log + QMP 4481）运行；-Test 会自动抢 .session/test.lock，别的会话在跑就等待，不再直接失败。
+
+### 已知偶发问题（未修）
+
+约每几次 -Test 会出现一次用户态 #PF err=15 (reserved bit) at eip=0x4000415c，shell 被杀，导致后续检查失败（eexec 哨兵等不到）。这是独立的用户态/页表问题，与构建/测试优化无关，需要单独定位。

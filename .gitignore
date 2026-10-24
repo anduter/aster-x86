@@ -36,3 +36,6 @@
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# session coordination artifacts
+/.session/
