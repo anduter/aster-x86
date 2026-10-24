@@ -32,6 +32,25 @@ context_switch:
     ret                         ; 新线程：跳到 thread_trampoline；旧线程：返回 proc_switch_to
 
 ; -----------------------------------------------------------------------------
+; proc_exit_on_stack - 退出线程切到本 CPU 的专用退出栈后继续收尾
+;
+; C 侧（proc_exit）调用前已经 cli，并把 self/next/exit_code 填进每 CPU 槽位。
+; 切栈之后 proc_exit_finish 才发布 ZOMBIE，因此父进程即使立刻回收退出线程的
+; 内核栈/页目录，也不会踩到正在使用的栈。正常情况下不返回。
+; -----------------------------------------------------------------------------
+global proc_exit_on_stack
+extern proc_exit_finish
+proc_exit_on_stack:
+    mov eax, [esp + 4]          ; 参数：退出栈顶
+    mov esp, eax
+    xor ebp, ebp                ; 栈回溯到此为止
+    call proc_exit_finish
+.hang:
+    cli
+    hlt
+    jmp .hang
+
+; -----------------------------------------------------------------------------
 ; thread_trampoline - 新线程的入口
 ;
 ; 从时钟中断切换过来的话，此时 IF=0（中断门），必须先开中断，

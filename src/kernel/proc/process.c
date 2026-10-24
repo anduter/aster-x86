@@ -359,6 +359,22 @@ proc_t *proc_fork(struct interrupt_frame *f)
 
     if (child->page_dir == 0 ||
         vmm_clone_user_pages((pde_t *)child->page_dir) != 0) {
+        /* 失败回滚：上面已经复制了 fd/管道写端/capability/native 句柄的引用，
+         * 必须逐个释放，不能只 memset——否则文件句柄和管道写端会泄漏
+         * （写端永远不减到 0，读端就可能永远等不到 EOF）。
+         * 注意读端在 fork 时没有加引用，这里不能 unref，否则会把父进程
+         * 还在用的空管道提前释放。 */
+        for (int i = 0; i < PROC_FD_MAX; i++) {
+            if (!child->fds[i].used) continue;
+            if (child->fds[i].kind == FD_KIND_FILE) {
+                fs_close_ex(child->fds[i].fs_be, (int)child->fds[i].handle);
+            } else if (child->fds[i].kind == FD_KIND_PIPE_W) {
+                pipe_unref_write((int)child->fds[i].handle);
+            }
+        }
+        cap_release_all(&child->caps);
+        native_proc_free(child);
+
         if (child->page_dir != 0) vmm_destroy_dir((pde_t *)child->page_dir);
         free(stack);
         memset(child, 0, sizeof(*child));
@@ -606,50 +622,122 @@ void proc_console_int(void)
     }
 }
 
+/* ==================== 退出线程的专用栈 ====================
+ * 退出线程必须先离开自己的内核栈、并把 CR3 切到下一个进程，之后才能发布
+ * ZOMBIE。否则在 SMP 上，父进程可能在另一颗 CPU 上立刻回收它的内核栈和
+ * 地址空间，而它还在那块栈上跑最后几步——表现为偶发跳进 0x0/0x18 附近取指
+ * （#PF err=0x11，cr2==eip，shell 被杀）。
+ *
+ * 每 CPU 一块静态退出栈：它属于内核 BSS，所有地址空间共享映射，不会被进程
+ * 回收路径释放。退出线程切过来之后再发布 ZOMBIE，父进程无论在哪颗 CPU 上
+ * 回收都不会踩到正在用的现场。 */
+#define PROC_EXIT_STACK_SIZE 8192U
+
+static uint8_t  proc_exit_stack[SMP_MAX_CPUS][PROC_EXIT_STACK_SIZE]
+                    __attribute__((aligned(16)));
+static uint32_t proc_exit_old_esp[SMP_MAX_CPUS];
+static proc_t  *proc_exit_self[SMP_MAX_CPUS];
+static proc_t  *proc_exit_next[SMP_MAX_CPUS];
+static int      proc_exit_code[SMP_MAX_CPUS];
+
+/* switch.asm：切到本 CPU 的专用退出栈后调用 proc_exit_finish，不返回 */
+void proc_exit_on_stack(void *stack_top) __attribute__((noreturn));
+
+/* 已经在退出栈上（IF=0）：先把 CPU 交给 next，再发布 ZOMBIE 让父进程回收 */
+void proc_exit_finish(void)
+{
+    uint32_t cpu = smp_cpu_id();
+    proc_t *p = proc_exit_self[cpu];
+    proc_t *next = proc_exit_next[cpu];
+
+    if (next != 0) {
+        this_cpu()->idle_active = false;
+        if (next->stack_top != 0) {
+            tss_set_esp0((uint32_t)(uintptr_t)next->stack_top);
+        }
+        this_cpu()->current = next;
+        if (next->page_dir != 0) {
+            vmm_switch_dir((pde_t *)next->page_dir);
+        }
+    } else {
+        this_cpu()->current = 0;
+        this_cpu()->idle_active = true;
+    }
+
+    /* 本线程的内核栈和页目录已经不再被本 CPU 使用，此刻发布 ZOMBIE 才安全：
+     * 父进程收到唤醒后可以立刻 free 栈、vmm_destroy_dir，不会踩到正在用的现场。
+     * 注意顺序：先摘 runqueue、写好退出码，再置 ZOMBIE，最后才唤醒。 */
+    sched_dequeue(p);
+    p->exit_code = proc_exit_code[cpu];
+    p->state = PROC_ZOMBIE;
+    proc_wakeup(PROC_WAIT_CHILD);
+
+    if (next == 0) {
+        /* 本 CPU 没有可运行线程：在退出栈上进入 idle。
+         * 必须开中断睡眠——timer/IPI 进来后 sched_tick() 会从 runqueue 取活。 */
+        if (smp_cpu_id() == 0U) {
+            kprintln("sched: system idle");
+        }
+        for (;;) {
+            __asm__ volatile ("sti; hlt");
+        }
+    }
+
+    /* 本线程不会再被调度：把当前（退出栈上的）上下文扔掉即可 */
+    context_switch((void **)&proc_exit_old_esp[cpu], next->esp);
+
+    for (;;) {
+        __asm__ volatile ("cli; hlt");
+    }
+}
+
 void proc_exit(int code)
 {
     proc_t *p = proc_current();
+    uint32_t cpu;
 
-    if (p != 0) {
-        p->state = PROC_ZOMBIE;
-        p->exit_code = code;
-        sched_dequeue(p);               /* 从所有 runqueue 摘掉 */
+    if (p == 0) {
+        /* 没有当前线程（启动早期/异常路径）：按 sched_start 的方式让出 CPU */
+        for (;;) {
+            proc_t *next = sched_next(0);
 
-        /* 释放 fd：文件句柄减引用，管道写端减引用（读端看到 EOF） */
-        for (int i = 0; i < PROC_FD_MAX; i++) {
-            if (!p->fds[i].used) continue;
-            if (p->fds[i].kind == FD_KIND_FILE) {
-                fs_close_ex(p->fds[i].fs_be, (int)p->fds[i].handle);
-            } else if (p->fds[i].kind == FD_KIND_PIPE_W) {
-                pipe_unref_write((int)p->fds[i].handle);
-            } else if (p->fds[i].kind == FD_KIND_PIPE_R) {
-                pipe_unref_read((int)p->fds[i].handle);
+            if (next == 0) {
+                for (;;) {
+                    __asm__ volatile ("sti; hlt");
+                }
             }
-            memset(&p->fds[i], 0, sizeof(p->fds[i]));
+            proc_switch_to(next);
         }
-
-        kprintf("proc: pid %u (%s) exited with %d\n", p->pid, p->name, code);
-        cap_release_all(&p->caps);
-        proc_wakeup(PROC_WAIT_CHILD);       /* 唤醒在 wait 的父进程 */
     }
 
-    for (;;) {
-        proc_t *next = sched_next(p);
-
-        if (next == 0) {
-            /* 本 CPU 没有可运行线程：进入 idle。
-             * 必须开中断睡眠——timer/IPI 进来后 sched_tick() 会从 runqueue 取活。
-             * 关中断的 cli;hlt 会让本核 timer 停摆，NMI 看门狗会误判为挂死。 */
-            this_cpu()->current = 0;
-            this_cpu()->idle_active = true;
-            if (smp_cpu_id() == 0U) {
-                kprintln("sched: system idle");
-            }
-            for (;;) {
-                __asm__ volatile ("sti; hlt");
-            }
+    /* 收尾阶段仍在自己的内核栈上：此时 p 还不是 ZOMBIE，父进程不会来回收。 */
+    /* 释放 fd：文件句柄减引用，管道写端减引用（读端看到 EOF） */
+    for (int i = 0; i < PROC_FD_MAX; i++) {
+        if (!p->fds[i].used) continue;
+        if (p->fds[i].kind == FD_KIND_FILE) {
+            fs_close_ex(p->fds[i].fs_be, (int)p->fds[i].handle);
+        } else if (p->fds[i].kind == FD_KIND_PIPE_W) {
+            pipe_unref_write((int)p->fds[i].handle);
+        } else if (p->fds[i].kind == FD_KIND_PIPE_R) {
+            pipe_unref_read((int)p->fds[i].handle);
         }
-        proc_switch_to(next);
+        memset(&p->fds[i], 0, sizeof(p->fds[i]));
+    }
+
+    kprintf("proc: pid %u (%s) exited with %d\n", p->pid, p->name, code);
+    cap_release_all(&p->caps);
+
+    /* 从这里开始不再使用 p 的内核栈：关中断、记下切换目标，
+     * 切到本 CPU 的专用退出栈完成“切 CR3 + 发布 ZOMBIE + 切到 next”。 */
+    cpu = smp_cpu_id();
+    __asm__ volatile ("cli");
+    proc_exit_self[cpu] = p;
+    proc_exit_next[cpu] = sched_next(p);
+    proc_exit_code[cpu] = code;
+    proc_exit_on_stack(&proc_exit_stack[cpu][PROC_EXIT_STACK_SIZE]);
+
+    for (;;) {
+        __asm__ volatile ("cli; hlt");      /* proc_exit_on_stack 不返回 */
     }
 }
 
