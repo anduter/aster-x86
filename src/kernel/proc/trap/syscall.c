@@ -18,6 +18,7 @@
 #include "../../proc/proc_syscall.h"
 #include "../../mm/mm_syscall.h"
 #include "../../svc/svc_syscall.h"
+#include "../../security/security_syscall.h"
 #include "../../core/error.h"
 #include "../../dev/char/console.h"
 #include "../../fs/fs.h"
@@ -111,6 +112,12 @@ void syscall_dispatch(interrupt_frame_t *f)
         goto delegate_out;
     }
 
+    /* 身份/权限组已迁到 security/security_syscall.c（M7） */
+    if (security_syscall_owns(f->eax)) {
+        ret = security_syscall(f);
+        goto delegate_out;
+    }
+
     switch (f->eax) {
     case SYS_WRITE:
         if (!user_range_ok(f->ebx, f->ecx)) {
@@ -176,23 +183,6 @@ void syscall_dispatch(interrupt_frame_t *f)
         acpi_poweroff();        /* 不返回 */
         ret = 0;
         break;
-    case SYS_GETUID:
-        ret = (proc_current() != 0) ? (int)proc_current()->uid : 0;
-        break;
-    case SYS_GETGID:
-        ret = (proc_current() != 0) ? (int)proc_current()->gid : 0;
-        break;
-
-    case SYS_SETUID: {
-        /* 只有 root 能改身份；降权后不能回升（单向） */
-        proc_t *p = proc_current();
-
-        if (p == 0 || p->uid != 0U) { ret = -1; break; }
-        p->uid = f->ebx;
-        p->gid = (f->ecx != 0U) ? f->ecx : f->ebx;
-        ret = 0;
-        break;
-    }
     case SYS_HANG:
         /* 调试：关中断并死循环，只有 NMI 看门狗能发现 */
         kprintln("hang: disabling interrupts and spinning (NMI watchdog should fire)");
