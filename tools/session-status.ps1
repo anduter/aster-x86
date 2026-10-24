@@ -54,13 +54,17 @@ if (Test-Path 'obj/kernel.bin') {
     Write-Host ("  {0,-12} kernel.bin {1,8} bytes  {2:HH:mm:ss}" -f 'obj', $i.Length, $i.LastWriteTime)
 }
 
-Section 'recent serial logs and verdicts'
-Get-ChildItem -File -Filter 'serial*.log' -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 5 | ForEach-Object {
+Section 'recent test verdicts (logs-session-*.log / test*.log)'
+Get-ChildItem -File -Include 'logs-session-*.log','logs-*.log','test*.log' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 6 | ForEach-Object {
         $v = (Select-String -Path $_.FullName -Pattern '=== TEST (PASS|FAIL)[^=]*===' -ErrorAction SilentlyContinue |
               Select-Object -Last 1).Line
-        if (-not $v) { $v = '(no verdict)' }
-        Write-Host ("  {0,-20} {1:HH:mm:ss}  {2}" -f $_.Name, $_.LastWriteTime, $v.Trim())
+        if ($v) { Write-Host ("  {0,-26} {1:HH:mm:ss}  {2}" -f $_.Name, $_.LastWriteTime, $v.Trim()) }
+    }
+Section 'recent serial logs'
+Get-ChildItem -File -Filter 'serial*.log' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 5 | ForEach-Object {
+        Write-Host ("  {0,-20} {1:HH:mm:ss}  {2} bytes" -f $_.Name, $_.LastWriteTime, $_.Length)
     }
 
 Section 'lock'
