@@ -1263,3 +1263,70 @@ int fs_check(char *report, uint32_t max)
     spin_unlock_irqrestore(&fs_lock, fl);
     return r;
 }
+
+/* =============================================================================
+ * 后端适配器：把现有 fs_* 包装成 fs_backend_t 的 ops
+ * ============================================================================= */
+
+/* ramfs 接管所有没被别的后端 probe 走的路径（含 "system:/..." 这类卷前缀） */
+static int ramfs_probe(const char *path, const char **rel)
+{
+    if (path == 0) return 0;
+    if (rel != 0) *rel = path;
+    return 1;
+}
+
+static int ramfs_be_open(const char *rel, uint32_t flags, uint32_t uid, uint32_t gid)
+{
+    uint32_t h = fs_open_as(rel, flags, uid, gid);
+
+    return (h == 0U) ? -1 : (int)h;
+}
+
+static int ramfs_be_read(int h, void *buf, uint32_t len)
+{
+    return fs_read((uint32_t)h, buf, len);
+}
+
+static int ramfs_be_write(int h, const void *buf, uint32_t len)
+{
+    return fs_write((uint32_t)h, buf, len);
+}
+
+static int ramfs_be_close(int h) { return fs_close((uint32_t)h); }
+static int ramfs_be_ref(int h)   { return fs_ref((uint32_t)h); }
+
+static int ramfs_be_stat(const char *rel, fs_stat_t *out)
+{
+    return (fs_stat(rel, out) == E_OK) ? 0 : -1;
+}
+
+static int ramfs_be_listdir(const char *rel, uint32_t index, char *name,
+                            uint32_t name_max, fs_stat_t *out)
+{
+    return (fs_listdir(rel, index, name, name_max, out) == E_OK) ? 0 : -1;
+}
+
+static int ramfs_be_mkdir(const char *rel, uint32_t uid, uint32_t gid)
+{
+    return (fs_mkdir_as(rel, uid, gid) == E_OK) ? 0 : -1;
+}
+
+static int ramfs_be_unlink(const char *rel, uint32_t uid, uint32_t gid)
+{
+    return (fs_unlink_as(rel, uid, gid) == E_OK) ? 0 : -1;
+}
+
+const fs_backend_t ramfs_backend = {
+    "ramfs",
+    ramfs_probe,
+    ramfs_be_open,
+    ramfs_be_read,
+    ramfs_be_write,
+    ramfs_be_close,
+    ramfs_be_ref,
+    ramfs_be_stat,
+    ramfs_be_listdir,
+    ramfs_be_mkdir,
+    ramfs_be_unlink
+};

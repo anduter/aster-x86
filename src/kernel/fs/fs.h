@@ -139,4 +139,31 @@ int fs_unlink_ex(const char *path, uint32_t uid, uint32_t gid, uint8_t *be);
 /* 路径属于哪个后端（给驱动器枚举/调试用） */
 int fs_is_fat(const char *path);
 
+/* =============================================================================
+ * 后端描述表
+ *
+ * 每个文件系统实现一张 ops 表并注册到 vfs.c；VFS 层只按 probe() 选后端，
+ * 不再出现 "if (fat) ... else ..."。新增后端 = 实现一张表 + 在 vfs.c 的
+ * 表数组里加一项，syscall / proc 一行不用改。
+ * ============================================================================= */
+typedef struct fs_backend {
+    const char *name;
+    /* 该后端是否接管此路径；接管时 *rel 返回后端自己的相对路径 */
+    int (*probe)(const char *path, const char **rel);
+    int (*open)(const char *rel, uint32_t flags, uint32_t uid, uint32_t gid);
+    int (*read)(int h, void *buf, uint32_t len);
+    int (*write)(int h, const void *buf, uint32_t len);
+    int (*close)(int h);
+    int (*ref)(int h);
+    int (*stat)(const char *rel, fs_stat_t *out);
+    int (*listdir)(const char *rel, uint32_t index, char *name,
+                   uint32_t name_max, fs_stat_t *out);
+    int (*mkdir)(const char *rel, uint32_t uid, uint32_t gid);
+    int (*unlink)(const char *rel, uint32_t uid, uint32_t gid);
+} fs_backend_t;
+
+/* 各后端实例 */
+extern const fs_backend_t ramfs_backend;
+extern const fs_backend_t fat16_backend;
+
 #endif

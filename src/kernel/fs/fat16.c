@@ -536,3 +536,97 @@ int fat16_close(int h)
     memset(fh, 0, sizeof(*fh));
     return 0;
 }
+
+/* =============================================================================
+ * 后端适配器：把 fat16_* 包装成 fs_backend_t
+ * ============================================================================= */
+
+/* 只接管 "fat:" / "FAT:" 前缀，其余交给后面的后端（ramfs） */
+static int fat16_probe(const char *path, const char **rel)
+{
+    if (path == 0) return 0;
+    if ((path[0] != 'f' && path[0] != 'F') ||
+        (path[1] != 'a' && path[1] != 'A') ||
+        (path[2] != 't' && path[2] != 'T') ||
+        path[3] != ':') {
+        return 0;
+    }
+    if (rel != 0) *rel = path + 4;
+    return 1;
+}
+
+static int fat16_be_open(const char *rel, uint32_t flags, uint32_t uid, uint32_t gid)
+{
+    (void)uid;
+    (void)gid;
+    if (!fat16_mounted()) return -1;
+    return fat16_open(rel, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT));
+}
+
+static int fat16_be_read(int h, void *buf, uint32_t len)
+{
+    return fat16_read(h, buf, len);
+}
+
+static int fat16_be_write(int h, const void *buf, uint32_t len)
+{
+    return fat16_write(h, buf, len);
+}
+
+static int fat16_be_close(int h)
+{
+    return fat16_close(h);
+}
+
+/* FAT16 句柄没有引用计数：拒绝 dup/fork 共享，避免双重关闭 */
+static int fat16_be_ref(int h)
+{
+    (void)h;
+    return -1;
+}
+
+static int fat16_be_stat(const char *rel, fs_stat_t *out)
+{
+    if (!fat16_mounted() || fat16_stat(rel, out) != E_OK) return -1;
+    out->mode = 0;
+    out->uid = 0;
+    out->gid = 0;
+    return 0;
+}
+
+static int fat16_be_listdir(const char *rel, uint32_t index, char *name,
+                            uint32_t name_max, fs_stat_t *out)
+{
+    if (!fat16_mounted()) return -1;
+    return (fat16_listdir(rel, index, name, name_max, out) == E_OK) ? 0 : -1;
+}
+
+static int fat16_be_mkdir(const char *rel, uint32_t uid, uint32_t gid)
+{
+    (void)uid;
+    (void)gid;
+    if (!fat16_mounted()) return -1;
+    return (fat16_mkdir(rel) == E_OK) ? 0 : -1;
+}
+
+static int fat16_be_unlink(const char *rel, uint32_t uid, uint32_t gid)
+{
+    (void)uid;
+    (void)gid;
+    if (!fat16_mounted()) return -1;
+    return (fat16_unlink(rel) == E_OK) ? 0 : -1;
+}
+
+const fs_backend_t fat16_backend = {
+    "fat16",
+    fat16_probe,
+    fat16_be_open,
+    fat16_be_read,
+    fat16_be_write,
+    fat16_be_close,
+    fat16_be_ref,
+    fat16_be_stat,
+    fat16_be_listdir,
+    fat16_be_mkdir,
+    fat16_be_unlink
+};
