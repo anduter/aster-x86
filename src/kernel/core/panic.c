@@ -6,10 +6,10 @@
  * 之后关中断并永久停机。
  * ============================================================================= */
 #include "panic.h"
-#include "fb.h"
-#include "io.h"
-#include "lib/kprintf.h"
-#include "lib/string.h"
+#include "../dev/char/fb.h"
+#include "../io.h"
+#include "../lib/kprintf.h"
+#include "../lib/string.h"
 
 /* 面板配色与尺寸 */
 #define PANIC_BORDER_COLOR 0xD00000U    /* 红色边框 */
