@@ -260,6 +260,18 @@ void console_write_atomic(const char *s)
     spin_unlock_irqrestore(&console_lock, flags);
 }
 
+/* 写 n 个字节（不要求 NUL 结尾），整段持锁：系统调用 write 的用户输出是
+ * 一次一段的，逐字符 console_putc 会让另一个 CPU 的日志行插进字符中间。 */
+void console_write_n_atomic(const char *s, uint32_t n)
+{
+    uint32_t flags = spin_lock_irqsave(&console_lock);
+
+    for (uint32_t i = 0; s != NULL && i < n; i++) {
+        putc_locked(s[i]);
+    }
+    spin_unlock_irqrestore(&console_lock, flags);
+}
+
 
 /* 只写串口、不写屏幕；与 console 输出共用同一把锁，保证整行原子 */
 void console_serial_line(const char *s)

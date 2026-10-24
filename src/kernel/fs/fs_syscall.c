@@ -109,7 +109,9 @@ static int sys_fwrite_user(int fd, uint32_t ubuf, uint32_t len)
         }
 
         if (f->kind == FD_KIND_CONSOLE) {
-            for (uint32_t i = 0; i < n; i++) console_putc(buf[i]);
+            /* 整段持 console 锁写：逐字符 console_putc 会让另一颗 CPU 的
+             * 日志行插进用户输出中间（fork/sectest 的假失败来源）。 */
+            console_write_n_atomic(buf, n);
         } else if (f->kind == FD_KIND_PIPE_W) {
             if (pipe_write((int)f->handle, buf, n) != (int)n) return -1;
         } else {
