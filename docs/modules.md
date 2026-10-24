@@ -176,3 +176,13 @@ ative.c 到各模块 *_syscall.c；
 1. 建 include/ 接口头（include/mm.h、include/trap.h、include/dev.h、include/fs.h、include/net.h、include/svc.h、include/security.h、include/userland.h）；
 2. core/kernel.c 改为只调各模块 *_init()（注册表式），各模块自己 include 内部头；
 3. 完成后违规应降到接近 0，再删 35 个转发头。
+
+### 第六批（17:2x）：接口层落地
+
+- 新建 src/kernel/include/ 十个接口头：kernel.h（M0）、proc.h（M1）、mm.h（M2）、dev.h（M3）、s.h（M4）、
+et.h（M5）、svc.h（M6）、security.h（M7）、userland.h（M8）、pps.h（内置程序）；
+- 	ools/converge-includes.ps1：按“解析真实目标模块”把跨模块 include 改写为 include/<mod>.h（跳过转发头）；
+- 手工收口剩余 27 处经转发头的 include；
+- **结果：跨模块 include 违规 137 → 0**，回归 **97/97 PASS**。
+
+当前 35 个转发头仍在（部分同目录 include 仍指向它们）；删除它们需要先把 proc/proc.h 这类“同目录旧名”引用改到接口头，属于下一步清理。
