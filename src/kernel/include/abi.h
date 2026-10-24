@@ -29,12 +29,15 @@
 #define OS_ABI_VERSION_MAJOR  1
 #define OS_ABI_VERSION_MINOR  0
 
-/* SYS_ABI_VERSION 返回值的低 16 位（feature bits）：只增不减 */
+/* SYS_ABI_VERSION 返回值的低 16 位（feature bits）：只增不减。
+ *
+ * 注意：bit2-4 只表示内核内部存在版本一致性检查（internal only），
+ * 不是对外驱动/服务 API，不承诺兼容，也不代表要推进驱动服务化。 */
 #define OS_ABI_F_NATIVE_GATE      (1u << 0)  /* int 0x80 Native ABI 门已安装 */
-#define OS_ABI_F_VERSIONED_OPS    (1u << 1)  /* device/fs/service 三类 API 带版本校验 */
-#define OS_ABI_F_DEVICE_API_V1    (1u << 2)  /* dev/device.h: DEV_API_VERSION = 1 */
-#define OS_ABI_F_VFS_BACKEND_V1   (1u << 3)  /* fs/fs.h: FS_BACKEND_API_VERSION = 1 */
-#define OS_ABI_F_SERVICE_MANIFEST_V1 (1u << 4) /* svc/service.h: manifest v1 */
+#define OS_ABI_F_VERSIONED_OPS    (1u << 1)  /* 内核内部版本校验存在（internal only） */
+#define OS_ABI_F_DEVICE_API_V1    (1u << 2)  /* internal only：dev/device.h 内部 ops 版本 */
+#define OS_ABI_F_VFS_BACKEND_V1   (1u << 3)  /* internal only：VFS 后端注册表校验 */
+#define OS_ABI_F_SERVICE_MANIFEST_V1 (1u << 4) /* internal only：服务注册入口校验 */
 
 #define OS_ABI_FEATURES                                                     \
     (OS_ABI_F_NATIVE_GATE | OS_ABI_F_VERSIONED_OPS |                        \
