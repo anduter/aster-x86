@@ -110,9 +110,9 @@ M8 → 只依赖 include/abi.h
 
 | 项 | 迁移前 | 现在 |
 |---|---|---|
-| 内核目录 | core 45 文件混杂 | core 26 文件（18 个转发头 + ksym/splash/atomics/error 共 7 个实现文件） |
+| 内核目录 | core 45 文件混杂 | core 25 文件（18 个转发头 + ksym/splash/atomics/error/ab 桩） |
 | 新模块目录 | — | `mm/ proc/ dev/{block,net,intc,char} net/ svc/ security/` |
-| 跨模块 include 违规 | 137 | **116**（已排除 28 个转发头、以及 error/atomic/spinlock 原语） |
+| 跨模块 include 违规 | 137 | **88**（已排除 33 个转发头、以及 error/atomic/spinlock 原语） |
 | 回归 | 94/94 | **97/97 PASS**（每批搬完后复测） |
 
 已落地：
@@ -149,3 +149,19 @@ et/；
 - 新增 	ools/fix-includes.ps1：按 basename 自动重写相对 include（跳过转发头，冲突只报告不改）。
 
 剩余：intr/（trap/异常/系统调用门）→ proc/trap/；根目录 kernel.c/panic.c/heap.h 收口；syscall.c 拆分。
+
+### 第四批（17:0x）
+
+- intr/ 全部迁入 proc/trap/：idt.c、ault.c、interrupt.h、irq.c、isr.asm、
+ative.c/h、syscall.c/h、uaccess*.c/asm；
+- intr/ 只剩 5 个转发头（ault.h、interrupt.h、
+ative.h、syscall.h、uaccess.h）；
+- 搬运后回归 **97/97 PASS**，跨模块违规降到 **88**。
+
+剩余工作：
+
+1. 建 include/ 模块接口头（mm.h/intr.h/dev.h/fs.h/net.h/svc.h/security.h/userland.h），把现有 88 处直接 include 收口；
+2. 根目录 kernel.c、panic.c 收进 core/，heap.h 等旧转发头清理；
+3. 拆 syscall.c（57 分支）与 
+ative.c 到各模块 *_syscall.c；
+4. 全部调用点切换后删除 33 个转发头。
