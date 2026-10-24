@@ -41,6 +41,7 @@ void service_lifecycle_selftest(void);
 #include "core/percpu.h"
 #include "core/smp.h"
 #include "core/madt.h"
+#include "core/ioapic.h"
 #include "block/block.h"
 #include "core/error.h"
 #include "core/program.h"
@@ -314,6 +315,7 @@ void kernel_main(void)
     }
     acpi_init();                /* 找 FADT，为关机做准备 */
     madt_init();                /* 解析 MADT：CPU 列表 + IOAPIC */
+    ioapic_init();              /* IOAPIC：打印信息并做掩码自检 */
     apic_init();                /* 只探测 LAPIC，不接管中断 */
     percpu_init_bsp(apic_id_from_cpuid(), madt_cpu_count());   /* SMP 地基：cpu0 上线 */
     fs_init();
