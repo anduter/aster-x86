@@ -357,6 +357,21 @@ void kernel_main(void)
         if (irq_migrate_to_ioapic(12U, apic_id_from_cpuid()) != 0) {
             kprintln("ioapic: irq12 migration failed, staying on PIC");
         }
+
+        /* 中断亲和性演示：键盘 IRQ1 交给 AP。
+         * AP 是异步启动的，这里先有界等待它 ready（此时 BSP 还没开中断，
+         * 等待不影响键盘/PIT；超时则保持在 PIC 上，不影响启动）。 */
+        for (uint32_t i = 0; i < 2000000U; i++) {
+            if (smp_cpu_count > 1U && per_cpu[1].online && per_cpu[1].ready) break;
+            __asm__ volatile("pause");
+        }
+        if (smp_cpu_count > 1U && per_cpu[1].online && per_cpu[1].ready) {
+            if (irq_migrate_to_ioapic(1U, per_cpu[1].apic_id) != 0) {
+                kprintln("ioapic: irq1 migration failed, staying on PIC");
+            }
+        } else {
+            kprintln("ioapic: irq1 stays on PIC (AP not ready yet)");
+        }
     }
 
     /* 系统调用门（DPL3）：0x80 原生 ABI，0x81 旧原型过渡门 */
