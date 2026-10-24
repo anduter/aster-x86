@@ -591,7 +591,15 @@ ushell: argc=2 argv0=foo
 55. `native: channel ok`（成对 channel endpoint 的 send/recv）；
 56. `native: port ok`（Port create → connect → accept → channel 数据）；
 57. channel/port 阻塞 recv/accept 已接入 `proc_block` + send/connect wakeup；
-58. `native: channel block ok`（fork 子进程 sleep 后 send，父进程阻塞 recv 被唤醒）。
+58. `native: channel block ok`（fork 子进程 sleep 后 send，父进程阻塞 recv 被唤醒）；
+59. `native: service ok`（service registry register → connect by name → accept）；
+60. `native: supervisor ok`（supervisor 服务查询 registry 并回复）；
+61. `user: entering ring3 (ring3 AP probe ... cpu=1)` + `ring3 AP probe ok`；
+62. `native: manifest ok`（supervisor 检查 supervisor + echo 服务清单）；
+63. `native: handle revoke ok`（revoke 后句柄失效，close 仍可释放对象引用）；
+64. `net: UDP echo reply`（QEMU 用户网络 + 宿主 PowerShell UDP 回显）；
+65. `sectest: udp ok`（ring3 通过 SYS_UDP_SEND/RECV 完成 UDP echo）；
+66. `sectest: socket udp ok`（socket → sendto → recvfrom → close）。
 
 失败时返回非 0，可直接接到 CI。
 
@@ -608,6 +616,37 @@ ushell: argc=2 argv0=foo
 为什么不用 `-nic user`：slirp 会替网关回 ARP/ICMP，但**不会**把 guest 发往
 `10.0.2.2` 的 UDP 交给宿主监听端口，UDP 回显没法稳定断言。socket 后端完全确定、
 不依赖外网。
+
+## 压力测试 / 长稳
+
+```powershell
+.\tools\stress.ps1 -Hours 8                    # 8 小时长稳（默认 smp=2）
+.\tools\stress.ps1 -Hours 0.05 -InjectEverySec 15   # 3 分钟冒烟
+New-Item stress-run\STOP                        # 提前停止
+```
+
+脚本行为：串口落文件并**按字节偏移 tail**（不依赖 TCP 串口），每 60 秒用 HMP
+`sendkey` 输入一条命令（`ls` / `echo` / `pwd` / `fork` / `cat`），持续扫描
+`KERNEL PANIC`、`CPU exception`、`user: exception`、`Triple fault`；
+串口 300 秒无增长判定为挂死。故意崩溃或挂死会写 `CRASH.txt` 并以 2 退出。
+
+> 不要用 `tools/soak.ps1` 做多小时长跑：它的串口走 TCP，在 QEMU 这版上会中途
+> 静默（guest 仍在跑），看起来像挂死。
+
+**已跑通的一次 8 小时结果（2026-10-24 01:45–09:45，smp=2）：**
+
+| 指标 | 数值 |
+|---|---|
+| 时长 | 480 分钟（准点结束） |
+| 注入命令 | 478 条，478 条都有 `ushell>` 回显 |
+| 心跳 | 28 559 次（≈1/s，无中断） |
+| `KERNEL PANIC` / 异常 / oops / 栈 canary | 0 / 0 / 0 / 0 |
+| `vmm: WARN` / 内存分配失败 | 0 / 0 |
+| 崩溃文件 | 无 |
+
+覆盖：双核调度与迁移、APIC/PIT、shell 命令循环、`fork`/`exec`/COW、文件系统读写
+与落盘、capability/pipe、console 锁竞争、启动期 ARP/ICMP/UDP。
+未覆盖：持续网络流量、精确的内存泄漏量化（需要前后对比 `pmm` 空闲页计数）。
 
 ## 已知限制
 
