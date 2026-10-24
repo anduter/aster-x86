@@ -403,16 +403,16 @@ void shell_entry(void)
         unsigned int sec = timer_ticks() / timer_hz();
         if (sec != last_sec && line_len == 0U) {
             char status[64];
+            char line[64];
 
             last_sec = sec;
             ksnprintf(status, sizeof(status), "shell - uptime %u s", sec);
             console_set_status(status);
 
-            serial_puts("uptime: ");
-            serial_putdec(sec);
-            serial_puts(" s (ticks ");
-            serial_putdec((uint32_t)timer_ticks());
-            serial_puts(")\r\n");
+            /* 整行一次性走 console 锁，避免和 AP 上的心跳/调度日志交错。 */
+            ksnprintf(line, sizeof(line), "uptime: %u s (ticks %u)\n",
+                      sec, (unsigned int)timer_ticks());
+            console_serial_line(line);
         }
 
         /* 3. 没有输入就让出 CPU，等下一个中断 */

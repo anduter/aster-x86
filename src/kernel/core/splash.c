@@ -51,7 +51,8 @@ static void splash_wait(void)
 
 static void splash_serial(const char *s)
 {
-    while (*s != '\0') serial_putc(*s++);
+    /* 与 console 输出共用同一把锁，整行原子（早启动单核也无副作用）。 */
+    console_serial_line(s);
 }
 
 void boot_splash(void)

@@ -307,16 +307,14 @@ static void timer_handler(void *arg)
      * 观察 free_pages 是否持续下降、procs 是否泄漏。 */
     if ((ticks % (TIMER_HZ * 60U)) == 0U) {
         unsigned int sec = ticks / TIMER_HZ;
+        char line[128];
 
-        serial_puts("soak: uptime=");
-        serial_putdec(sec);
-        serial_puts(" s free_pages=");
-        serial_putdec((unsigned int)pmm.free_pages);
-        serial_puts(" procs=");
-        serial_putdec(proc_count());
-        serial_puts(" faults=");
-        serial_putdec((unsigned int)pmm_faults);
-        serial_puts("\r\n");
+        /* 整行一次性走 console 锁，避免和 AP 上的输出交错。 */
+        ksnprintf(line, sizeof(line),
+                  "soak: uptime=%u s free_pages=%u procs=%u faults=%u\n",
+                  sec, (unsigned int)pmm.free_pages, (unsigned int)proc_count(),
+                  (unsigned int)pmm_faults);
+        console_serial_line(line);
     }
 
     /* 唤醒到期的睡眠者 */
