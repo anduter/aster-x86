@@ -15,4 +15,7 @@
 #include "core/splash.h"
 #include "core/version.h"
 
+/* boot sequence entry (core/bootseq.c) */
+void kernel_boot(void);
+
 #endif

@@ -8,4 +8,7 @@
 #include "svc/channel.h"
 #include "ipc/port.h"
 
+/* selftests */
+void service_lifecycle_selftest(void);
+
 #endif

@@ -8,4 +8,7 @@
 #include "fs/pipe.h"
 #include "fs/ramfs.h"
 
+/* selftests */
+void fs_backend_selftest(void);
+
 #endif
