@@ -19,5 +19,6 @@ proc_fd_t  *fd_get(proc_t *p, int fd);
 int         fd_alloc_kind(proc_t *p, uint8_t kind, uint32_t handle, uint32_t rights);
 int         fd_alloc(proc_t *p, uint32_t handle, uint32_t rights);
 uint32_t    open_rights(uint32_t flags);
+int         sys_getchar_block(void);
 
 #endif

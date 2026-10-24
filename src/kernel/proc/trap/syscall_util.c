@@ -133,3 +133,22 @@ int fd_alloc(proc_t *p, uint32_t handle, uint32_t rights)
 {
     return fd_alloc_kind(p, FD_KIND_FILE, handle, rights);
 }
+
+/* 阻塞读一个字符：没有键就睡在键盘通道上，由 IRQ1 唤醒。
+ * fs 组的 stdin 读（fread）与 misc 组的 SYS_GETCHAR 共用。 */
+int sys_getchar_block(void)
+{
+    for (;;) {
+        unsigned int flags;
+        int c;
+
+        __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags));
+        c = keyboard_getchar();
+        if (c >= 0) {
+            __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
+            return c;
+        }
+        proc_block(PROC_WAIT_KBD);
+        __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
+    }
+}
