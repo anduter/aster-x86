@@ -397,7 +397,7 @@ if ($Test -or $Shot) {
     # 等"shell 真的起来了"再注入，而不是固定 sleep：
     # 启动路径越加越长（服务注册、echosvc、ring3probe、net 的 TCP 超时探测等），
     # 固定 10 秒会在慢一点的机器上把按键注入到 shell 还没开始读键盘的时候。
-    $bootDeadline = (Get-Date).AddSeconds([Math]::Max(60, $TimeoutSec))
+    $bootDeadline = (Get-Date).AddSeconds([Math]::Max(90, $TimeoutSec))
     $bootTicks = 0
     while ((Get-Date) -lt $bootDeadline) {
         if (Test-Path $serial) {
@@ -426,7 +426,7 @@ if ($Test -or $Shot) {
     # reexec 成功后 shell 会重新打印第二次 "ushell: ready"；没有 reexec 就固定等 5 秒。
     T 'keys injected'
     if ($Keys -match 'reexec') {
-        $doneDeadline = (Get-Date).AddSeconds(45)
+        $doneDeadline = (Get-Date).AddSeconds(90)
         $doneTicks = 0
         while ((Get-Date) -lt $doneDeadline) {
             if (Test-Path $serial) {
@@ -438,6 +438,17 @@ if ($Test -or $Shot) {
             if (($doneTicks % 17) -eq 0) {
                 Write-Host ("  [wait commands: {0}s]" -f [int]($doneTicks * 0.3)) -ForegroundColor DarkGray
             }
+        }
+        # 第二次 ready 只代表 shell 起来了；内置 demo 的 native 自检链
+        # (manifest→restart→process_create，restart 自身最多轮询 2s) 与注入
+        # 命令并发，必须等它打出最终行再采样，否则 svcwatch/restart 会假失败。
+        $nativeDeadline = (Get-Date).AddSeconds(5)
+        while ((Get-Date) -lt $nativeDeadline) {
+            if (Test-Path $serial) {
+                $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
+                if ($snap -and ($snap -match 'native: process_create/wait (ok|FAILED)')) { break }
+            }
+            Start-Sleep -Milliseconds 100
         }
         Start-Sleep -Milliseconds 800
     } else {
@@ -501,6 +512,15 @@ if ($Test -or $Shot) {
         $aslrTramp = @([regex]::Matches($out, 'tramp=0x([0-9a-f]+)') |
                        ForEach-Object { $_.Groups[1].Value } |
                        Select-Object -Unique)
+        # 心跳计数必须严格递增（取相邻两次 N 比较 N2>N1）。CPU 不限：
+        # 线程被负载均衡搬到哪颗核与"时钟在推进"无关；AP 调度由
+        # "AP 进入 idle"（AP ticks/ipi/tlb）和"负载放置把线程送上 AP"覆盖。
+        $hbCounts = @([regex]::Matches($out, 'thread: heartbeat (\d+) pid=\d+ cpu=\d+') |
+                      ForEach-Object { [int]$_.Groups[1].Value })
+        $hbStrict = $false
+        for ($hi = 1; $hi -lt $hbCounts.Count; $hi++) {
+            if ($hbCounts[$hi] -gt $hbCounts[$hi - 1]) { $hbStrict = $true; break }
+        }
         $checks = @(
             @{ Name = '串口有输出';              Ok = ($out.Length -gt 0) },
             @{ Name = '无内核 panic';             Ok = (($out -cnotmatch 'KERNEL PANIC') -and ($out -cnotmatch 'kernel stack canary corrupted')) },
@@ -549,7 +569,7 @@ if ($Test -or $Shot) {
             @{ Name = 'ring3 userdemo 运行';     Ok = ($out -match 'user: entering ring3 \(builtin demo') },
             @{ Name = 'ring3 AP 探针';           Ok = ($out -match 'user: entering ring3 \(ring3 AP probe.*cpu=1') },
             @{ Name = '异常可恢复';               Ok = ($out -match 'sys: unmapped user pointer -> -1') },
-            @{ Name = '时钟中断在推进';           Ok = ($out -match 'thread: heartbeat [1-9]\d* pid=\d+ cpu=1') },
+            @{ Name = '时钟中断在推进';           Ok = $hbStrict },
             @{ Name = 'ring3 shell 已启动';       Ok = ($out -match 'ushell: ready') },
             @{ Name = '内核线程被调度';           Ok = ($out -match 'thread: heartbeat \d+ pid=\d+ cpu=1') },
             @{ Name = '注入的命令被执行';         Ok = ($out -match 'ushell: commands') },
@@ -572,6 +592,7 @@ if ($Test -or $Shot) {
             @{ Name = 'FAT16 交换盘已挂载';       Ok = ($out -match 'fat16: ata1 mounted as fat:/') },
             @{ Name = 'FAT16 能读宿主文件';       Ok = ($out -match 'fat16: host\.txt = hello from host') },
             @{ Name = 'VFS 后端一致性';           Ok = ($out -match 'fs: backend selftest ok') },
+            @{ Name = 'FS rename 可用';           Ok = ($out -match 'selftest: rename ok') },
             @{ Name = 'PCI 枚举可用';             Ok = ($out -match 'pci: [1-9]\d* device') },
             @{ Name = 'ACPI 表可用';              Ok = ($out -match 'acpi: PM1a_CNT=0x') },
             @{ Name = 'APIC 已探测';              Ok = ($out -match 'apic: LAPIC present') },
