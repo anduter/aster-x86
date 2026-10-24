@@ -11,7 +11,8 @@
 # 多会话并行（各会话一套产物，互不覆盖）：
 #   .\build.ps1 -ObjDir .obj-a -DistDir .dist-a -QmpPort 4481 -SerialLog serial-a.log
 #   .\build.ps1 -Test -ObjDir .obj-b -DistDir .dist-b -QmpPort 4491 -SerialLog serial-b.log
-# 注意：-Test 会在宿主监听 UDP/TCP 12345（**客户机里编译期固定的回显端口**），
+# 注意：-Test 会在宿主监听 UDP/TCP 12345（**客户机里编译期固定的回显端口**；
+# 可用 -EchoPort 覆盖内核侧端口，但用户态 user_shell.c 仍固定 12345），
 # 所以同一时刻只能有一个会话跑 -Test；脚本会在启动 QEMU 前探测该端口并明确报错。
 # =============================================================================
 param(
@@ -28,6 +29,7 @@ param(
     [string]$ObjDir = 'obj',
     [string]$DistDir = 'dist',
     [int]$QmpPort = 4444,
+    [int]$EchoPort = 12345,
     [string]$SerialLog = ''
 )
 
@@ -59,6 +61,7 @@ $CFLAGS = @(
     '-ffreestanding', '-fno-pic', '-fno-pie', '-m32', '-nostdlib',
     '-fno-asynchronous-unwind-tables', '-fno-stack-protector', '-fno-builtin',
     "-DFONT_SCALE=$FontScale",
+    "-DNET_ECHO_PORT=$EchoPort",
     '-Wall', '-Wextra', '-Werror', '-g', '-O0', '-Isrc/kernel'
 )
 
@@ -317,15 +320,16 @@ if ($Test -or $Shot) {
         throw ("QMP 端口 {0} 已被占用（可能另一个会话的 QEMU 还在跑）。换一个 -QmpPort，例如 4481。" -f $QmpPort)
     }
     if ($Test) {
-        if (-not (Test-PortFree -Port 12345 -Proto udp) -or
-            -not (Test-PortFree -Port 12345 -Addr '0.0.0.0')) {
-            throw "宿主 12345 端口已被占用：同一时刻只能跑一个 -Test（回显端口在客户机里是编译期常量 12345）。"
+        if (-not (Test-PortFree -Port $EchoPort -Proto udp) -or
+            -not (Test-PortFree -Port $EchoPort -Addr '0.0.0.0')) {
+            throw "宿主 $EchoPort 端口已被占用：同一时刻只能跑一个 -Test（回显端口在客户机里是编译期常量 $EchoPort）。"
         }
     }
     $udpEcho = $null
     if ($Test) {
-        $udpEcho = Start-Job -ScriptBlock {
-            $u = New-Object System.Net.Sockets.UdpClient(12345)
+        $udpEcho = Start-Job -ArgumentList $EchoPort -ScriptBlock {
+            param($EchoPort)
+            $u = New-Object System.Net.Sockets.UdpClient($EchoPort)
             $u.Client.ReceiveTimeout = 250   # interruptible: Stop-Job must not wait on a blocked Receive
             try {
                 $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
@@ -344,10 +348,10 @@ if ($Test -or $Shot) {
 
     $tcpEcho = $null
     if ($Test) {
-        $tcpEcho = Start-Job -ArgumentList $tcpLog -ScriptBlock {
-            param($log)
+        $tcpEcho = Start-Job -ArgumentList $tcpLog, $EchoPort -ScriptBlock {
+            param($log, $EchoPort)
             "listen" | Set-Content -Path $log -Encoding ASCII
-            $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 12345)
+            $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $EchoPort)
             try {
                 $l.Start()
                 $deadline = (Get-Date).AddSeconds(120)
