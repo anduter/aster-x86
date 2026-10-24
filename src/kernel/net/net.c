@@ -8,6 +8,7 @@
  * 没有 IRQ、没有完整协议栈、没有 socket。
  * ============================================================================= */
 #include "net.h"
+#include "net_boot.h"
 #include "include/dev.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
@@ -16,9 +17,47 @@
 
 #define NET_RX_MAX 2048U
 
-static const uint8_t local_ip[4] = { 10, 0, 2, 15 };
-static const uint8_t gw_ip[4]    = { 10, 0, 2, 2 };
+/* 配置在 DHCP 成功后会被就地更新；默认值是 QEMU slirp 的静态网络。
+ * dns 在没有 DHCP 时用 slirp 的内置 DNS 10.0.2.3，让 DNS 自检仍可尝试。 */
+static uint8_t local_ip[4] = { 10, 0, 2, 15 };
+static uint8_t gw_ip[4]    = { 10, 0, 2, 2 };
+static uint8_t netmask[4]  = { 255, 255, 255, 0 };
+static uint8_t dns_ip[4]   = { 10, 0, 2, 3 };
 static uint8_t gw_mac[6];
+
+void net_cfg_get(uint8_t ip[4], uint8_t gw[4], uint8_t dns[4], uint8_t mask[4])
+{
+    if (ip != 0) memcpy(ip, local_ip, 4);
+    if (gw != 0) memcpy(gw, gw_ip, 4);
+    if (dns != 0) memcpy(dns, dns_ip, 4);
+    if (mask != 0) memcpy(mask, netmask, 4);
+}
+
+int net_cfg_set(const uint8_t ip[4], const uint8_t gw[4],
+                const uint8_t mask[4], const uint8_t dns[4])
+{
+    if (ip == 0 || (ip[0] | ip[1] | ip[2] | ip[3]) == 0) return -1;
+
+    memcpy(local_ip, ip, 4);
+    if (mask != 0) memcpy(netmask, mask, 4);
+    if (gw != 0 && (gw[0] | gw[1] | gw[2] | gw[3]) != 0) {
+        /* 网关换了，旧的 MAC 不能再用于后续 UDP/TCP 发送 */
+        if (memcmp(gw_ip, gw, 4) != 0) memset(gw_mac, 0, sizeof(gw_mac));
+        memcpy(gw_ip, gw, 4);
+    }
+    if (dns != 0) memcpy(dns_ip, dns, 4);
+    return 0;
+}
+
+void net_gw_mac_get(uint8_t mac[6])
+{
+    if (mac != 0) memcpy(mac, gw_mac, 6);
+}
+
+void net_gw_mac_set(const uint8_t mac[6])
+{
+    if (mac != 0) memcpy(gw_mac, mac, 6);
+}
 static uint16_t ip_id;
 static uint16_t icmp_seq;
 
@@ -620,4 +659,8 @@ void net_init(void)
             kprintln("net: UDP echo timeout (no host echo port)");
         }
     }
+
+    /* 真实可用性自检：DHCP 取址 -> DNS 解析 -> 主动 ping 网关。
+     * 全部有界超时（DHCP <= 3s），失败只降级、保留静态配置，不阻塞启动。 */
+    net_boot_selftest();
 }
