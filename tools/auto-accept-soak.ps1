@@ -79,8 +79,8 @@ Log 'building default image for soak'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'build.ps1') | Out-Null
 if ($LASTEXITCODE -ne 0) { Log 'FAIL: default build failed'; exit 1 }
 
-Log "soak $SoakHours h started"
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'tools\soak.ps1') -Hours $SoakHours -Smp 2 -Inject -InjectEverySec 120
+Log "soak $SoakHours h started (file serial)"
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'tools\soak-file.ps1') -Hours $SoakHours -Smp 2 -SerialLog 'obj/soak-file/serial-final.log'
 $soakCode = $LASTEXITCODE
 Log "soak exit=$soakCode"
 if ($soakCode -ne 0) { Log 'FAIL: soak reported crash'; exit 1 }
