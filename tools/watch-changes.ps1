@@ -1,11 +1,10 @@
 # watch-changes.ps1 - repo change watcher (event-driven progress reporting)
 #
-# v3: reports only milestones, with debounce:
-#   - HEAD changed (new commit)
-#   - OS_VERSION changed
-#   - the set of UNTRACKED files changed (new module/file appeared)
-#   Editing tracked files that are already dirty does NOT trigger, so bursts of
-#   iterative edits are coalesced into one report at the next commit.
+# v4: reports only milestones, with debounce:
+#   - HEAD changed (new commit)          <- main signal
+#   - the set of UNTRACKED files changed <- new module/file appeared
+# Version bumps while the tree is still dirty do NOT trigger (mid-work noise);
+# the current version is still shown in every report.
 #   When triggered, wait until the snapshot is stable for SettleSec, then report
 #   once and exit 0.
 #
@@ -29,8 +28,8 @@ function Get-Snapshot {
                    ForEach-Object { $_.ToString().Substring(3).Trim() } | Sort-Object)
     $diffstat = ((cmd /c "git diff --stat 2>nul") | Select-Object -Last 1)
 
-    # trigger key: HEAD + version + sorted set of untracked paths
-    $key = "HEAD=$head`nVER=$ver`nUNTRACKED=" + ($untracked -join '|')
+    # trigger key: HEAD + sorted set of untracked paths (version shown but not triggering)
+    $key = "HEAD=$head`nUNTRACKED=" + ($untracked -join '|')
     $sha = [Security.Cryptography.SHA256]::Create()
     $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))).Replace('-', '')
 
