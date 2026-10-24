@@ -1,12 +1,12 @@
 #include "interrupt.h"
-#include "../types.h"
-#include "../panic.h"
-#include "../proc/proc.h"
-#include "../user/user_mode.h"
-#include "../core/ksym.h"
-#include "../core/smp.h"
-#include "../mm/vmm.h"
-#include "../lib/kprintf.h"
+#include "../../types.h"
+#include "../../panic.h"
+#include "../proc.h"
+#include "../../user/user_mode.h"
+#include "../../core/ksym.h"
+#include "../smp.h"
+#include "../../mm/vmm.h"
+#include "../../lib/kprintf.h"
 
 /* ---- IDT 表项（x86 中断门，8 字节） ---- */
 typedef struct {

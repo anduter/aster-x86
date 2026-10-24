@@ -7,7 +7,7 @@
  * 于是这段代码可以“失败后返回错误码”，而不是杀线程/panic。
  * ============================================================================= */
 #include "fault.h"
-#include "../core/error.h"
+#include "../../core/error.h"
 
 #define FAULT_MAX 8
 
