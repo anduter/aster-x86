@@ -144,7 +144,7 @@ proc_t *proc_spawn(const char *program_name)
     p->page_dir   = vmm_new_dir();     /* 独立地址空间（内核映射共享） */
     if (p->page_dir == 0) {
         free(stack);
-        memset(p, 0, sizeof(*p));
+        sched_clear_slot(p);
         return 0;
     }
     /* 用户栈/堆/蹦床页 ASLR：只随机起始地址，边界与 guard 不变。 */
@@ -218,6 +218,10 @@ void thread_entry_c(void)
 {
     proc_t *p = proc_current();
 
+    /* 第一次运行的线程没有“从 context_switch 返回”的恢复点，在这里清掉
+     * 本 CPU 的 switch_from 并补投迟到唤醒。 */
+    sched_end_switch();
+
     if (p != 0 && p->entry != 0) {
         p->entry();
     }
@@ -242,6 +246,25 @@ void proc_switch_to(proc_t *next)
         panic("kernel stack canary corrupted");
     }
 
+    /* next 必须来自 sched_next()（已置 RUNNING），且 esp 落在自己的内核栈里。
+     * 以前出现过 esp/返回地址被踩后 ret 到 0x1b（用户 cs 值）的 oops；
+     * 在切换点断言能把现场钉在“哪个 pid、哪段栈”。 */
+    if (next->state != PROC_RUNNING) {
+        panic("switch: next pid %u state %u not RUNNING",
+              next->pid, (unsigned int)next->state);
+    }
+    if (next->stack_base != 0) {
+        uintptr_t lo = (uintptr_t)next->stack_base;
+        uintptr_t hi = lo + PROC_STACK_SIZE;
+        uintptr_t sp = (uintptr_t)next->esp;
+
+        if (sp < lo || sp >= hi) {
+            panic("switch: pid %u (%s) esp %p outside kernel stack [%p,%p)",
+                  next->pid, (next->name != 0) ? next->name : "?",
+                  (void *)sp, (void *)lo, (void *)hi);
+        }
+    }
+
     /* 保存中断状态并在切换期间关中断，避免切到一半被时钟打断 */
     __asm__ volatile ("pushfl; popl %0" : "=r"(flags));
     __asm__ volatile ("cli");
@@ -250,6 +273,7 @@ void proc_switch_to(proc_t *next)
         prev->state = PROC_READY;
     }
     next->state = PROC_RUNNING;
+    sched_begin_switch(prev);     /* 直到恢复点前 prev 的栈仍在用 */
     this_cpu()->current = next;
 
     /* ring3 进 ring0 时 CPU 从 TSS.esp0 取内核栈，必须跟当前线程一致 */
@@ -263,6 +287,10 @@ void proc_switch_to(proc_t *next)
     }
 
     context_switch(prev != 0 ? &prev->esp : &this_cpu()->bootstrap_esp, next->esp);
+
+    /* 这里已经在本进程（next）的栈上：prev 的栈不再被使用，可以补投
+     * 之前因为“还在 CPU 上”而暂存的唤醒。 */
+    sched_end_switch();
 
     /* 恢复到本进程时，恢复它自己的中断状态 */
     __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
@@ -377,7 +405,7 @@ proc_t *proc_fork(struct interrupt_frame *f)
 
         if (child->page_dir != 0) vmm_destroy_dir((pde_t *)child->page_dir);
         free(stack);
-        memset(child, 0, sizeof(*child));
+        sched_clear_slot(child);
         return 0;
     }
 
@@ -389,11 +417,16 @@ proc_t *proc_fork(struct interrupt_frame *f)
 
 static void proc_reap(proc_t *p)
 {
+    void *stack = p->stack_base;
+    void *dir = p->page_dir;
+
     sched_dequeue(p);
-    if (p->stack_base != 0) free(p->stack_base);
-    if (p->page_dir != 0) vmm_destroy_dir((pde_t *)p->page_dir);
+    if (stack != 0) free(stack);
+    if (dir != 0) vmm_destroy_dir((pde_t *)dir);
     native_proc_free(p);
-    memset(p, 0, sizeof(*p));
+    /* 清零放进 sched_lock：避免另一个 CPU 的 sched_next 看到半清零的 proc_t
+     * （pid=0/name=NULL 但 state 还是旧值）。 */
+    sched_clear_slot(p);
 }
 
 int proc_wait_options(int pid, int *status, int options)
@@ -465,10 +498,16 @@ void proc_block(unsigned int chan)
     if (next != 0) {
         proc_switch_to(next);       /* 被唤醒后回到这里 */
     } else {
-        /* 没有别的可运行线程：睡到真正被 proc_wakeup 改成 READY 为止。
+        /* 没有别的可运行线程：睡到真正被唤醒为止。
          * 不能只执行一次 hlt 就返回，否则 timer/NMI 等任意中断都会让
-         * 阻塞进程“假醒”，在 accept/recv 里反复空转。 */
+         * 阻塞进程“假醒”，在 accept/recv 里反复空转。
+         * wake_pending 覆盖“还在本 CPU 上就被 sched_wake 叫醒”的窗口：
+         * 那时 sched_wake 不会入队，只置这个标记。 */
         while (p->state == PROC_BLOCKED) {
+            if (p->wake_pending) {
+                p->wake_pending = false;
+                break;
+            }
             __asm__ volatile ("sti; hlt");
         }
     }

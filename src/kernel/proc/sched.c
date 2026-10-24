@@ -172,12 +172,96 @@ void sched_enqueue(proc_t *p, uint32_t cpu)
     if (cpu != smp_cpu_id()) sched_kick(cpu);
 }
 
+/* 进程是否还是某颗 CPU 的 current（即还没真正从 proc_block 切走）。
+ * 调用者持有 sched_lock；per_cpu[].current 的写入不持锁，但 32 位对齐写
+ * 是原子的：这里最坏读到“已经切走”的旧值 → 直接入队（正确），或读到
+ * “还在 CPU 上” → 记 pending（正确）。 */
+static bool proc_still_on_cpu(const proc_t *p)
+{
+    for (uint32_t i = 0; i < SMP_MAX_CPUS; i++) {
+        if (per_cpu[i].current == p) return true;
+    }
+    return false;
+}
+
+/* 本 CPU 正在“从哪个进程切走”：从 proc_switch_to() 开始切栈，到恢复点
+ * 真正换到新栈为止。这段时间里 prev 已经不是 current，但它的内核栈仍在
+ * 被使用，绝不能让它被另一颗 CPU 调度（否则 ret 会落到 0x1b 之类的脏值）。 */
+static proc_t *proc_switch_from[SMP_MAX_CPUS];
+
+bool proc_in_switch(const proc_t *p)
+{
+    if (p == 0) return false;
+
+    for (uint32_t i = 0; i < SMP_MAX_CPUS; i++) {
+        if (proc_switch_from[i] == p) return true;
+    }
+    return false;
+}
+
+/* 切换开始：在 sched_lock 内记录“本 CPU 正在从 prev 切走”。
+ * 必须早于 per_cpu[cpu].current = next 写入，唤醒方在同一把锁里检查
+ * proc_in_switch()，从而不会在栈切换完成前把 prev 入队。 */
+void sched_begin_switch(proc_t *prev)
+{
+    uint32_t flags = spin_lock_irqsave(&sched_lock);
+    uint32_t cpu = smp_cpu_id();
+
+    if (cpu < SMP_MAX_CPUS) proc_switch_from[cpu] = prev;
+    spin_unlock_irqrestore(&sched_lock, flags);
+}
+
+/* 切换完成（已经在新线程的栈上）：清掉 switch_from 并补投迟到唤醒。 */
+void sched_end_switch(void)
+{
+    uint32_t flags = spin_lock_irqsave(&sched_lock);
+    uint32_t cpu = smp_cpu_id();
+
+    if (cpu < SMP_MAX_CPUS) proc_switch_from[cpu] = 0;
+    spin_unlock_irqrestore(&sched_lock, flags);
+
+    sched_deliver_pending();
+}
+
+/* 把因为“目标还没切走”而暂存的唤醒补投。
+ * 安全条件：目标已不是任何 CPU 的 current，且 sched.c 的
+ * proc_switch_from[] 也不再引用它（即它的内核栈已经不再被使用）。
+ * 只投到当前 CPU 的 runqueue，由本 CPU 的 tick/调度点取走。 */
+void sched_deliver_pending(void)
+{
+    uint32_t flags = spin_lock_irqsave(&sched_lock);
+    uint32_t cpu = smp_cpu_id();
+
+    if (cpu < SMP_MAX_CPUS) {
+        for (uint32_t i = 0; i < PROC_MAX; i++) {
+            proc_t *p = &proc_table[i];
+
+            if (p->state != PROC_BLOCKED || !p->wake_pending) continue;
+            if (proc_still_on_cpu(p)) continue;
+            if (proc_in_switch(p)) continue;    /* 栈还没切完，别投 */
+
+            p->wake_pending = false;
+            p->state = PROC_READY;
+            rq_unlink_locked(p);
+            rq_link_locked(cpu, p);
+        }
+    }
+
+    spin_unlock_irqrestore(&sched_lock, flags);
+}
+
 /* 唤醒一个阻塞进程：状态迁移与入队在同一把锁里完成，
- * 避免与另一 CPU 的 sched_next/sched_balance 竞争。 */
+ * 避免与另一 CPU 的 sched_next/sched_balance 竞争。
+ *
+ * 若目标还停在 proc_block→proc_switch_to 的窗口里（state==BLOCKED 但仍是
+ * 某 CPU 的 current），只记 wake_pending，等它真正切走后由
+ * sched_deliver_pending() 补入队。否则会把同一个进程同时放到两颗 CPU 上
+ * 执行（共享同一内核栈/esp），表现为 ret 到 0x1b 之类的内核 oops。 */
 void sched_wake(proc_t *p)
 {
     uint32_t flags;
     uint32_t cpu;
+    bool enqueued = false;
 
     if (p == 0) return;
 
@@ -192,13 +276,23 @@ void sched_wake(proc_t *p)
     flags = spin_lock_irqsave(&sched_lock);
     prio_default_locked(p);
     if (p->state != PROC_ZOMBIE && p->state != PROC_RUNNING) {
-        p->state = PROC_READY;
-        rq_unlink_locked(p);
-        rq_link_locked(cpu, p);
+        /* 目标还停在本 CPU 上，或已经 current=next 但内核栈还没切完
+         * （proc_in_switch）：都不能现在入队，否则另一颗 CPU 会拿着同一份
+         * 内核栈/esp 并发执行。记 pending，等安全点由
+         * sched_deliver_pending() 补投。 */
+        if (p->state == PROC_BLOCKED &&
+            (proc_still_on_cpu(p) || proc_in_switch(p))) {
+            p->wake_pending = true;
+        } else {
+            p->state = PROC_READY;
+            rq_unlink_locked(p);
+            rq_link_locked(cpu, p);
+            enqueued = true;
+        }
     }
     spin_unlock_irqrestore(&sched_lock, flags);
 
-    if (cpu != smp_cpu_id()) sched_kick(cpu);
+    if (enqueued && cpu != smp_cpu_id()) sched_kick(cpu);
 }
 
 /* 进程退出/回收时把它从所有 runqueue 摘掉 */
@@ -210,6 +304,21 @@ void sched_dequeue(proc_t *p)
 
     flags = spin_lock_irqsave(&sched_lock);
     rq_unlink_locked(p);
+    spin_unlock_irqrestore(&sched_lock, flags);
+}
+
+/* 回收一个进程槽：摘 runqueue + memset 清零，全部在 sched_lock 里完成。
+ * 之前在锁外 memset，理论上另一个 CPU 的 sched_next 可能看到“半清零”的
+ * proc_t（pid=0/name=NULL 但 state 还是旧值），是 pid 0/(null) 脏现场的来源。 */
+void sched_clear_slot(proc_t *p)
+{
+    uint32_t flags;
+
+    if (p == 0) return;
+
+    flags = spin_lock_irqsave(&sched_lock);
+    rq_unlink_locked(p);
+    memset(p, 0, sizeof(*p));
     spin_unlock_irqrestore(&sched_lock, flags);
 }
 
@@ -286,6 +395,23 @@ proc_t *sched_next(proc_t *cur)
         proc_t *p = &proc_table[idx];
 
         if ((bucket & (1U << idx)) == 0U) continue;
+
+        /* 脏槽位/并发执行断言：合法进程一定有 pid 和 name。允许选中
+         * “本 CPU 的 current”（sched_tick 时间片到期时先把 cur 放回 READY，
+         * 再可能选回它自己，next==cur 时不切换）；但同一进程出现在**别的**
+         * CPU 的 current 上就是并发执行，必须 panic 留现场。 */
+        if (p->pid == 0U || p->name == 0) {
+            panic("sched: dirty runq idx=%u pid=%u name=%p state=%u eff=%u",
+                  idx, p->pid, (void *)p->name, (unsigned int)p->state,
+                  (unsigned int)p->eff_prio);
+        }
+        for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
+            if (c != cpu && per_cpu[c].current == p) {
+                panic("sched: pid %u selected on cpu %u but still current on cpu %u",
+                      p->pid, cpu, c);
+            }
+        }
+
         p->state = PROC_RUNNING;
         p->eff_prio = p->base_prio;       /* 运行后回落到 base */
         p->wait_ticks = 0;
@@ -395,6 +521,10 @@ void sched_tick(void)
 {
     proc_t *cur = proc_current();
     proc_t *next;
+
+    /* 补投“目标还没切走时到达”的唤醒。每 tick 做一次兜底，保证即便
+     * 唤醒方是另一颗 CPU、也没走到恢复点，也不会丢失唤醒。 */
+    sched_deliver_pending();
 
     /* 本 CPU 空闲（没有 current）：有新活就立刻接管。
      * 只在本 CPU 真的停在 idle 循环里时才这么做——内核启动阶段同样没有 current，

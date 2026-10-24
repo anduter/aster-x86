@@ -86,6 +86,7 @@ typedef struct process {
     uint32_t     aged;          /* aging 提升过多少次（诊断/自检用） */
     unsigned int wait_chan;     /* 阻塞时睡在哪个通道 */
     bool         slept;         /* 是否曾经睡过（只打印一次日志） */
+    bool         wake_pending;  /* 还在 block→switch 窗口里被唤醒：切走后补入队 */
     uint32_t     parent_pid;    /* 父进程 pid（wait 用） */
     char         cwd[192];      /* 当前目录（形如 "system:/docs"） */
     uint32_t     user_brk;      /* 用户堆当前边界（brk 系统调用） */

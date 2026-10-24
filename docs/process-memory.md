@@ -676,6 +676,37 @@ sectest: mprotect invalid ok
      把现场打出来，不静默继续。
    注：与 SIGCHLD 无关，是“退出栈上 idle”路径对 CR3 的遗漏；等 e1000 回稳后
    连跑 2 次 + 8h soak 验证。
+10. **`eip=0x1b` 真正根因（验收 HEAD 2ee1f56 复现）：wake-vs-block 竞态把
+    同一个进程放到两颗 CPU 上并发执行**。
+    现场（`serial-acc-2.log`）：`pid 29` 在 CPU1 退出后，
+    `oops: exception 14 at eip=0x1b err=11 cr2=0x1b` + NMI watchdog panic。
+    `err=11` = present + 取指（0x1b 是用户 CS 选择子；低地址页 present 但 NX）。
+    `proc_block()` 先置 `state=BLOCKED`、再 `sched_next()`/`proc_switch_to()`；
+    在这个窗口里，另一颗 CPU 的 `sched_wake()`（定时器唤醒 svcwatch、子进程
+    退出唤醒父进程等）看到 BLOCKED 就把它置 READY 并**入队到别的 CPU**。
+    另一颗 CPU 立即切到这个进程的**旧 esp**（它的内核栈还没切走），于是同一
+    份内核栈/返回地址被两颗 CPU 同时使用，`ret` 弹出脏值 0x1b → oops。
+    修复（proc/sched.c、proc/process.c、proc/proc.h、proc/proc_internal.h）：
+    - `proc_t.wake_pending`：目标还是某 CPU 的 current、或处于
+      `proc_in_switch()` 的切栈窗口时，`sched_wake()` 只记 pending，不入队；
+    - `sched_begin_switch()/sched_end_switch()` + `proc_switch_from[]`：
+      从 `current=next` 到恢复点（新栈上）之间把 prev 标记为“栈在用”；
+    - `sched_deliver_pending()`：在 `sched_tick()`、`proc_switch_to()` 恢复点、
+      `thread_entry_c()` 首跑点补投这些唤醒；`proc_block()` 的 hlt 分支直接
+      消费自己的 pending；
+    - `sched_clear_slot()`：`proc_reap()` 的 memset 挪进 `sched_lock`，避免
+      半清零 proc_t 被调度器看到；
+    - 断言：选中脏槽位（pid=0/name=NULL）、或选中“仍在别的 CPU current 上”
+      的进程时 panic 并打印 pid/cpu；`proc_switch_to()` 断言 next 的
+      `state==RUNNING`、`esp` 在自己的内核栈范围内。
+    验证：
+    - 诊断计数显示该窗口**每轮都会发生**（一次普通 pm 运行里 svcwatch pid 3
+      被延迟唤醒 ≥8 次）；
+    - **负向验证**：临时让 `sched_wake()` 不做延迟（直接入队），第一次
+      `-Name pm -Test` 即 panic：
+      `sched: pid 3 selected on cpu 1 but still current on cpu 0`（3 项失败、
+      103s），证明竞态真实且新断言能准确命名；
+    - 恢复修复后连续 **5 次 98/98**（此前同一逻辑 10/10），无 oops/断言。
 
 ## 6. 已知边界 / 待办
 

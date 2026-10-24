@@ -13,8 +13,22 @@ void proc_switch_to(proc_t *next);
 /* 由 sched.c 实现：把进程挂到指定 CPU 的 runqueue（会先从其它 CPU 摘掉）。 */
 void sched_enqueue(proc_t *p, uint32_t cpu);
 
-/* 唤醒阻塞进程：加锁完成 READY + 入队 + （必要时）IPI 踢目标 CPU */
+/* 唤醒阻塞进程：加锁完成 READY + 入队 + （必要时）IPI 踢目标 CPU。
+ * 若目标还停在 block→switch 的窗口里（仍是某 CPU 的 current），只记
+ * wake_pending，由 sched_deliver_pending() 在安全点补入队。 */
 void sched_wake(proc_t *p);
+
+/* 补投 wake_pending：只处理“已不在任何 CPU 上、且内核栈已切走”的进程。
+ * 由 sched_tick() 以及 proc_switch_to()/thread_entry_c() 的恢复点调用。 */
+void sched_deliver_pending(void);
+
+/* 该进程的内核栈是否仍处于“正在被切换走”的窗口里。 */
+bool proc_in_switch(const proc_t *p);
+
+/* 切换窗口标记：proc_switch_to() 在 current=next 前调用 begin，在恢复点
+ * （新线程的栈上）调用 end；end 会顺便补投迟到的 wake_pending。 */
+void sched_begin_switch(proc_t *prev);
+void sched_end_switch(void);
 
 /* VFS namespace 侧表：不改 proc_t 布局 */
 const char *proc_root_of(proc_t *p);
@@ -23,6 +37,9 @@ void proc_root_copy(proc_t *parent, proc_t *child);
 
 /* 从所有 runqueue 摘掉（进程退出/回收时调用）。 */
 void sched_dequeue(proc_t *p);
+
+/* 回收进程槽：摘队 + memset 清零，整体在 sched_lock 内完成。 */
+void sched_clear_slot(proc_t *p);
 
 /* 按当前负载选一个 CPU（最小负载，平局优先 BSP）。 */
 uint32_t sched_place(const proc_t *p);
