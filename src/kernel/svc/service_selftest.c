@@ -7,7 +7,7 @@
  * 每轮结束把两端都释放掉；跑完还能再建一个新连接，就说明没有耗尽。
  * ============================================================================= */
 #include "service.h"
-#include "error.h"
+#include "../core/error.h"
 #include "../ipc/port.h"
 #include "../ipc/channel.h"
 #include "../lib/string.h"

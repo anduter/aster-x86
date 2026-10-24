@@ -10,12 +10,12 @@
  * RX 与协议栈未实现。
  * ============================================================================= */
 #include "e1000.h"
-#include "pci.h"
-#include "../mm/vmm.h"
-#include "../mm/pmm.h"
-#include "../core/error.h"
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
+#include "../pci.h"
+#include "../../mm/vmm.h"
+#include "../../mm/pmm.h"
+#include "../../core/error.h"
+#include "../../lib/string.h"
+#include "../../lib/kprintf.h"
 
 /* 寄存器偏移 */
 #define E1000_CTRL   0x0000U

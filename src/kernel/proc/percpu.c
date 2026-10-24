@@ -6,7 +6,7 @@
  * 这样以后 AP 上线时不需要再改一遍调用点。
  * ============================================================================= */
 #include "percpu.h"
-#include "apic.h"
+#include "../dev/intc/apic.h"
 #include "../lib/kprintf.h"
 
 per_cpu_t per_cpu[SMP_MAX_CPUS];

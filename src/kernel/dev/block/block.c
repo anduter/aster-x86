@@ -6,9 +6,9 @@
  * 序列化到这些扇区上，从而获得一个真正的磁盘格式。
  * ============================================================================= */
 #include "block.h"
-#include "../lib/string.h"
-#include "../core/device.h"
-#include "../core/error.h"
+#include "../../lib/string.h"
+#include "../../core/device.h"
+#include "../../core/error.h"
 
 static block_device_t blk_table[BLK_MAX];
 static uint32_t blk_count_used;

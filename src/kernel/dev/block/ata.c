@@ -8,10 +8,10 @@
  * ============================================================================= */
 #include "ata.h"
 #include "block.h"
-#include "../io.h"
-#include "../core/error.h"
-#include "../lib/kprintf.h"
-#include "../lib/string.h"
+#include "../../io.h"
+#include "../../core/error.h"
+#include "../../lib/kprintf.h"
+#include "../../lib/string.h"
 
 #define ATA_IO      0x1F0
 #define ATA_CTRL    0x3F6

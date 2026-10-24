@@ -1,8 +1,7 @@
-#ifndef BLOCK_ATA_H
-#define BLOCK_ATA_H
+#ifndef BLOCK_ATA_FORWARD_H
+#define BLOCK_ATA_FORWARD_H
 
-/* ATA PIO 驱动：主通道 master（LBA28），注册成块设备 "ata0"。
- * 返回 E_OK 表示识别到磁盘；没有磁盘返回 E_NOENT。 */
-int ata_init(void);
+/* migration forwarder: implementation moved; include the new path directly in new code. */
+#include "../dev/block/ata.h"
 
 #endif

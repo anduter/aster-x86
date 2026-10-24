@@ -5,11 +5,11 @@
  * timer/IPI 唤醒的 idle；AP 上线后由 sched.c 按每 CPU runqueue 参与调度。
  * ============================================================================= */
 #include "smp.h"
-#include "apic.h"
-#include "madt.h"
+#include "../dev/intc/apic.h"
+#include "../dev/intc/madt.h"
 #include "percpu.h"
-#include "atomic.h"
-#include "error.h"
+#include "../core/atomic.h"
+#include "../core/error.h"
 #include "../intr/interrupt.h"
 #include "../user/gdt.h"
 #include "../proc/proc.h"

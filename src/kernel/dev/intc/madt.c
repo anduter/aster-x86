@@ -7,8 +7,8 @@
  * 这是 AP 启动和 IOAPIC 路由的第一步：先知道“有几个核、它们的 APIC ID”。
  * ============================================================================= */
 #include "madt.h"
-#include "acpi.h"
-#include "../lib/kprintf.h"
+#include "../acpi.h"
+#include "../../lib/kprintf.h"
 
 #define MADT_MAX_CPUS 8U
 

@@ -12,10 +12,10 @@
  * ============================================================================= */
 #include "ioapic.h"
 #include "madt.h"
-#include "../mm/vmm.h"
-#include "../core/spinlock.h"
-#include "../core/error.h"
-#include "../lib/kprintf.h"
+#include "../../mm/vmm.h"
+#include "../../core/spinlock.h"
+#include "../../core/error.h"
+#include "../../lib/kprintf.h"
 
 #define IOAPIC_REGSEL  0x00U
 #define IOAPIC_WIN     0x10U

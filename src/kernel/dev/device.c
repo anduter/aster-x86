@@ -1,6 +1,6 @@
 #include "device.h"
-#include "object.h"
-#include "error.h"
+#include "../mm/object.h"
+#include "../core/error.h"
 #include "../lib/kprintf.h"
 #include "../lib/string.h"
 #include "../console.h"
