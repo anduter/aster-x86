@@ -176,7 +176,26 @@ fs: backend selftest ok
 
 ### 7.4 回归
 
-连续 2 次 `tools\session-run.ps1 -Name fsfeat -Test`：见下方"结果"（跑完补）。
+代码提交 `ae20490` 后，连续 2 次（同一份 `build.ps1`、串行拿 test lock）：
+
+```
+[session-run] fsfeat: obj=.obj-fsfeat dist=.dist-fsfeat qmp=4511 serial=serial-fsfeat.log test=True
+[session-run] exit=0 elapsed=14.7s === TEST PASS (97/97) ===
+[session-run] fsfeat: ... test=True
+[session-run] exit=0 elapsed=14.4s === TEST PASS (97/97) ===
+```
+
+两次串口里都有：
+
+```
+fs: error-path selftest ok
+selftest: rename ok
+fs: backend selftest ok
+```
+
+注意：跑回归时工作区里还有其它会话未提交的 `build.ps1`/`proc`/`net` 改动；
+97 项断言数与当时基线一致（`-Test` 的检查表由 `build.ps1` 定义，我没改它，
+后续由 FS 会话负责人把 `selftest: rename ok` 加成第 98 项）。
 
 ### 7.5 本批未做
 
