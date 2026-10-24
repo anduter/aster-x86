@@ -163,7 +163,6 @@ proc_t *proc_spawn(const char *program_name)
     p->uid = 0;                     /* 内核创建的第一个进程是 root */
     p->gid = 0;
     strcpy(p->cwd, "system:/");     /* 默认工作目录：system 驱动器根 */
-    p->root[0] = '\0';              /* 默认全局 namespace */
     memset(p->fds, 0, sizeof(p->fds));
     cap_init(&p->caps);
     p->mmap_next = 0;
@@ -330,7 +329,6 @@ proc_t *proc_fork(struct interrupt_frame *f)
     child->user_trampoline = parent->user_trampoline;
 
     strcpy(child->cwd, parent->cwd);
-    strcpy(child->root, parent->root);
     child->uid = parent->uid;               /* fork 继承身份 */
     child->gid = parent->gid;
     memcpy(child->fds, parent->fds, sizeof(child->fds));

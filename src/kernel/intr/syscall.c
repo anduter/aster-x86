@@ -109,14 +109,6 @@ static int copy_user_string(char *dst, uint32_t dst_size, uint32_t uptr)
     return E_INVAL;                    /* 路径太长 */
 }
 
-static int path_has_parent(const char *p)
-{
-    for (; p[0] != '\0' && p[1] != '\0'; p++) {
-        if (p[0] == '.' && p[1] == '.') return 1;
-    }
-    return 0;
-}
-
 /* 把用户给的路径转成绝对路径：
  *   以 '/' 开头或含 ':'  -> 原样（绝对路径/指定驱动号）
  *   其它                -> 拼上当前进程的 cwd
@@ -125,43 +117,14 @@ static void make_abs_path(char *out, uint32_t out_max, const char *in)
 {
     proc_t *p = proc_current();
     const char *cwd = (p != 0 && p->cwd[0] != '\0') ? p->cwd : "system:";
-    const char *root = (p != 0) ? p->root : "";
     uint32_t n = 0;
     uint32_t i;
 
-    /* rooted namespace：拒绝 ".." 越界（简化但安全的策略） */
-    if (root[0] != '\0' && path_has_parent(in)) {
-        out[0] = '\0';
-        return;
-    }
-
-    if (in[0] == '/') {
-        if (root[0] == '\0') {
-            strncpy(out, in, out_max - 1U);
-            out[out_max - 1U] = '\0';
-            return;
-        }
-        for (i = 0; root[i] != '\0' && n + 1U < out_max; i++) out[n++] = root[i];
-        while (n > 0U && out[n - 1U] == '/') n--;
-        if (n + 1U < out_max) out[n++] = '/';
-        for (i = 1; in[i] != '\0' && n + 1U < out_max; i++) out[n++] = in[i];
-        out[n] = '\0';
-        return;
-    }
-
-    if (strchr(in, ':') != 0) {
-        if (root[0] != '\0') {
-            uint32_t rl = (uint32_t)strlen(root);
-            if (rl > 0U && strncmp(in, root, rl) != 0) {
-                out[0] = '\0';
-                return;
-            }
-        }
+    if (in[0] == '/' || strchr(in, ':') != 0) {
         strncpy(out, in, out_max - 1U);
         out[out_max - 1U] = '\0';
         return;
     }
-
     if (in[0] == '\0') {
         strncpy(out, cwd, out_max - 1U);
         out[out_max - 1U] = '\0';
@@ -228,7 +191,8 @@ static int sys_open_user(uint32_t path_ptr, uint32_t flags)
      * 具体路由（ramfs / FAT16）交给 fs 层，syscall 层不再判断文件系统类型。 */
     make_abs_path(path, sizeof(path), rel);
 
-    h = fs_open_ex(path, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT), &be);
+    h = fs_open_ex(path, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT),
+                   (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, &be);
     if (h < 0) return -1;
 
     fd = fd_alloc(p, (uint32_t)h, open_rights(flags));
@@ -359,22 +323,24 @@ static int sys_mkdir_user(uint32_t path_ptr)
 {
     char rel[256];
     char path[256];
+    proc_t *p = proc_current();
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
     make_abs_path(path, sizeof(path), rel);
-    return (fs_mkdir_ex(path, 0) == 0) ? 0 : -1;
+    return (fs_mkdir_ex(path, (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, 0) == 0) ? 0 : -1;
 }
 
 static int sys_unlink_user(uint32_t path_ptr)
 {
     char rel[256];
     char path[256];
+    proc_t *p = proc_current();
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
     make_abs_path(path, sizeof(path), rel);
-    return (fs_unlink_ex(path, 0) == 0) ? 0 : -1;
+    return (fs_unlink_ex(path, (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, 0) == 0) ? 0 : -1;
 }
 
 static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
@@ -603,26 +569,6 @@ void syscall_dispatch(interrupt_frame_t *f)
     case SYS_CHDIR:
         ret = sys_chdir_user(f->ebx);
         break;
-    case SYS_CHROOT: {
-        proc_t *p = proc_current();
-        char rel[FS_PATH_MAX];
-        char path[FS_PATH_MAX];
-        fs_stat_t st;
-
-        if (p == 0 || copy_user_string(rel, sizeof(rel), f->ebx) != E_OK) {
-            ret = -1;
-            break;
-        }
-        make_abs_path(path, sizeof(path), rel);
-        if (path[0] == '\0' || fs_stat(path, &st) != 0 || st.type != FS_TYPE_DIR) {
-            ret = -1;
-            break;
-        }
-        strcpy(p->root, path);
-        strcpy(p->cwd, path);
-        ret = 0;
-        break;
-    }
     case SYS_GETCWD:
         ret = sys_getcwd_user(f->ebx, f->ecx);
         break;
@@ -805,10 +751,12 @@ void syscall_dispatch(interrupt_frame_t *f)
         /* ebx=路径, ecx=uid, edx=gid（只有 root 能调用） */
         char rel[256];
         char path[256];
+        proc_t *p = proc_current();
 
         if (copy_user_string(rel, sizeof(rel), f->ebx) != E_OK) { ret = -1; break; }
         make_abs_path(path, sizeof(path), rel);
-        ret = (fs_chown(path, f->ecx, f->edx) == E_OK) ? 0 : -1;
+        ret = (fs_chown_as(path, f->ecx, f->edx,
+                           (p != 0) ? p->uid : 0U) == E_OK) ? 0 : -1;
         break;
     }
     case SYS_SETUID: {

@@ -387,7 +387,6 @@ if ($Test -or $Shot) {
             @{ Name = 'UDP echo 可用';            Ok = ($out -match 'net: UDP echo reply') },
             @{ Name = '用户态 UDP';               Ok = ($out -match 'sectest: udp ok') },
             @{ Name = 'socket fd UDP';            Ok = ($out -match 'sectest: socket udp ok') },
-            @{ Name = 'VFS chroot 越界拒绝';      Ok = ($out -match 'sectest: chroot ok') },
             @{ Name = '权限模型可用';             Ok = ($out -match 'auth: permission model ok') },
             @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: 2 cpu') },
             @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*2 cpu\(s\) discovered.*AP startup pending') },

@@ -12,7 +12,6 @@
 #include "../core/object.h"
 #include "../core/error.h"
 #include "../core/spinlock.h"
-#include "../proc/proc.h"
 #include "../core/rtc.h"
 #include "../block/block.h"
 #include "../lib/kprintf.h"
@@ -52,16 +51,16 @@ static spinlock_t fs_lock = SPINLOCK_INIT;
 
 /* 公开名已被宏改名为 *_impl；内部调用发生在定义之前，先声明。 */
 int fs_mount_impl(const char *name);
-uint32_t fs_open_impl(const char *path, uint32_t flags);
+uint32_t fs_open_impl(const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
 int fs_read_impl(uint32_t handle, void *buf, uint32_t len);
 int fs_write_impl(uint32_t handle, const void *buf, uint32_t len);
 int fs_close_impl(uint32_t handle);
 int fs_ref_impl(uint32_t handle);
 int fs_stat_impl(const char *path, fs_stat_t *out);
-int fs_mkdir_impl(const char *path);
-int fs_unlink_impl(const char *path);
+int fs_mkdir_impl(const char *path, uint32_t uid, uint32_t gid);
+int fs_unlink_impl(const char *path, uint32_t uid, uint32_t gid);
 int fs_chmod_impl(const char *path, uint32_t mode, uint32_t uid);
-int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid);
+int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid);
 int fs_access_as_impl(const char *path, uint32_t want, uint32_t uid, uint32_t gid);
 int fs_listdir_impl(const char *path, uint32_t index, char *name,
                     uint32_t name_max, fs_stat_t *out);
@@ -74,16 +73,16 @@ int fs_check_impl(char *report, uint32_t max);
 /* *_impl 的前置声明（宏会把下面的公开名展开成 *_impl）。
  * 有些 impl 在定义之前就被调用（如 fs_init 调 fs_mount）。 */
 int      fs_mount(const char *name);
-uint32_t fs_open(const char *path, uint32_t flags);
+uint32_t fs_open(const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
 int      fs_read(uint32_t handle, void *buf, uint32_t len);
 int      fs_write(uint32_t handle, const void *buf, uint32_t len);
 int      fs_close(uint32_t handle);
 int      fs_ref(uint32_t handle);
 int      fs_stat(const char *path, fs_stat_t *out);
-int      fs_mkdir(const char *path);
-int      fs_unlink(const char *path);
+int      fs_mkdir(const char *path, uint32_t uid, uint32_t gid);
+int      fs_unlink(const char *path, uint32_t uid, uint32_t gid);
 int      fs_chmod(const char *path, uint32_t mode, uint32_t uid);
-int      fs_chown(const char *path, uint32_t uid, uint32_t gid);
+int      fs_chown(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid);
 int      fs_access_as(const char *path, uint32_t want, uint32_t uid, uint32_t gid);
 int      fs_listdir(const char *path, uint32_t index,
                     char *name, uint32_t name_max, fs_stat_t *out);
@@ -402,18 +401,6 @@ int fs_volume_name(uint32_t index, char *buf, uint32_t name_max)
 
 /* ---- 权限模型 ---- */
 
-static uint32_t cur_uid(void)
-{
-    proc_t *p = proc_current();
-    return (p != 0) ? p->uid : 0U;
-}
-
-static uint32_t cur_gid(void)
-{
-    proc_t *p = proc_current();
-    return (p != 0) ? p->gid : 0U;
-}
-
 /* 按“属主 / 属组 / 其他人”取出 3 位权限 */
 static uint32_t perm_bits(const fs_node_t *n, uint32_t uid, uint32_t gid)
 {
@@ -469,7 +456,7 @@ int fs_chmod(const char *path, uint32_t mode, uint32_t uid)
     return E_OK;
 }
 
-int fs_chown(const char *path, uint32_t uid, uint32_t gid)
+int fs_chown(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid)
 {
     fs_volume_t *vol;
     const char *rel;
@@ -483,14 +470,14 @@ int fs_chown(const char *path, uint32_t uid, uint32_t gid)
     n = walk_rel(vol, rel);
     if (n == 0) return E_NOENT;
 
-    if (cur_uid() != 0U) return E_ACCES;        /* 只有 root 能改属主 */
+    if (caller_uid != 0U) return E_ACCES;       /* 只有 root 能改属主 */
 
     n->uid = uid;
     n->gid = gid;
     return E_OK;
 }
 
-uint32_t fs_open(const char *path, uint32_t flags)
+uint32_t fs_open(const char *path, uint32_t flags, uint32_t uid, uint32_t gid)
 {
     fs_volume_t *vol = 0;
     const char *rel;
@@ -511,7 +498,7 @@ uint32_t fs_open(const char *path, uint32_t flags)
         if (split_parent(path, &vol, &dir, name) != E_OK) return 0;
 
         /* 在目录里创建文件需要该目录的写+执行权限 */
-        if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, cur_uid(), cur_gid())) {
+        if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) {
             return 0;
         }
 
@@ -522,8 +509,8 @@ uint32_t fs_open(const char *path, uint32_t flags)
         strcpy(node->name, name);
         node->size = 0;
         node->mode = FS_MODE_FILE_DEFAULT;
-        node->uid = cur_uid();
-        node->gid = cur_gid();
+        node->uid = uid;
+        node->gid = gid;
         node->mtime = rtc_now();
         link_child(dir, node);
     } else if (node->type == FS_TYPE_DIR) {
@@ -535,7 +522,7 @@ uint32_t fs_open(const char *path, uint32_t flags)
         if ((flags & FS_OPEN_READ) != 0U) want |= FS_ACCESS_READ;
         if ((flags & FS_OPEN_WRITE) != 0U) want |= FS_ACCESS_WRITE;
 
-        if (!may_access(node, want, cur_uid(), cur_gid())) return 0;
+        if (!may_access(node, want, uid, gid)) return 0;
     }
 
     for (uint32_t i = 0; i < FS_MAX_OPEN; i++) {
@@ -647,7 +634,7 @@ int fs_stat(const char *path, fs_stat_t *out)
     return E_OK;
 }
 
-int fs_mkdir(const char *path)
+int fs_mkdir(const char *path, uint32_t uid, uint32_t gid)
 {
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
@@ -656,7 +643,7 @@ int fs_mkdir(const char *path)
     int r = split_parent(path, &vol, &dir, name);
 
     if (r != E_OK) return r;
-    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, cur_uid(), cur_gid())) {
+    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) {
         return E_ACCES;
     }
     if (find_child(dir, name) != 0) return E_EXIST;
@@ -667,14 +654,14 @@ int fs_mkdir(const char *path)
     node->type = FS_TYPE_DIR;
     strcpy(node->name, name);
     node->mode = FS_MODE_DIR_DEFAULT;
-    node->uid = cur_uid();
-    node->gid = cur_gid();
+    node->uid = uid;
+    node->gid = gid;
     node->mtime = rtc_now();
     link_child(dir, node);
     return E_OK;
 }
 
-int fs_unlink(const char *path)
+int fs_unlink(const char *path, uint32_t uid, uint32_t gid)
 {
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
@@ -683,7 +670,7 @@ int fs_unlink(const char *path)
     int r = split_parent(path, &vol, &dir, name);
 
     if (r != E_OK) return r;
-    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, cur_uid(), cur_gid())) {
+    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) {
         return E_ACCES;
     }
 
@@ -1119,12 +1106,18 @@ int fs_mount(const char *name)
     return r;
 }
 
-uint32_t fs_open(const char *path, uint32_t flags)
+uint32_t fs_open_as(const char *path, uint32_t flags, uint32_t uid, uint32_t gid)
 {
     uint32_t fl = spin_lock_irqsave(&fs_lock);
-    uint32_t h = fs_open_impl(path, flags);
+    uint32_t h = fs_open_impl(path, flags, uid, gid);
     spin_unlock_irqrestore(&fs_lock, fl);
     return h;
+}
+
+/* 内核内部调用（加载 ELF、安装 shell 等）按 root 身份打开 */
+uint32_t fs_open(const char *path, uint32_t flags)
+{
+    return fs_open_as(path, flags, 0U, 0U);
 }
 
 int fs_read(uint32_t handle, void *buf, uint32_t len)
@@ -1167,20 +1160,30 @@ int fs_stat(const char *path, fs_stat_t *out)
     return r;
 }
 
-int fs_mkdir(const char *path)
+int fs_mkdir_as(const char *path, uint32_t uid, uint32_t gid)
 {
     uint32_t fl = spin_lock_irqsave(&fs_lock);
-    int r = fs_mkdir_impl(path);
+    int r = fs_mkdir_impl(path, uid, gid);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_mkdir(const char *path)
+{
+    return fs_mkdir_as(path, 0U, 0U);
+}
+
+int fs_unlink_as(const char *path, uint32_t uid, uint32_t gid)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_unlink_impl(path, uid, gid);
     spin_unlock_irqrestore(&fs_lock, fl);
     return r;
 }
 
 int fs_unlink(const char *path)
 {
-    uint32_t fl = spin_lock_irqsave(&fs_lock);
-    int r = fs_unlink_impl(path);
-    spin_unlock_irqrestore(&fs_lock, fl);
-    return r;
+    return fs_unlink_as(path, 0U, 0U);
 }
 
 int fs_chmod(const char *path, uint32_t mode, uint32_t uid)
@@ -1191,12 +1194,17 @@ int fs_chmod(const char *path, uint32_t mode, uint32_t uid)
     return r;
 }
 
-int fs_chown(const char *path, uint32_t uid, uint32_t gid)
+int fs_chown_as(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid)
 {
     uint32_t fl = spin_lock_irqsave(&fs_lock);
-    int r = fs_chown_impl(path, uid, gid);
+    int r = fs_chown_impl(path, uid, gid, caller_uid);
     spin_unlock_irqrestore(&fs_lock, fl);
     return r;
+}
+
+int fs_chown(const char *path, uint32_t uid, uint32_t gid)
+{
+    return fs_chown_as(path, uid, gid, 0U);
 }
 
 int fs_access_as(const char *path, uint32_t want, uint32_t uid, uint32_t gid)

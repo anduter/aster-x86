@@ -73,7 +73,6 @@ typedef struct process {
     bool         slept;         /* 是否曾经睡过（只打印一次日志） */
     uint32_t     parent_pid;    /* 父进程 pid（wait 用） */
     char         cwd[192];      /* 当前目录（形如 "system:/docs"） */
-    char         root[192];     /* VFS namespace 根；空 = 全局根 */
     uint32_t     user_brk;      /* 用户堆当前边界（brk 系统调用） */
     uint32_t     user_stack_top;/* 本进程随机化后的栈顶（ASLR） */
     uint32_t     user_stack_va; /* 初始栈页虚拟地址（栈顶 - 4KB） */

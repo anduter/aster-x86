@@ -31,7 +31,7 @@ int fs_is_fat(const char *path)
     return fat_rel(path) != 0;
 }
 
-int fs_open_ex(const char *path, uint32_t flags, uint8_t *be)
+int fs_open_ex(const char *path, uint32_t flags, uint32_t uid, uint32_t gid, uint8_t *be)
 {
     uint32_t f = flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT);
 
@@ -49,7 +49,7 @@ int fs_open_ex(const char *path, uint32_t flags, uint8_t *be)
     }
 
     {
-        uint32_t h = fs_open(path, f);
+        uint32_t h = fs_open_as(path, f, uid, gid);
 
         if (h == 0U) return -1;
         if (be != 0) *be = FS_BE_RAMFS;
@@ -125,7 +125,7 @@ int fs_listdir_ex(const char *path, uint32_t index, char *name, uint32_t name_ma
     return 0;
 }
 
-int fs_mkdir_ex(const char *path, uint8_t *be)
+int fs_mkdir_ex(const char *path, uint32_t uid, uint32_t gid, uint8_t *be)
 {
     const char *rel;
 
@@ -138,12 +138,12 @@ int fs_mkdir_ex(const char *path, uint8_t *be)
         return 0;
     }
 
-    if (fs_mkdir(path) != E_OK) return -1;
+    if (fs_mkdir_as(path, uid, gid) != E_OK) return -1;
     if (be != 0) *be = FS_BE_RAMFS;
     return 0;
 }
 
-int fs_unlink_ex(const char *path, uint8_t *be)
+int fs_unlink_ex(const char *path, uint32_t uid, uint32_t gid, uint8_t *be)
 {
     const char *rel;
 
@@ -156,7 +156,7 @@ int fs_unlink_ex(const char *path, uint8_t *be)
         return 0;
     }
 
-    if (fs_unlink(path) != E_OK) return -1;
+    if (fs_unlink_as(path, uid, gid) != E_OK) return -1;
     if (be != 0) *be = FS_BE_RAMFS;
     return 0;
 }

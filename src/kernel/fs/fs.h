@@ -63,8 +63,10 @@ uint32_t fs_volume_count(void);
 int fs_volume_name(uint32_t index, char *buf, uint32_t name_max);
 
 /* 打开文件，返回 OBJ_FILE 句柄；失败返回 0。
- * path 支持 "C:/dir/file" 或 "/dir/file"（无盘符时用默认卷 C:）。 */
+ * path 支持 "C:/dir/file" 或 "/dir/file"（无盘符时用默认卷 C:）。
+ * 内核内部调用按 root 身份；用户态走 fs_open_as / 下面的 _ex 入口。 */
 uint32_t fs_open(const char *path, uint32_t flags);
+uint32_t fs_open_as(const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
 
 /* 读写/关闭句柄（会校验句柄类型，传错类型返回 E_TYPE） */
 int fs_read(uint32_t handle, void *buf, uint32_t len);
@@ -76,11 +78,14 @@ int fs_ref(uint32_t handle);
 /* 元数据与目录操作 */
 int fs_stat(const char *path, fs_stat_t *out);
 int fs_mkdir(const char *path);
+int fs_mkdir_as(const char *path, uint32_t uid, uint32_t gid);
 int fs_unlink(const char *path);
+int fs_unlink_as(const char *path, uint32_t uid, uint32_t gid);
 
 /* 权限：改变 mode（仅属主/root）、改变属主属组（仅 root） */
 int fs_chmod(const char *path, uint32_t mode, uint32_t uid);
 int fs_chown(const char *path, uint32_t uid, uint32_t gid);
+int fs_chown_as(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid);
 
 /* 以指定身份判权（供自检/内核调用；fs_open 用当前进程身份） */
 int fs_access_as(const char *path, uint32_t want, uint32_t uid, uint32_t gid);
@@ -119,7 +124,7 @@ unsigned int fs_node_count(void);
 #define FS_BE_FAT16 1U
 
 /* 打开：成功返回后端句柄（>=0），失败返回 -1；*be 写回后端 id */
-int fs_open_ex(const char *path, uint32_t flags, uint8_t *be);
+int fs_open_ex(const char *path, uint32_t flags, uint32_t uid, uint32_t gid, uint8_t *be);
 int fs_read_ex(uint8_t be, int h, void *buf, uint32_t len);
 int fs_write_ex(uint8_t be, int h, const void *buf, uint32_t len);
 int fs_close_ex(uint8_t be, int h);
@@ -128,8 +133,8 @@ int fs_ref_ex(uint8_t be, int h);
 int fs_stat_ex(const char *path, fs_stat_t *out, uint8_t *be);
 int fs_listdir_ex(const char *path, uint32_t index, char *name, uint32_t name_max,
                   fs_stat_t *out, uint8_t *be);
-int fs_mkdir_ex(const char *path, uint8_t *be);
-int fs_unlink_ex(const char *path, uint8_t *be);
+int fs_mkdir_ex(const char *path, uint32_t uid, uint32_t gid, uint8_t *be);
+int fs_unlink_ex(const char *path, uint32_t uid, uint32_t gid, uint8_t *be);
 
 /* 路径属于哪个后端（给驱动器枚举/调试用） */
 int fs_is_fat(const char *path);

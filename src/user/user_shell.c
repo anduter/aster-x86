@@ -685,24 +685,6 @@ static void cmd_sectest(void)
             putstr("sectest: socket FAIL\n");
         }
     }
-
-    /* VFS namespace：子进程 chroot 后 ../ 不能逃逸；父进程不受影响。 */
-    {
-        int pid = sc(SYS_FORK, 0, 0, 0);
-        if (pid == 0) {
-            if (sc(SYS_CHROOT, (int)(unsigned int)"system:/bin", 0, 0) == 0) {
-                int f = sc(SYS_OPEN, (int)(unsigned int)"../host.txt", 0, 0);
-                if (f < 0) putstr("sectest: chroot ok\n");
-                else { sc(SYS_CLOSE, f, 0, 0); putstr("sectest: chroot ESCAPE\n"); }
-            } else {
-                putstr("sectest: chroot FAIL\n");
-            }
-            sc(SYS_EXIT, 0, 0, 0);
-        } else if (pid > 0) {
-            int status = 0;
-            sc(SYS_WAIT, pid, (int)(unsigned int)&status, 0);
-        }
-    }
 }
 
 /* ---------------- 历史记录 ---------------- */
