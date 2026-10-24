@@ -549,6 +549,20 @@ void sched_tick(void)
         return;
     }
 
+    /* 当前进程已经 BLOCKED，却还留在这颗 CPU 上：说明 proc_block() 当时
+     * 找不到别的 READY、进了“sti; hlt”兜底。之后本 CPU 的 runqueue 完全
+     * 可能又来了新的 READY（isr/另一颗 CPU 的 sched_wake 按负载把进程放到
+     * 这里）；如果 tick 只 age/减时间片而不选进程，这些 READY 会一直饿死，
+     * 包括“唤醒当前阻塞进程的那个人”，最终两核都 hlt 死等 → 心跳停摆。
+     * 所以在 tick 里主动接管：有别的 READY 就切走。 */
+    if (cur->state == PROC_BLOCKED) {
+        next = sched_next(cur);
+        if (next != 0 && next != cur) {
+            proc_switch_to(next);
+        }
+        return;
+    }
+
     /* 等待中的低优先级线程按 tick 老化 */
     sched_age_runqueue(cur);
 
@@ -615,7 +629,12 @@ void sched_ap_tick(void)
 
     cur = proc_current();
     if (cur == 0) {
-        proc_t *next = sched_next(0);
+        proc_t *next;
+
+        /* idle 的 AP 也要补投 pending：否则只有 BSP tick 兜底，
+         * BSP 自己忙/阻塞时延迟不可控。 */
+        sched_deliver_pending();
+        next = sched_next(0);
         if (next != 0) proc_switch_to(next);
         return;
     }

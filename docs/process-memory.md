@@ -707,6 +707,25 @@ sectest: mprotect invalid ok
       `sched: pid 3 selected on cpu 1 but still current on cpu 0`（3 项失败、
       103s），证明竞态真实且新断言能准确命名；
     - 恢复修复后连续 **5 次 98/98**（此前同一逻辑 10/10），无 oops/断言。
+11. **8h 浸泡 hang（心跳停止、无 panic、shell 提示符还在）**：`proc_block()`
+    在“当时没有别的 READY”时会进入 `sti; hlt` 兜底；之后其它 CPU 的
+    `sched_wake()` 按负载（阻塞 CPU 看起来最空）把新 READY 进程放到这颗
+    CPU，`sched_deliver_pending()` 也会把补投的进程放进当前 CPU 的
+    runqueue。但 `sched_tick()` 对 `cur != 0` 只做 aging/时间片，而
+    `cur->state == PROC_BLOCKED` 时既不选进程也不出 hlt —— 这些 READY
+    会永久饿死。若饿死的是“唤醒当前阻塞线程的那个人”，两颗 CPU 会互相
+    死等；`NMI watchdog` 只检查 `timer_ticks+syscall_count`，BSP 的 tick
+    还在走，所以不会 panic，表现为串口/心跳静默。
+    修复（`proc/sched.c`）：
+    - `sched_tick()` 在 `cur->state == PROC_BLOCKED` 时调用
+      `sched_next(cur)`，有别的 READY 就 `proc_switch_to()` 切走（不再让
+      阻塞的 current 占着 CPU 空等）；
+    - `sched_ap_tick()` 的 idle（cur==0）路径也调用
+      `sched_deliver_pending()`，不把补投完全依赖 BSP tick。
+    验证：诊断构建里观察到 `scheddbg: c0=3/3`（CPU0 current=pid3 BLOCKED）
+    长期不变、runqueue 非空；修复后 21 分钟诊断浸泡心跳到 hb1233、无停顿。
+    注：该 hang 是间歇性的，21 分钟空闲浸泡未再复现，最终以 10×5min 浸泡
+    作为回归门槛。
 
 ## 6. 已知边界 / 待办
 
