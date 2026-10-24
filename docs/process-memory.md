@@ -726,6 +726,16 @@ sectest: mprotect invalid ok
     长期不变、runqueue 非空；修复后 21 分钟诊断浸泡心跳到 hb1233、无停顿。
     注：该 hang 是间歇性的，21 分钟空闲浸泡未再复现，最终以 10×5min 浸泡
     作为回归门槛。
+12. **AP 看门狗（把静默 hang 变成可诊断 panic）**：在 BSP 的
+    `sched_tick()` 里比较 `per_cpu[1].ticks`；AP tick 连续
+    `SCHED_AP_WATCHDOG_TICKS = 300`（约 3s）没推进就 `panic()`，文本含
+    两核现场：
+    `cpu1 tick stalled (c1.ticks=... bsp=..., cur1=pid.. state=.., runq1=0x.., runq0=0x.., cur0=pid.. state=..)`。
+    仅当 `smp_cpu_count > 1 && per_cpu[1].online && per_cpu[1].ready` 才启用，
+    AP tick 一推进就清零计数；正常路径只多一次比较，无额外定时器。
+    **BSP 自身卡死**不需要新增检查：现有 NMI watchdog（`core/apic.c`）
+    每秒比较 `timer_ticks + syscall_count`，BSP tick 停止时会在 ~1s 内
+    panic，所以这里只补 AP 维度。
 
 ## 6. 已知边界 / 待办
 

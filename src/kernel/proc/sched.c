@@ -32,7 +32,13 @@ static volatile uint32_t smp_sched_enabled;
 /* 每 N 个 BSP tick 做一次负载均衡检查 */
 #define SCHED_BALANCE_INTERVAL 20U
 
+/* AP 看门狗：AP 的 tick 连续这么多 BSP tick（100Hz 下 ~3s）没有推进就 panic。
+ * 用于把“AP 静默卡死/心跳停摆”从 8h 浸泡里的无信息 hang 变成可诊断现场。 */
+#define SCHED_AP_WATCHDOG_TICKS 300U
+
 static uint32_t balance_ticks;
+static uint32_t ap_wdg_last_ticks;
+static uint32_t ap_wdg_stall_ticks;
 
 /* 每 CPU、每优先级的 runqueue 桶；runq_mask 是它们的并集，保持同步。 */
 static uint32_t sched_bucket[SMP_MAX_CPUS][PROC_PRIO_LEVELS];
@@ -521,6 +527,32 @@ void sched_tick(void)
 {
     proc_t *cur = proc_current();
     proc_t *next;
+
+    /* AP 看门狗（只在 BSP tick 里跑）：AP 的 LAPIC tick 连续 ~3s 不推进，
+     * 说明 AP 卡死在关中断/自旋/中断风暴里。此时 BSP 可能一切正常，
+     * 现有 NMI watchdog 只看 timer_ticks+syscall_count，不会报警；这里用
+     * 两核现场 panic 代替 8h 浸泡里的无信息 hang。正常路径只做一次比较，
+     * AP tick 一旦推进就清零。 */
+    if (smp_cpu_id() == 0U &&
+        smp_cpu_count > 1U && per_cpu[1].online && per_cpu[1].ready) {
+        uint32_t ap_ticks = per_cpu[1].ticks;
+
+        if (ap_ticks != ap_wdg_last_ticks) {
+            ap_wdg_last_ticks = ap_ticks;
+            ap_wdg_stall_ticks = 0;
+        } else if (++ap_wdg_stall_ticks >= SCHED_AP_WATCHDOG_TICKS) {
+            proc_t *c0 = (proc_t *)per_cpu[0].current;
+            proc_t *c1 = (proc_t *)per_cpu[1].current;
+
+            panic("cpu1 tick stalled (c1.ticks=%u bsp=%u, cur1=pid%u state=%u, "
+                  "runq1=0x%x, runq0=0x%x, cur0=pid%u state=%u)",
+                  ap_ticks, (unsigned int)this_cpu()->ticks,
+                  c1 ? c1->pid : 0U, c1 ? (unsigned int)c1->state : 0U,
+                  (unsigned int)per_cpu[1].runq_mask,
+                  (unsigned int)per_cpu[0].runq_mask,
+                  c0 ? c0->pid : 0U, c0 ? (unsigned int)c0->state : 0U);
+        }
+    }
 
     /* 补投“目标还没切走时到达”的唤醒。每 tick 做一次兜底，保证即便
      * 唤醒方是另一颗 CPU、也没走到恢复点，也不会丢失唤醒。 */
