@@ -21,14 +21,21 @@ typedef struct block_header {
 
 static block_t* first_block;
 
+/* 异常释放的诊断计数：同一个错误最多打印 8 次，避免误导出的死循环刷屏 */
+static unsigned int heap_bad_magic;
+static unsigned int heap_double_free;
+
 /* 堆使用统计：遍历块链表累计已用/空闲字节（诊断用，不在热路径） */
 void heap_stats(unsigned int *used, unsigned int *total)
 {
     uint32_t flags = spin_lock_irqsave(&heap_lock);
     block_t *b = first_block;
+    uintptr_t base = (uintptr_t)HEAP_BASE;
+    uintptr_t end  = base + (uintptr_t)HEAP_SIZE;
     unsigned int u = 0, t = 0;
 
-    while (b != NULL && b->magic == BLOCK_MAGIC) {
+    while (b != NULL && (uintptr_t)b >= base && (uintptr_t)b < end &&
+           b->magic == BLOCK_MAGIC) {
         t += (unsigned int)b->size;
         if (b->used) u += (unsigned int)b->size;
         b = b->next;
@@ -38,6 +45,80 @@ void heap_stats(unsigned int *used, unsigned int *total)
 
     if (used != 0) *used = u;
     if (total != 0) *total = t;
+}
+
+/* 碎片统计：最大空闲块（用户字节）与空闲块个数 */
+void heap_frag_stats(unsigned int *largest_free, unsigned int *free_blocks)
+{
+    uint32_t flags = spin_lock_irqsave(&heap_lock);
+    block_t *b = first_block;
+    uintptr_t base = (uintptr_t)HEAP_BASE;
+    uintptr_t end  = base + (uintptr_t)HEAP_SIZE;
+    unsigned int max_free = 0;
+    unsigned int nfree = 0;
+
+    while (b != NULL && (uintptr_t)b >= base && (uintptr_t)b < end &&
+           b->magic == BLOCK_MAGIC) {
+        if (!b->used) {
+            nfree++;
+            if ((unsigned int)b->size > max_free) max_free = (unsigned int)b->size;
+        }
+        b = b->next;
+    }
+
+    spin_unlock_irqrestore(&heap_lock, flags);
+
+    if (largest_free != 0) *largest_free = max_free;
+    if (free_blocks != 0) *free_blocks = nfree;
+}
+
+/* 全链表一致性检查：块头魔数、区间、首尾覆盖、next/prev 互指、
+ * 连续块首尾相接、没有相邻两个空闲块（合并不变量）。
+ * 返回 0 表示健康；返回负值是第一处发现的错误编号（同时打印地址）。 */
+int heap_check(void)
+{
+    uint32_t flags = spin_lock_irqsave(&heap_lock);
+    block_t *b = first_block;
+    uintptr_t base = (uintptr_t)HEAP_BASE;
+    uintptr_t end  = base + (uintptr_t)HEAP_SIZE;
+    uintptr_t expect = base;
+    block_t *prev = NULL;
+    bool prev_free = false;
+    int rc = 0;
+    uintptr_t bad = 0;
+
+    if (b == NULL) {
+        rc = -1;
+    } else if ((uintptr_t)b != base) {
+        rc = -2;
+        bad = (uintptr_t)b;
+    }
+
+    while (rc == 0 && b != NULL) {
+        uintptr_t addr = (uintptr_t)b;
+
+        if (addr != expect) { rc = -3; bad = addr; break; }
+        if (b->magic != BLOCK_MAGIC) { rc = -4; bad = addr; break; }
+        if (b->used > 1U) { rc = -5; bad = addr; break; }
+        if (b->prev != prev) { rc = -6; bad = addr; break; }
+        if ((uintptr_t)b->size > end - (addr + HEADER_SIZE)) { rc = -7; bad = addr; break; }
+        if (prev_free && !b->used) { rc = -8; bad = addr; break; }
+
+        prev = b;
+        prev_free = (b->used == 0U);
+        expect = addr + HEADER_SIZE + (uintptr_t)b->size;
+        if (expect > end) { rc = -9; bad = addr; break; }
+        b = b->next;
+    }
+
+    if (rc == 0 && expect != end) { rc = -10; bad = expect; }
+
+    spin_unlock_irqrestore(&heap_lock, flags);
+
+    if (rc != 0) {
+        kprintf("heap: check FAILED rc=%d at 0x%08x\n", rc, (unsigned int)bad);
+    }
+    return rc;
 }
 
 /* 初始化堆：整个堆作为唯一一个空闲块 */
@@ -149,8 +230,21 @@ static void free_locked(void* ptr)
 
     block = (block_t*)((uint8_t*)ptr - HEADER_SIZE);
 
-    /* 校验魔数，拦住野指针和重复释放 */
-    if (block->magic != BLOCK_MAGIC || !block->used) {
+    /* 校验魔数，拦住野指针；魔数坏了说明块头被踩，打印地址后拒绝处理 */
+    if (block->magic != BLOCK_MAGIC) {
+        if (heap_bad_magic < 8U) {
+            heap_bad_magic++;
+            kprintf("heap: bad block magic %08x at %p\n",
+                    block->magic, (void *)p);
+        }
+        return;
+    }
+    /* used==0：重复释放。只报告，不破坏链表 */
+    if (!block->used) {
+        if (heap_double_free < 8U) {
+            heap_double_free++;
+            kprintf("heap: double free at %p\n", (void *)p);
+        }
         return;
     }
 

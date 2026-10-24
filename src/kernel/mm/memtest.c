@@ -9,6 +9,12 @@
  *   5. 恒等映射最高页：顶部 2MB 不再落在映射之外（另一个修复过的缺陷）
  *   6. 连续申请 64 页：地址互不重复（校验位图“按字扫描”的正确性）
  *   7. 总账：页数与基线一致，且 PMM/VMM 的异常计数都为 0
+ *   8. PMM 记账 + 毒化：100 页分配/释放后 free_pages 复原、填充图案正确
+ *   9. PMM double-free 检测：重复释放只记账/告警，不破坏位图
+ *  10. 堆全链表检查：块头魔数、区间、prev/next、相邻空闲块合并
+ *
+ * 注意：1..8 的 "n/8" 标签是 97 项回归里按字符串匹配的，不能改编号；
+ * 新增项用不带分数的名字，避免和旧检查冲突。
  *
  * 结果以 "memtest: ... PASS/FAIL" 的形式打到串口，
  * 返回值是失败项数，0 表示全部通过。
@@ -18,6 +24,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "include/mm.h"
+#include "include/kernel.h"
 #include "../types.h"
 
 /* 本轮的失败项数 */
@@ -234,10 +241,142 @@ static int test_large_page(void)
     return ok;
 }
 
+/* 追加：PMM 100 页记账 + 毒化。
+ * 分配后必须是毒化值 0x00，释放后必须是 0xAA；页计数与分配/释放计数都要对得上。 */
+static int test_pmm_accounting(void)
+{
+    const unsigned int n = 100U;
+    unsigned char *pages[100];
+    unsigned int before = pmm.free_pages;
+    unsigned int allocs_before = pmm_alloc_count;
+    unsigned int frees_before = pmm_free_count;
+    int ok = 1;
+
+    for (unsigned int i = 0; i < n; i++) pages[i] = 0;
+
+    for (unsigned int i = 0; i < n; i++) {
+        pages[i] = (unsigned char *)pmm_alloc_page();
+        if (pages[i] == 0) {
+            ok = 0;
+            break;
+        }
+        if (((uintptr_t)pages[i] & 0xFFFU) != 0U) ok = 0;
+#ifdef PMM_POISON
+        if (pages[i][0] != PMM_POISON_ALLOC ||
+            pages[i][PAGE_SIZE - 1] != PMM_POISON_ALLOC) {
+            ok = 0;
+        }
+#endif
+        pages[i][0] = 0x5AU;
+        pages[i][PAGE_SIZE - 1] = 0xA5U;
+    }
+
+    if (!ok) {
+        for (unsigned int i = 0; i < n; i++) {
+            if (pages[i] != 0) pmm_free_page(pages[i]);
+        }
+        return 0;
+    }
+
+    if (pmm.free_pages != before - n) ok = 0;
+    if (pmm_alloc_count - allocs_before != n) ok = 0;
+
+    for (unsigned int i = 0; i < n; i++) pmm_free_page(pages[i]);
+
+    if (pmm.free_pages != before) ok = 0;              /* 账目必须复原 */
+    if (pmm_free_count - frees_before != n) ok = 0;
+
+#ifdef PMM_POISON
+    for (unsigned int i = 0; i < n; i++) {
+        if (pages[i][0] != PMM_POISON_FREE ||
+            pages[i][PAGE_SIZE - 1] != PMM_POISON_FREE) ok = 0;
+    }
+#endif
+
+    if (ok) {
+#ifdef PMM_POISON
+        kprintln("pmm: poison ok (alloc=0x00 free=0xaa)");
+#else
+        kprintln("pmm: poison off (built with PMM_NO_POISON)");
+#endif
+        kprintln("pmm: accounting ok (100 pages, free restored)");
+    } else {
+        kprintln("pmm: accounting FAIL");
+    }
+    return ok;
+}
+
+/* 追加：double-free 必须被检测（只 WARN + 计数，不破坏位图/账目） */
+static int test_pmm_double_free(void)
+{
+    unsigned int before = pmm.free_pages;
+    unsigned int df_before = pmm_double_free;
+    unsigned int faults_before = pmm_faults;
+    void *p = pmm_alloc_page();
+    int ok;
+
+    if (p == 0) return 0;
+    if (pmm.free_pages != before - 1U) {
+        pmm_free_page(p);
+        return 0;
+    }
+
+    pmm_free_page(p);                       /* 正常释放 */
+    if (pmm.free_pages != before) {
+        return 0;
+    }
+
+    pmm_free_page(p);                       /* 故意重复释放：应被识别 */
+
+    ok = (pmm_double_free == df_before + 1U) &&
+         (pmm.free_pages == before) &&
+         (pmm_faults > faults_before);
+
+    if (ok) kprintln("pmm: double-free detected");
+    else kprintln("pmm: double-free FAIL");
+    return ok;
+}
+
+/* 追加：堆全链表一致性 + 碎片统计 */
+static int test_heap_check(void)
+{
+    unsigned int largest = 0;
+    unsigned int blocks = 0;
+    unsigned char *a = (unsigned char *)malloc(123U);
+    unsigned char *b = (unsigned char *)malloc(456U);
+    int ok = 1;
+
+    if (a == 0 || b == 0) {
+        if (a != 0) free(a);
+        if (b != 0) free(b);
+        return 0;
+    }
+
+    for (unsigned int i = 0; i < 123U; i++) a[i] = 0x3CU;
+    for (unsigned int i = 0; i < 456U; i++) b[i] = 0xC3U;
+    for (unsigned int i = 0; i < 123U; i++) if (a[i] != 0x3CU) ok = 0;
+    for (unsigned int i = 0; i < 456U; i++) if (b[i] != 0xC3U) ok = 0;
+
+    free(a);
+    free(b);
+
+    /* 全链表遍历：魔数、区间、prev/next、相邻空闲块合并 */
+    if (heap_check() != 0) ok = 0;
+
+    heap_frag_stats(&largest, &blocks);
+    if (blocks == 0U || largest == 0U || largest > HEAP_SIZE) ok = 0;
+
+    if (ok) {
+        kprintf("heap: check ok (largest_free=%u free_blocks=%u)\n",
+                largest, blocks);
+    } else {
+        kprintln("heap: check FAIL");
+    }
+    return ok;
+}
+
 int mm_selftest(void)
 {
-    /* 预热：先做一次 vmalloc/vfree。第一次 vmalloc 会顺带分配一张页表，
-       那张页表释放时并不归还 PMM；先预热掉，后面的页数对比才不会误判。 */
     void *warm = vmalloc(64U);
     if (warm) vfree(warm);
 
@@ -245,6 +384,10 @@ int mm_selftest(void)
     int split_ok = test_large_page();
 
     unsigned int baseline = pmm.free_pages;
+    /* 8/8 用“本轮增量”而不是全局绝对值：后面的 double-free 自检会故意
+     * 制造一次 WARN，重复运行 memtest 时不能因此把 8/8 判失败。 */
+    unsigned int faults_base = pmm_faults;
+    unsigned int vmm_faults_base = vmm_faults;
     failures = 0;
 
     serial_puts("memtest: start\r\n");
@@ -256,7 +399,13 @@ int mm_selftest(void)
     report("6/8 64 pages are all distinct", test_distinct_pages());
     report("7/8 PAE 2MB identity", split_ok);
     report("8/8 page accounting and fault counters",
-           (pmm.free_pages == baseline) && (pmm_faults == 0U) && (vmm_faults == 0U));
+           (pmm.free_pages == baseline) && (pmm_faults == faults_base) &&
+           (vmm_faults == vmm_faults_base));
+
+    /* 追加项：标签不带 n/8，避免破坏 97 项回归的字符串匹配 */
+    report("pmm 100-page accounting + poison", test_pmm_accounting());
+    report("pmm double-free detection", test_pmm_double_free());
+    report("heap linked-list check", test_heap_check());
 
     serial_puts("memtest: done, failures = ");
     serial_putdec((unsigned int)failures);

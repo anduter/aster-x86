@@ -31,6 +31,24 @@ extern PhysicalMemoryManager pmm;
 /* 非法释放等异常累计次数（供自检判断内存管理是否健康） */
 extern unsigned int pmm_faults;
 
+/* 分配/释放记账（诊断与自检）：成功分配的页数、失败次数、真正归还页数、
+ * double-free 次数、位图已用但引用计数为 0 的次数。 */
+extern unsigned int pmm_alloc_count;
+extern unsigned int pmm_alloc_fail;
+extern unsigned int pmm_free_count;
+extern unsigned int pmm_double_free;
+extern unsigned int pmm_ref_anomalies;
+
+/* 毒化开关：默认开启（分配清零 0x00 / 释放填 0xAA），
+ * 构建时定义 PMM_NO_POISON 可关闭。 */
+#if !defined(PMM_NO_POISON)
+#  ifndef PMM_POISON
+#    define PMM_POISON 1
+#  endif
+#endif
+#define PMM_POISON_ALLOC 0x00U
+#define PMM_POISON_FREE  0xAAU
+
 /* 基础初始化：bitmap_addr 是位图地址，mem_size 是总内存字节数 */
 void pmm_init(unsigned char* bitmap_addr, unsigned int mem_size);
 

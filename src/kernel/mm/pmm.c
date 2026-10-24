@@ -11,6 +11,26 @@ PhysicalMemoryManager pmm;
 /* 非法释放等异常累计次数，自检时用来判断内存管理是否健康 */
 unsigned int pmm_faults;
 
+/* ---------------- 分配/释放记账（诊断与自检用） ----------------
+ * 全部由 pmm_lock 保护；自检/诊断命令读取时只做快照，不反写。 */
+unsigned int pmm_alloc_count;     /* 成功分配的页数 */
+unsigned int pmm_alloc_fail;      /* 分配失败次数（内存不足/无连续段） */
+unsigned int pmm_free_count;      /* 真正归还给 PMM 的页数 */
+unsigned int pmm_double_free;     /* double-free 检测次数 */
+unsigned int pmm_ref_anomalies;   /* 位图已用但引用计数为 0 的次数 */
+
+/* ---------------- 页毒化 ----------------
+ * 分配时填 0x00（同时防止把上一任页主的数据泄漏给新页主），
+ * 释放时填 0xAA（use-after-free 会立刻看到 0xAAAAAAAA）。
+ * 默认开启；定义 PMM_NO_POISON 可关闭（-DPMM_NO_POISON）。
+ * PMM_POISON / 填充值在 pmm.h 里定义，便于自检按同一组常量断言。 */
+#ifdef PMM_POISON
+static void pmm_poison(void *phys, size_t count, unsigned char value)
+{
+    memset(phys, value, count * PAGE_SIZE);
+}
+#endif
+
 /* 物理内存基准地址：所有分配地址都以它为起点计算
    （关键：页号 0 对应的就是这块地址，而不是物理地址 0） */
 static uint8_t* memory_start;
@@ -236,11 +256,13 @@ void pmm_free_pages(void* base_addr, size_t count)
 static void* alloc_pages_locked(size_t count)
 {
     if (count == 0 || count > pmm.free_pages) {
+        pmm_alloc_fail++;
         return 0;
     }
 
     size_t start_idx = find_free_run(count);
     if (start_idx == (size_t)-1) {
+        pmm_alloc_fail++;
         return 0;   /* 内存足够但碎片化，找不到连续段 */
     }
 
@@ -251,6 +273,7 @@ static void* alloc_pages_locked(size_t count)
         if (j < PMM_REF_PAGES) page_ref[j] = 1U;
     }
     pmm.free_pages -= count;
+    pmm_alloc_count += (unsigned int)count;
 
     /* 下一次从这次分配结束的位置继续找 */
     pmm_rover = start_idx + count;
@@ -259,7 +282,13 @@ static void* alloc_pages_locked(size_t count)
     }
 
     /* 返回真实物理地址 = 基准地址 + 页号 * 页大小 */
-    return (void*)(memory_start + (start_idx << PAGE_SHIFT));
+    void *phys = (void*)(memory_start + (start_idx << PAGE_SHIFT));
+
+#ifdef PMM_POISON
+    /* 新页主看不到上一任的数据 */
+    pmm_poison(phys, count, PMM_POISON_ALLOC);
+#endif
+    return phys;
 }
 
 /* ==================== 连续多页释放（带合法性校验） ==================== */
@@ -307,8 +336,16 @@ static void free_pages_locked(void* base_addr, size_t count)
 
     for (size_t i = start_idx; i < start_idx + count; i++) {
         if (!bitmap_test(i)) {
-            /* 这一页本来就是空闲的：重复释放 */
+            /* 这一页本来就是空闲的：重复释放。只记账 + WARN，不动位图 */
+            pmm_double_free++;
             pmm_warn("double free", base + (i << PAGE_SHIFT));
+            continue;
+        }
+        /* 位图说已用，但引用计数从未建立（保留区或位图/计数被踩坏）：
+         * 拒绝归还，避免把保留页发出去。 */
+        if (i < PMM_REF_PAGES && page_ref[i] == 0U) {
+            pmm_ref_anomalies++;
+            pmm_warn("refcount anomaly", base + (i << PAGE_SHIFT));
             continue;
         }
         /* 还有别的页表引用它（COW 共享）：只减引用，不真正释放 */
@@ -319,6 +356,11 @@ static void free_pages_locked(void* base_addr, size_t count)
         if (i < PMM_REF_PAGES) page_ref[i] = 0U;
         bitmap_clear(i);
         pmm.free_pages++;
+        pmm_free_count++;
+#ifdef PMM_POISON
+        /* use-after-free 检查：刚归还的页填成 0xAA */
+        pmm_poison((void *)(base + (i << PAGE_SHIFT)), 1U, PMM_POISON_FREE);
+#endif
     }
 }
 
