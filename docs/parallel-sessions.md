@@ -54,6 +54,20 @@
 | 会话 | 负责区域 | 开始时间 | 状态 |
 |---|---|---|---|
 | 本会话 | SMP / IOAPIC / IRQ 路由 | 2026-10-24 | 进行中 |
-| UDP 子代理 | 用户态 UDP 接收 | 2026-10-24 | 进行中 |
+| UDP 子代理 | 用户态 UDP 接收 | 2026-10-24 | 已完成（net.c/net.h/syscall.c） |
+| 另一会话 | fs/VFS、TCP echo、kernel.c | 2026-10-24 | 进行中 |
+
+## 7. 已完成里程碑（本会话）
+
+- `[smp] IOAPIC driver`（`aeec408`）
+- `[smp] IRQ12 → IOAPIC`（鼠标，`cb378f5`，monitor `mouse_move` 验证）
+- `[smp] sched_wake + AP tick 校准`（`e712581`，2s 时 bsp=200 ap=195）
+- `[smp] IRQ1 → AP`（键盘亲和性，`54ac8fa`，注入按键测试 86/86）
+
+## 8. 待提交（工作区）
+
+- `intr/syscall.c`：UDP 收包改为“短轮询 + sleep 让出”，避免 IF=0 长自旋触发 NMI 看门狗（与另一会话的 VFS chroot 改动混在同一文件，提交时注意拆分）；
+- `build.ps1`：harness 用 QMP `quit` 正常退出 QEMU 后再读串口（修 `-serial file:` 缓冲导致的假失败）。
+
 | fs 会话 | 文件系统 / VFS 后端接口（`fs/*`） | 2026-10-24 | 进行中 |
 | 新会话 | （待登记） | | |
