@@ -11,12 +11,28 @@
 #include "uaccess.h"
 #include "../io.h"
 #include "../core/error.h"
+#include "../core/percpu.h"
 #include "../proc/proc.h"
 #include "../mm/pmm.h"
 #include "../fb.h"
 #include "../console.h"
 #include "../lib/kprintf.h"
 #include "../core/apic.h"
+#include "../core/ioapic.h"
+
+/* 哪些 IRQ 已经改由 IOAPIC 投递（EOI 要发给 LAPIC 而不是 8259） */
+static uint32_t ioapic_routed;
+
+#define LAPIC_EOI_OFFSET 0xB0U
+
+static void lapic_send_eoi(void)
+{
+    if (apic_base() != 0U) {
+        volatile uint32_t *eoi =
+            (volatile uint32_t *)(uintptr_t)(apic_base() + LAPIC_EOI_OFFSET);
+        *eoi = 0U;
+    }
+}
 
 /* ---- 8259A 可编程中断控制器端口 ---- */
 #define PIC1_CMD   0x20U
@@ -140,8 +156,7 @@ int irq_register(unsigned int irq, irq_handler_t handler, void *arg, const char 
 }
 
 int irq_unregister(unsigned int irq)
-{
-    if (irq >= IRQ_MAX) return E_INVAL;
+{    if (irq >= IRQ_MAX) return E_INVAL;
     if (slots[irq].handler == 0) return E_NOENT;
 
     pic_set_mask(irq, true);
@@ -154,6 +169,34 @@ int irq_unregister(unsigned int irq)
 unsigned int irq_count(unsigned int irq)
 {
     return (irq < IRQ_MAX) ? slots[irq].count : 0U;
+}
+
+/* 把一条传统 IRQ 从 8259 迁到 IOAPIC（边沿触发、固定投递）：
+ * 先屏蔽 PIC 线，成功编程 IOAPIC 后再取消屏蔽，避免两套同时投递。 */
+int irq_migrate_to_ioapic(unsigned int irq, uint32_t apic_id)
+{
+    uint8_t vector;
+
+    if (irq >= IRQ_MAX || !ioapic_present() || apic_base() == 0U) return E_INVAL;
+
+    vector = (uint8_t)(32U + irq);
+
+    pic_set_mask(irq, true);                 /* 1. 关掉 PIC 这一路 */
+    if (ioapic_route(irq, apic_id, vector, false, false) != E_OK) {
+        pic_set_mask(irq, false);            /* 回滚 */
+        return E_INVAL;
+    }
+
+    ioapic_routed |= (1U << irq);
+    kprintf("ioapic: irq%u -> apic %u vector=0x%x (PIC masked, LAPIC EOI)\n",
+            irq, (unsigned int)apic_id, (unsigned int)vector);
+    return E_OK;
+}
+
+int irq_is_ioapic_routed(unsigned int irq)
+{
+    if (irq >= IRQ_MAX) return 0;
+    return (ioapic_routed & (1U << irq)) != 0U;
 }
 
 const char *irq_name(unsigned int irq)
@@ -251,6 +294,10 @@ static void timer_handler(void *arg)
 {
     (void)arg;
     ticks++;
+
+    /* 每 CPU tick：BSP 走 PIT（本函数），AP 走 LAPIC timer（smp_timer_tick）。
+     * 全局 ticks 继续供 uptime/soak 使用，语义不受影响。 */
+    this_cpu()->ticks++;
 
     /* 浸泡测试：每 60 秒往串口打一行运行状态（只走串口，不刷屏幕）。
      * 观察 free_pages 是否持续下降、procs 是否泄漏。 */
@@ -466,10 +513,15 @@ void irq_dispatch(interrupt_frame_t *f)
     }
 
     /* EOI：从片上的中断要两个 PIC 都通知 */
-    if (irq >= 8U) {
-        outb(PIC2_CMD, PIC_EOI);
+    /* EOI：IOAPIC 投递的中断走 LAPIC EOI；其余走 8259（从片要两个都通知） */
+    if ((ioapic_routed & (1U << irq)) != 0U) {
+        lapic_send_eoi();
+    } else {
+        if (irq >= 8U) {
+            outb(PIC2_CMD, PIC_EOI);
+        }
+        outb(PIC1_CMD, PIC_EOI);
     }
-    outb(PIC1_CMD, PIC_EOI);
 
     /* 时钟中断在 EOI 之后做调度决策（可能切换栈，不再返回本函数） */
     if (irq == 0U) {

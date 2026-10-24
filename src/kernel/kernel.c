@@ -348,6 +348,14 @@ void kernel_main(void)
     /* NMI 看门狗：映射 LAPIC 并开始校准（不接管 PIC 中断） */
     (void)apic_watchdog_start();
 
+    /* 渐进迁移：先把鼠标 IRQ12 从 8259 迁到 IOAPIC（目标 BSP LAPIC）。
+     * 失败会自动回滚到 PIC；成功则 EOI 走 LAPIC。 */
+    if (ioapic_present()) {
+        if (irq_migrate_to_ioapic(12U, apic_id_from_cpuid()) != 0) {
+            kprintln("ioapic: irq12 migration failed, staying on PIC");
+        }
+    }
+
     /* 系统调用门（DPL3）：0x80 原生 ABI，0x81 旧原型过渡门 */
     kprintln("sys: int 0x80 native + int 0x81 legacy gates installed (DPL3)");
     syscall_selftest();

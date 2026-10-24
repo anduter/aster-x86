@@ -69,6 +69,10 @@ int irq_unregister(unsigned int irq);
 int irq_mask(unsigned int irq);
 int irq_unmask(unsigned int irq);
 
+/* 把 IRQ 从 8259 迁到 IOAPIC（目标 CPU 的 LAPIC），成功返回 0 */
+int irq_migrate_to_ioapic(unsigned int irq, unsigned int apic_id);
+int irq_is_ioapic_routed(unsigned int irq);
+
 /* 统计与命名（供 shell / 日志） */
 unsigned int irq_count(unsigned int irq);
 const char  *irq_name(unsigned int irq);
