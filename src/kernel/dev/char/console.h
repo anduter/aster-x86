@@ -21,6 +21,7 @@ void console_putc(char c);
 void console_write(const char *s);
 /* 关中断写完整个字符串，避免内核日志被进程切换/中断输出撕裂。 */
 void console_write_atomic(const char *s);
+void console_serial_line(const char *s);
 
 /* 设置文字前景/背景色（0x00RRGGBB） */
 void console_set_color(uint32_t fg, uint32_t bg);

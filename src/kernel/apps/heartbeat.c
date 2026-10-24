@@ -25,13 +25,10 @@ void heartbeat_entry(void)
         char widget[24];
 
         /* 串口日志（屏幕不滚动输出，只在右下角显示小部件） */
-        serial_puts("thread: heartbeat ");
-        serial_putdec(n);
-        serial_puts(" pid=");
-        serial_putdec((me != 0) ? me->pid : 0U);
-        serial_puts(" cpu=");
-        serial_putdec(smp_cpu_id());
-        serial_puts("\r\n");
+        char line[64];
+        ksnprintf(line, sizeof(line), "thread: heartbeat %u pid=%u cpu=%u\r\n",
+                  n, (me != 0) ? me->pid : 0U, (unsigned int)smp_cpu_id());
+        console_serial_line(line);
 
         /* 右下角心跳：计数 + 交替的跳动符号 */
         ksnprintf(widget, sizeof(widget), "hb %u %s", n, ((n & 1U) != 0U) ? "*" : ".");

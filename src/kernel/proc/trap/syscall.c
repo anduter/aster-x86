@@ -12,6 +12,8 @@
 #include "syscall.h"
 #include "interrupt.h"
 #include "uaccess.h"
+#include "syscall_internal.h"
+#include "../../net/net_syscall.h"
 #include "../../core/error.h"
 #include "../../dev/char/console.h"
 #include "../../fs/fs.h"
@@ -44,13 +46,7 @@ static unsigned int calls;
 
 /* 校验用户传入的缓冲区：必须在用户地址范围且长度合理。
  * 这是 ring3 的第一道防线：没有它，用户可以把内核地址交给 SYS_WRITE。 */
-static bool user_range_ok(uint32_t ptr, uint32_t len)
-{
-    if (len > USER_LEN_LIMIT) return false;
-    if (ptr >= USER_ADDR_LIMIT) return false;
-    if (len > USER_ADDR_LIMIT - ptr) return false;
-    return true;
-}
+
 
 /* 分块把用户缓冲区拷进内核栈，再输出。
  * 用户指针未映射时 copy_from_user 会走 #PF 恢复路径返回错误，
@@ -93,125 +89,26 @@ static int sys_yield(void)
 
 /* ---- 文件类系统调用的用户参数处理 ---- */
 
-static int copy_user_string(char *dst, uint32_t dst_size, uint32_t uptr)
-{
-    uint32_t i;
 
-    if (dst_size == 0U) return E_INVAL;
 
-    for (i = 0; i + 1U < dst_size; i++) {
-        char c;
-        if (copy_from_user(&c, (const void *)(uintptr_t)(uptr + i), 1) != E_OK) {
-            return E_INVAL;
-        }
-        dst[i] = c;
-        if (c == '\0') return E_OK;
-    }
-    dst[dst_size - 1U] = '\0';
-    return E_INVAL;                    /* 路径太长 */
-}
 
-static int path_has_parent(const char *p)
-{
-    for (; p[0] != '\0' && p[1] != '\0'; p++) {
-        if (p[0] == '.' && p[1] == '.') return 1;
-    }
-    return 0;
-}
 
 /* 把用户给的路径转成绝对路径：
  *   以 '/' 开头或含 ':'  -> 原样（绝对路径/指定驱动号）
  *   其它                -> 拼上当前进程的 cwd
  */
-static void make_abs_path(char *out, uint32_t out_max, const char *in)
-{
-    proc_t *p = proc_current();
-    const char *cwd = (p != 0 && p->cwd[0] != '\0') ? p->cwd : "system:";
-    const char *root = (p != 0) ? proc_root_of(p) : "";
-    uint32_t n = 0;
-    uint32_t i;
 
-    if (root[0] != '\0' && path_has_parent(in)) {
-        out[0] = '\0';
-        return;
-    }
-
-    if (in[0] == '/') {
-        if (root[0] == '\0') {
-            strncpy(out, in, out_max - 1U);
-            out[out_max - 1U] = '\0';
-            return;
-        }
-        for (i = 0; root[i] != '\0' && n + 1U < out_max; i++) out[n++] = root[i];
-        while (n > 0U && out[n - 1U] == '/') n--;
-        if (n + 1U < out_max) out[n++] = '/';
-        for (i = 1; in[i] != '\0' && n + 1U < out_max; i++) out[n++] = in[i];
-        out[n] = '\0';
-        return;
-    }
-
-    if (strchr(in, ':') != 0) {
-        if (root[0] != '\0') {
-            uint32_t rl = (uint32_t)strlen(root);
-            if (rl > 0U && strncmp(in, root, rl) != 0) {
-                out[0] = '\0';
-                return;
-            }
-        }
-        strncpy(out, in, out_max - 1U);
-        out[out_max - 1U] = '\0';
-        return;
-    }
-
-    if (in[0] == '\0') {
-        strncpy(out, cwd, out_max - 1U);
-        out[out_max - 1U] = '\0';
-        return;
-    }
-
-    for (i = 0; cwd[i] != '\0' && n + 1U < out_max; i++) out[n++] = cwd[i];
-    if (n > 0U && out[n - 1U] != '/' && n + 1U < out_max) out[n++] = '/';
-    for (i = 0; in[i] != '\0' && n + 1U < out_max; i++) out[n++] = in[i];
-    out[n] = '\0';
-}
 
 /* 前向声明：fd 读 stdin 时用到阻塞读 */
 static int sys_getchar_block(void);
 
-static proc_fd_t *fd_get(proc_t *p, int fd)
-{
-    if (p == 0 || fd < 0 || fd >= PROC_FD_MAX) return 0;
-    if (!p->fds[fd].used) return 0;
-    return &p->fds[fd];
-}
 
-static int fd_alloc_kind(proc_t *p, uint8_t kind, uint32_t handle, uint32_t rights)
-{
-    for (int i = 3; i < PROC_FD_MAX; i++) {
-        if (!p->fds[i].used) {
-            p->fds[i].used = true;
-            p->fds[i].kind = kind;
-            p->fds[i].handle = handle;
-            p->fds[i].rights = rights;
-            return i;
-        }
-    }
-    return -1;
-}
 
-static uint32_t open_rights(uint32_t flags)
-{
-    uint32_t rights = 0;
 
-    if ((flags & FS_OPEN_READ) != 0U) rights |= FD_RIGHT_READ;
-    if ((flags & FS_OPEN_WRITE) != 0U) rights |= FD_RIGHT_WRITE;
-    return (rights != 0U) ? rights : FD_RIGHT_READ;
-}
 
-static int fd_alloc(proc_t *p, uint32_t handle, uint32_t rights)
-{
-    return fd_alloc_kind(p, FD_KIND_FILE, handle, rights);
-}
+
+
+
 
 static int sys_open_user(uint32_t path_ptr, uint32_t flags)
 {
@@ -384,23 +281,7 @@ static int sys_unlink_user(uint32_t path_ptr)
 /* UDP 收包：短轮询 + 让出 CPU。
  * 系统调用门是中断门（IF=0），若在门里自旋几百万次，PIT tick 无法推进，
  * NMI 看门狗会误判“无进展”而 panic；因此每轮之后 sleep 1 tick。 */
-static int udp_recv_yield(uint16_t local_port, uint8_t ip[4], uint16_t *port,
-                          void *buf, uint32_t len, int allow_loopback)
-{
-    int n = -1;
 
-    for (int i = 0; i < 40; i++) {
-        n = net_udp_recv_port(local_port, ip, port, buf, len, 20000U, 0);
-        if (n >= 0) break;
-        proc_sleep_ticks(1U);
-    }
-
-    /* 宿主始终没回显：最后允许一次本地回环兜底（会打印日志） */
-    if (n < 0 && allow_loopback) {
-        n = net_udp_recv_port(local_port, ip, port, buf, len, 1U, 1);
-    }
-    return n;
-}
 
 static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
 {
@@ -570,6 +451,12 @@ void syscall_dispatch(interrupt_frame_t *f)
     if (sp != 0 && sp->sandboxed && f->eax < 64U &&
         (sp->syscall_mask & (1ULL << f->eax)) == 0ULL) {
         f->eax = (uint32_t)-1;
+        return;
+    }
+
+    /* 网络组（UDP/socket）已迁到 net/net_syscall.c（M5） */
+    if (net_syscall_owns(f->eax)) {
+        f->eax = (uint32_t)net_syscall(f);
         return;
     }
 
@@ -980,104 +867,6 @@ mmap_out:
         p->mmaps[slot].base = 0;
         p->mmaps[slot].len = 0;
         ret = 0;
-        break;
-    }
-    case SYS_UDP_SEND: {
-        struct {
-            uint8_t  ip[4];
-            uint16_t port;
-            uint16_t len;
-            uint8_t  data[64];
-        } req;
-
-        if (copy_from_user(&req, (const void *)(uintptr_t)f->ebx, sizeof(req)) != E_OK ||
-            req.len > sizeof(req.data)) {
-            ret = -1;
-            break;
-        }
-        ret = net_udp_send_to(req.ip, req.port, req.data, req.len);
-        break;
-    }
-    case SYS_UDP_RECV: {
-        struct {
-            uint8_t  ip[4];
-            uint16_t port;
-            uint16_t len;
-            uint8_t  data[64];
-        } req;
-        int n;
-
-        if (copy_from_user(&req, (const void *)(uintptr_t)f->ebx, sizeof(req)) != E_OK) {
-            ret = -1;
-            break;
-        }
-        /* 旧路径固定用 12345 端口发/收；只收发给该端口的回包，且宿主
-         * 完全没回显时允许一次本地回环兜底，保证 ring3 自检可判定。 */
-        n = udp_recv_yield(NET_UDP_LOCAL_PORT, req.ip, &req.port,
-                           req.data, sizeof(req.data), 1);
-        if (n < 0) { ret = -1; break; }
-        req.len = (uint16_t)n;
-        ret = (copy_to_user((void *)(uintptr_t)f->ebx, &req, sizeof(req)) == E_OK) ? n : -1;
-        break;
-    }
-    case SYS_SOCKET: {
-        proc_t *p = proc_current();
-        int fd = -1;
-
-        if (p != 0) {
-            /* socket 的本地端口就是 fd->handle：每个 socket 用独立端口，
-             * 这样 sendto/recvfrom 天然不会收到别的测试/别的 socket 的回包。 */
-            fd = fd_alloc_kind(p, FD_KIND_UDP, (uint32_t)net_udp_alloc_port(),
-                               FD_RIGHT_READ | FD_RIGHT_WRITE);
-        }
-        ret = fd;
-        break;
-    }
-    case SYS_SENDTO: {
-        proc_t *p = proc_current();
-        proc_fd_t *fd = fd_get(p, (int)f->ebx);
-        struct {
-            uint8_t  ip[4];
-            uint16_t port;
-            uint16_t len;
-            uint8_t  data[64];
-        } req;
-
-        if (fd == 0 || fd->kind != FD_KIND_UDP ||
-            (fd->rights & FD_RIGHT_WRITE) == 0U ||
-            copy_from_user(&req, (const void *)(uintptr_t)f->ecx, sizeof(req)) != E_OK ||
-            req.len > sizeof(req.data)) {
-            ret = -1;
-            break;
-        }
-        ret = net_udp_send_from((uint16_t)fd->handle, req.ip, req.port,
-                                req.data, req.len);
-        break;
-    }
-    case SYS_RECVFROM: {
-        proc_t *p = proc_current();
-        proc_fd_t *fd = fd_get(p, (int)f->ebx);
-        struct {
-            uint8_t  ip[4];
-            uint16_t port;
-            uint16_t len;
-            uint8_t  data[64];
-        } req;
-        int n;
-
-        if (fd == 0 || fd->kind != FD_KIND_UDP ||
-            (fd->rights & FD_RIGHT_READ) == 0U ||
-            copy_from_user(&req, (const void *)(uintptr_t)f->ecx, sizeof(req)) != E_OK) {
-            ret = -1;
-            break;
-        }
-        /* 只收“目的端口 = socket 本地端口(fd->handle)”的报文；与 SYS_UDP_*
-         * 的固定 12345 端口彼此隔离，不会互相吃回包。 */
-        n = udp_recv_yield((uint16_t)fd->handle, req.ip, &req.port,
-                           req.data, sizeof(req.data), 1);
-        if (n < 0) { ret = -1; break; }
-        req.len = (uint16_t)n;
-        ret = (copy_to_user((void *)(uintptr_t)f->ecx, &req, sizeof(req)) == E_OK) ? n : -1;
         break;
     }
     case SYS_RESINFO: {

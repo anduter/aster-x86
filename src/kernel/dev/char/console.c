@@ -244,16 +244,10 @@ void console_putc(char c)
     spin_unlock_irqrestore(&console_lock, flags);
 }
 
-static void console_write_raw(const char *s)
-{
-    while (s != NULL && *s != '\0') {
-        console_putc(*s++);
-    }
-}
-
 void console_write(const char *s)
 {
-    console_write_raw(s);
+    /* atomic per call: SMP writers must not interleave mid-line */
+    console_write_atomic(s);
 }
 
 void console_write_atomic(const char *s)
@@ -266,6 +260,18 @@ void console_write_atomic(const char *s)
     spin_unlock_irqrestore(&console_lock, flags);
 }
 
+
+/* 只写串口、不写屏幕；与 console 输出共用同一把锁，保证整行原子 */
+void console_serial_line(const char *s)
+{
+    uint32_t flags = spin_lock_irqsave(&console_lock);
+
+    for (; s != 0 && *s != '\0'; s++) {
+        if (*s == '\n') serial_putc('\r');
+        serial_putc(*s);
+    }
+    spin_unlock_irqrestore(&console_lock, flags);
+}
 /* 输入区：清空整行后画一行文本（不换行、不滚动、不进串口） */
 void console_input_set(const char *text)
 {
