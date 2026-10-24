@@ -27,7 +27,7 @@
 #define OS_ABI_MAGIC          0x4F534142u   /* "OSAB"（小端字节序 'O','S','A','B'） */
 #define OS_ABI_VERSION        1u            /* 头文件/编号空间的 major 版本 */
 #define OS_ABI_VERSION_MAJOR  1
-#define OS_ABI_VERSION_MINOR  0
+#define OS_ABI_VERSION_MINOR  1
 
 /* SYS_ABI_VERSION 返回值的低 16 位（feature bits）：只增不减。
  *
@@ -115,8 +115,28 @@
  * 走 int 0x80 的 NATIVE_SYS_ABI_VERSION（0x00）。 */
 #define SYS_ABI_VERSION 59
 
+/* v1.1 新增（只追加）：进程/内存补缺（pm 会话）。
+ * SYS_WAIT(20) 的阻塞语义保持不变；带 options 的等待走 SYS_WAITPID。 */
+#define SYS_WAITPID    60 /* ebx=pid, ecx=&status, edx=options -> 子 pid / 0 / -1 */
+#define SYS_GETPPID    61 /*                                    -> 父 pid（0=无） */
+#define SYS_MPROTECT   62 /* ebx=addr, ecx=len, edx=prot         -> 0 / -1 */
+
+/* SYS_WAITPID 的 options 位 */
+#define WNOHANG 1
+
+/* SYS_MPROTECT 的 prot 位（数值沿用 POSIX） */
+#define PROT_NONE  0
+#define PROT_READ  1
+#define PROT_WRITE 2
+#define PROT_EXEC  4
+
+/* 用户可见信号编号（当前只暴露 SIGCHLD；数值与 proc/proc.h 一致） */
+#define SIGCHLD 17
+#define SIG_DFL 0u
+#define SIG_IGN 1u
+
 /* 已分配的最大编号；新增调用必须从 SYS_NR_MAX + 1 开始 */
-#define SYS_NR_MAX 59
+#define SYS_NR_MAX 62
 
 /* =============================================================================
  * 3. 用户可见共享结构体（布局冻结，见文件末尾断言）
