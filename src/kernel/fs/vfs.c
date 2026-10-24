@@ -152,3 +152,96 @@ int fs_unlink_ex(const char *path, uint32_t uid, uint32_t gid, uint8_t *be)
     if (be != 0) *be = be_id(b);
     return 0;
 }
+
+/* =============================================================================
+ * rename / move
+ *
+ * 语义（详见 fs.h）：
+ *   - 只在同一个后端、同一个卷内改名或移动；跨卷直接 E_INVAL；
+ *   - 权限：源父目录和目标父目录都要 w+x，uid==0 绕过；
+ *   - 覆盖策略由后端决定：目标文件可替换（ramfs），非空目录拒绝。
+ *
+ * 权限检查放在 VFS 是为了让所有后端走同一条规则；FAT16 没有 mode/uid/gid
+ * （stat 全 0），按权限位判会一律拒绝，所以跳过（FAT 本身没有 Unix 权限模型）。
+ * ramfs 后端还会用自己的节点再判一次，属于防御性重复检查。
+ * ============================================================================= */
+
+/* 取路径的父目录（去掉末尾 '/' 和最后一个名字）：
+ *   "system:/a/b.txt" -> "system:/a"
+ *   "system:/a.txt"   -> "system:"（卷根）
+ *   "/a.txt"          -> "/"（默认卷根）
+ *   "a.txt"           -> 无法推导（返回 0，交给后端判权）
+ * 返回 1 表示 out 是有效父路径。 */
+static int rename_parent(const char *path, char *out, uint32_t max)
+{
+    uint32_t n = (uint32_t)strlen(path);
+
+    while (n > 0U && path[n - 1U] == '/') n--;
+    while (n > 0U && path[n - 1U] != '/') n--;
+    if (n == 0U) return 0;
+    if (n + 1U > max) return 0;
+
+    memcpy(out, path, n);
+    out[n] = '\0';
+
+    while (n > 1U && out[n - 1U] == '/') out[--n] = '\0';
+    return (out[0] != '\0') ? 1 : 0;
+}
+
+/* 目录是否允许 uid/gid 写入并穿越。返回 E_OK / E_NOENT / E_ACCES。 */
+static int rename_check_dir(const char *dirpath, uint32_t uid, uint32_t gid)
+{
+    fs_stat_t st;
+    uint32_t bits;
+    const uint32_t want = FS_ACCESS_WRITE | FS_ACCESS_EXEC;
+
+    if (fs_stat_ex(dirpath, &st, 0) != 0) return E_NOENT;
+    if (st.type != FS_TYPE_DIR) return E_NOENT;
+    if (uid == 0U) return E_OK;                     /* root 绕过 */
+
+    if (st.uid == uid) bits = (st.mode >> 6) & 7U;
+    else if (st.gid == gid) bits = (st.mode >> 3) & 7U;
+    else bits = st.mode & 7U;
+
+    return ((bits & want) == want) ? E_OK : E_ACCES;
+}
+
+int fs_rename_as(const char *old_path, const char *new_path, uint32_t uid, uint32_t gid)
+{
+    const fs_backend_t *ob;
+    const fs_backend_t *nb;
+    const char *orel;
+    const char *nrel;
+    char oparent[FS_PATH_MAX];
+    char nparent[FS_PATH_MAX];
+    int r;
+
+    if (old_path == 0 || new_path == 0) return E_INVAL;
+    if (old_path[0] == '\0' || new_path[0] == '\0') return E_INVAL;
+
+    ob = route(old_path, &orel);
+    nb = route(new_path, &nrel);
+    if (ob == 0 || nb == 0) return E_INVAL;
+    if (ob != nb) return E_INVAL;                   /* 跨卷 rename 不支持 */
+    if (ob->rename == 0) return E_INVAL;            /* svcfs / blkfs 只读 */
+
+    /* 源/目标父目录都要 w+x（root 绕过） */
+    if (ob != &fat16_backend) {
+        if (rename_parent(old_path, oparent, sizeof(oparent))) {
+            r = rename_check_dir(oparent, uid, gid);
+            if (r != E_OK) return r;
+        }
+        if (rename_parent(new_path, nparent, sizeof(nparent))) {
+            r = rename_check_dir(nparent, uid, gid);
+            if (r != E_OK) return r;
+        }
+    }
+
+    return ob->rename(orel, nrel, uid, gid);
+}
+
+/* 内核内部调用按 root 身份执行 */
+int fs_rename(const char *old_path, const char *new_path)
+{
+    return fs_rename_as(old_path, new_path, 0U, 0U);
+}

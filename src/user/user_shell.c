@@ -32,6 +32,7 @@ struct udp_req {
 #define SYS_RECVFROM 54
 #define SYS_CHROOT   55
 #define SYS_TCP_TEST 56
+#define SYS_RENAME   58
 #define SYS_GETCHAR  10
 #define SYS_LIST     11
 #define SYS_DRIVES   12
@@ -365,6 +366,14 @@ static void cmd_mkdir(const char *path)
 static void cmd_rm(const char *path)
 {
     putstr((sc(SYS_UNLINK, (int)path, 0, 0) == 0) ? "ok\n" : "rm: failed\n");
+    sc(SYS_SYNC, 0, 0, 0);
+}
+
+/* mv <old> <new>：同卷内改名/移动（不跨卷、不做"移入目录"语义）。
+ * 内核返回的失败码在 syscall 层压成 -1，这里只能给通用错误信息。 */
+static void cmd_mv(const char *oldpath, const char *newpath)
+{
+    putstr((sc(SYS_RENAME, (int)oldpath, (int)newpath, 0) == 0) ? "ok\n" : "mv: failed\n");
     sc(SYS_SYNC, 0, 0, 0);
 }
 
@@ -939,6 +948,7 @@ static void cmd_help_one(const char *name)
         { "write",   "write <path> <text>   create/overwrite (quotes allowed)" },
         { "mkdir",   "mkdir <path>          create a directory" },
         { "rm",      "rm <path>             remove a file/dir" },
+        { "mv",      "mv <old> <new>        rename/move (same volume)" },
         { "cd",      "cd <path> | cd -      change directory" },
         { "pwd",     "pwd                   show current directory" },
         { "stat",    "stat <path>           type/size/mtime" },
@@ -989,6 +999,7 @@ static void run_line(char *cmd)
                "  write <path> <text>    create/overwrite a file (quotes allowed)\n"
                "  mkdir <path>           create a directory\n"
                "  rm <path>              remove a file/dir\n"
+               "  mv <old> <new>         rename/move within a volume\n"
                "  cd <path>              change directory; cd - returns\n"
                "  pwd                    show current directory\n"
                "  stat <path>            show type/size/mtime\n"
@@ -1039,6 +1050,8 @@ static void run_line(char *cmd)
         cmd_mkdir(args[1]);
     } else if (scmp(args[0], "rm") == 0 && nargs >= 2) {
         cmd_rm(args[1]);
+    } else if (scmp(args[0], "mv") == 0 && nargs >= 3) {
+        cmd_mv(args[1], args[2]);
     } else if (scmp(args[0], "cd") == 0 && nargs >= 2) {
         cmd_cd(args[1]);
     } else if (scmp(args[0], "pwd") == 0) {

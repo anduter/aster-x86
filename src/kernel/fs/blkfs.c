@@ -175,6 +175,13 @@ static int blk_unlink(const char *rel, uint32_t uid, uint32_t gid)
     return -1;
 }
 
+/* blkfs 是只读的块设备文件：改名/移动不支持 */
+static int blk_rename(const char *oldrel, const char *newrel, uint32_t uid, uint32_t gid)
+{
+    (void)oldrel; (void)newrel; (void)uid; (void)gid;
+    return E_INVAL;
+}
+
 const fs_backend_t blk_backend = {
     "blkfs",
     blk_probe,
@@ -186,5 +193,6 @@ const fs_backend_t blk_backend = {
     blk_stat,
     blk_listdir,
     blk_mkdir,
-    blk_unlink
+    blk_unlink,
+    blk_rename
 };

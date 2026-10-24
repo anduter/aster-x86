@@ -61,6 +61,7 @@
 #define SYS_CHROOT     55 /* ebx=path                      -> 0 / -1 */
 #define SYS_TCP_TEST   56 /* 运行一次 TCP echo 自检           -> 0 / -1 */
 #define SYS_BLK_READ   57 /* ebx=lba, ecx=user buf           -> 0 / -1 */
+#define SYS_RENAME     58 /* ebx=old path, ecx=new path      -> 0 / -1（同卷 rename） */
 
 /* 用户/内核代码统一用这个宏发起系统调用 */
 static inline int sys_call(int num, int a, int b, int c)

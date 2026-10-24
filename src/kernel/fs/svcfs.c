@@ -180,6 +180,13 @@ static int svc_unlink(const char *rel, uint32_t uid, uint32_t gid)
     return -1;
 }
 
+/* svcfs 是只读的服务文件系统：改名/移动不支持 */
+static int svc_rename(const char *oldrel, const char *newrel, uint32_t uid, uint32_t gid)
+{
+    (void)oldrel; (void)newrel; (void)uid; (void)gid;
+    return E_INVAL;
+}
+
 const fs_backend_t svc_backend = {
     "svcfs",
     svc_probe,
@@ -191,5 +198,6 @@ const fs_backend_t svc_backend = {
     svc_stat,
     svc_listdir,
     svc_mkdir,
-    svc_unlink
+    svc_unlink,
+    svc_rename
 };

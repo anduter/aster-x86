@@ -189,6 +189,27 @@ static int sys_unlink_user(uint32_t path_ptr)
     return (fs_unlink_ex(path, (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, 0) == 0) ? 0 : -1;
 }
 
+/* 同卷 rename/move：ebx=旧路径, ecx=新路径。
+ * 两个路径都按当前进程的 cwd 规范化；具体路由/判权在 fs_rename_as 里。 */
+static int sys_rename_user(uint32_t old_ptr, uint32_t new_ptr)
+{
+    char oldrel[256];
+    char newrel[256];
+    char oldpath[256];
+    char newpath[256];
+    proc_t *p = proc_current();
+
+    if (copy_user_string(oldrel, sizeof(oldrel), old_ptr) != E_OK) return -1;
+    if (copy_user_string(newrel, sizeof(newrel), new_ptr) != E_OK) return -1;
+
+    make_abs_path(oldpath, sizeof(oldpath), oldrel);
+    make_abs_path(newpath, sizeof(newpath), newrel);
+
+    return (fs_rename_as(oldpath, newpath,
+                         (p != 0) ? p->uid : 0U,
+                         (p != 0) ? p->gid : 0U) == E_OK) ? 0 : -1;
+}
+
 static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
 {
     char rel[256];
@@ -304,6 +325,7 @@ bool fs_syscall_owns(uint32_t nr)
     case SYS_DRIVES:
     case SYS_MKDIR:
     case SYS_UNLINK:
+    case SYS_RENAME:
     case SYS_STAT:
     case SYS_CHDIR:
     case SYS_CHROOT:
@@ -347,6 +369,9 @@ int fs_syscall(interrupt_frame_t *f)
         break;
     case SYS_UNLINK:
         ret = sys_unlink_user(f->ebx);
+        break;
+    case SYS_RENAME:
+        ret = sys_rename_user(f->ebx, f->ecx);
         break;
     case SYS_STAT:
         ret = sys_stat_user(f->ebx, f->ecx);

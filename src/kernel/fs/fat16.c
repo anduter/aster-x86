@@ -409,6 +409,57 @@ int fat16_mkdir(const char *rel)
     return E_NOSPC;             /* 只支持根目录里的文件 */
 }
 
+/* 根目录内 8.3 改名：找到目录项 -> 改 11 字节短名 -> 回写扇区。
+ *
+ * 限制（和本后端其余部分一致，刻意保持简单）：
+ *   - 只支持根目录：old/new 里出现 '/' 一律 E_INVAL（不支持跨目录移动）；
+ *   - 只支持 8.3 短名：长名返回 E_INVAL（不做 LFN）；
+ *   - 不替换已存在的目标：目标被占用返回 E_EXIST（避免"释放目标簇链"这种
+ *     需要回滚的多步操作；调用方可以先 unlink 目标再改名）；
+ *   - 大小写不敏感：8.3 名相同（如 a.txt -> A.TXT）视为同一项，返回 E_OK。
+ *
+ * 目录项位置 (dir_lba, dir_idx) 不变，所以打开中的文件改名是安全的：
+ * 句柄用 dir_lba/dir_idx 回写簇号和大小，不依赖名字。 */
+int fat16_rename(const char *oldrel, const char *newrel)
+{
+    fat_dirent_t de;
+    fat_dirent_t other;
+    uint8_t newname[11];
+    uint32_t lba = 0, idx = 0;
+    uint32_t olba = 0, oidx = 0;
+    const char *o;
+    const char *n;
+    int r;
+
+    if (!fat.mounted) return E_NOENT;
+
+    o = rel_of(oldrel);
+    n = rel_of(newrel);
+    if (*o == '\0' || *n == '\0') return E_INVAL;
+    if (strchr(o, '/') != 0 || strchr(n, '/') != 0) return E_INVAL;   /* 只有根目录 */
+
+    r = find_root_entry(o, &de, &lba, &idx);
+    if (r == E_NOENT) return E_NOENT;
+    if (r != 0) return E_INVAL;                 /* 读盘失败 != 不存在 */
+    if ((de.attr & 0x10U) != 0U) return E_INVAL;    /* 目录项改名不支持 */
+    if ((de.attr & 0x08U) != 0U) return E_INVAL;    /* 卷标 */
+
+    if (to_83(n, newname) != 0) return E_INVAL;     /* 长名/非法名 */
+
+    /* 目标名被别的目录项占用：不覆盖 */
+    r = find_root_entry(n, &other, &olba, &oidx);
+    if (r == 0) {
+        if (olba == lba && oidx == idx) return E_OK;    /* 同一个 8.3 名 */
+        return E_EXIST;
+    }
+    if (r != E_NOENT) return E_INVAL;
+
+    if (read_sector(lba, sec_buf) != 0) return E_INVAL;
+    memcpy(sec_buf + idx * 32U, newname, 11U);
+    if (write_sector(lba, sec_buf) != 0) return E_INVAL;
+    return E_OK;
+}
+
 /* ==================== 文件句柄 ==================== */
 
 int fat16_open(const char *rel, uint32_t flags)
@@ -670,6 +721,15 @@ static int fat16_be_unlink(const char *rel, uint32_t uid, uint32_t gid)
     return (fat16_unlink(rel) == E_OK) ? 0 : -1;
 }
 
+/* FAT16 没有 Unix 权限模型：uid/gid 不参与判断（VFS 层也跳过判权） */
+static int fat16_be_rename(const char *oldrel, const char *newrel,
+                           uint32_t uid, uint32_t gid)
+{
+    (void)uid;
+    (void)gid;
+    return fat16_rename(oldrel, newrel);
+}
+
 const fs_backend_t fat16_backend = {
     "fat16",
     fat16_probe,
@@ -681,5 +741,6 @@ const fs_backend_t fat16_backend = {
     fat16_be_stat,
     fat16_be_listdir,
     fat16_be_mkdir,
-    fat16_be_unlink
+    fat16_be_unlink,
+    fat16_be_rename
 };

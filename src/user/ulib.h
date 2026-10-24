@@ -9,8 +9,16 @@ typedef unsigned int usize;
 #define SYS_FREAD 7
 #define SYS_FWRITE 8
 #define SYS_BRK   22
+#define SYS_RENAME 58
 
 int syscall3(int n, int a, int b, int c);
+
+/* 改名/移动（同卷内）。newpath 是完整目标路径，不做 `mv` 的"移入目录"语义。
+ * 成功返回 0，失败返回 -1（跨卷/目标非空目录/权限不足都算失败）。 */
+static inline int fs_rename(const char *oldpath, const char *newpath)
+{
+    return syscall3(SYS_RENAME, (int)(unsigned int)oldpath, (int)(unsigned int)newpath, 0);
+}
 
 /* 基于 fd 的读写（0=stdin，1=stdout，其余是文件/管道） */
 int fd_read(int fd, void *buf, int len);

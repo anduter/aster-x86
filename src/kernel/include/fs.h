@@ -10,5 +10,6 @@
 
 /* selftests */
 void fs_backend_selftest(void);
+void fs_rename_selftest(void);
 
 #endif

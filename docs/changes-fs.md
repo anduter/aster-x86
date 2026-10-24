@@ -87,3 +87,101 @@ fs: backend selftest ok
 
 该提交只动 `build.ps1`，但文件里同时含有并行会话的未提交改动
 （`-Cpu qemu32,+nx,+smep,+smap`、UDP/TCP echo job），已在会话中声明。
+
+---
+
+## 7. 更新（21:20）：rename / move（`SYS_RENAME = 58`）
+
+本批把 FS 从"能演示"往"能用"推进的第一步：**同卷内改名/移动**。
+`link`/`symlink` 和 append 打开模式本批未做（见 §7.5）。
+
+### 7.1 语义（`fs_rename_as` / `fs_rename`）
+
+| 场景 | 结果 |
+|---|---|
+| 同卷改名/移动（ramfs） | 改节点 `name` + `parent`，文件内容/大小不变 |
+| 跨卷（`system:` → `data:` / `fat:`） | `E_INVAL`（VFS 路由到不同后端即拒） |
+| 源不存在 / 父目录不存在 | `E_NOENT` |
+| 源或目标父目录缺 `w+x` | `E_ACCES`；`uid == 0` 绕过 |
+| 目标是文件、源也是文件（ramfs） | 允许替换；目标仍被打开则 `E_BUSY` |
+| 目标是空目录、源也是目录（ramfs） | 允许替换 |
+| 目标是非空目录 | `E_EXIST` |
+| 源/目标类型不一致（文件顶目录或反过来） | `E_EXIST` |
+| 目录移动到自己的子树 | `E_INVAL`（防止父链成环） |
+| 源文件被打开时改名 | 允许（ramfs 句柄指向节点，不依赖名字） |
+| FAT16 根目录 8.3 改名 | 读目录项 → 改 11 字节短名 → 回写扇区 |
+| FAT16 跨目录 / 长名 / LFN | `E_INVAL` |
+| FAT16 目标已存在 | `E_EXIST`（不做替换：避免释放目标簇链的多步回滚） |
+| svcfs / blkfs | 只读后端，`E_INVAL` |
+
+约定与限制：
+
+1. `new_path` 必须是**完整目标路径**：不实现 `mv a.txt dir/` 的"移入目录"语义
+   （shell 的 `mv` 只是 rename 的薄包装，`mv <old> <new>`）。
+2. 文件 `mtime` 不变（内容没改）；源/目标父目录的 `mtime` 更新为当前 RTC。
+3. 权限检查在 VFS 层做（父目录 `w+x`，root 绕过），ramfs 后端再按节点判一次
+   （防御性重复）；FAT16 没有 `mode/uid/gid`，跳过判权。
+4. FAT16 目录项位置 `(dir_lba, dir_idx)` 不变，所以**打开中的 FAT16 文件改名是
+   安全的**：close 仍按原槽位回写簇号/大小，不依赖名字。
+5. 系统调用层把失败统一压成 `-1`（和 open/unlink 一致）；内核自检直接看 `E_*`。
+
+### 7.2 改动文件
+
+| 文件 | 内容 |
+|---|---|
+| `src/kernel/fs/fs.h` | `fs_backend_t.rename` op；`fs_rename()` / `fs_rename_as()` 声明 |
+| `src/kernel/fs/vfs.c` | 双路径路由、同后端/跨卷校验、父目录 `w+x` 判权、`fs_rename*` 实现 |
+| `src/kernel/fs/ramfs.c` | `ramfs_rename_impl()`（覆盖策略/防环/权限）+ `ramfs_rename_locked()`（持 `fs_lock`）+ 适配器 |
+| `src/kernel/fs/fat16.c/.h` | `fat16_rename()`：根目录 8.3 改名；适配器 |
+| `src/kernel/fs/svcfs.c`、`blkfs.c` | 只读后端 `rename` stub 返回 `E_INVAL` |
+| `src/kernel/proc/trap/syscall.h` | `SYS_RENAME 58`（55 已是 `SYS_CHROOT`，56/57 已用，**没有**占用 55） |
+| `src/kernel/fs/fs_syscall.c/.h` | `sys_rename_user()`：两条路径都 `make_abs_path`（相对路径按 cwd） |
+| `src/user/ulib.h` | `SYS_RENAME` + `fs_rename()` 包装 |
+| `src/user/user_shell.c` | `mv <old> <new>`（含 help） |
+| `src/kernel/fs/fs_rename_selftest.c` | 新自检；由 `fs_backend_selftest()` 末尾调用 |
+
+### 7.3 验证证据
+
+手工（QEMU 串口注入；`fat.img` 由 `tools/mkfat16.ps1` 生成 `HOST.TXT`）：
+
+```
+ushell> write system:/a.txt hello
+ok
+ushell> mv system:/a.txt system:/b.txt
+ok
+ushell> ls system:
+  b.txt
+ushell> cat system:/b.txt
+hello
+ushell> mv fat:/host.txt fat:/host2.txt
+ok
+ushell> ls fat:
+  HOST2.TXT
+ushell> cat fat:/host2.txt
+hello from host
+```
+
+宿主侧再用 `tools/mkfat16.ps1 -Extract HOST2.TXT` 从 `fat.img` 读回
+`hello from host`，`HOST.TXT` 已不存在 —— 说明改名真正落到了盘上，不只是内存缓存。
+
+内核自检（每次启动都会跑）：
+
+```
+fs: error-path selftest ok
+selftest: rename ok
+fs: backend selftest ok
+```
+
+回归：见 §7.4。
+
+### 7.4 回归
+
+连续 2 次 `tools\session-run.ps1 -Name fsfeat -Test`：见下方"结果"（跑完补）。
+
+### 7.5 本批未做
+
+- `link` / `symlink`：需要节点引用计数/路径解析，改动面大于 rename，留到下一批；
+- append 打开模式（`FS_OPEN_APPEND`）：`fs_open` 目前总是 offset=0，FAT16 的
+  `FS_OPEN_WRITE|CREAT` 还会截断；加标志要同时改 ramfs/FAT 与 `sys_open_user`，
+  本批未动；
+- 跨卷 rename（"copy + unlink" 语义）和 FAT16 目标替换：刻意不做，先保证语义清晰。

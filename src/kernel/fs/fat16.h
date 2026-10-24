@@ -15,6 +15,8 @@ int  fat16_listdir(const char *rel, uint32_t index, char *name, uint32_t max,
 int  fat16_stat(const char *rel, fs_stat_t *out);
 int  fat16_unlink(const char *rel);
 int  fat16_mkdir(const char *rel);
+/* 根目录内 8.3 改名；跨目录/长名/目标已存在分别返回 E_INVAL/E_EXIST */
+int  fat16_rename(const char *oldrel, const char *newrel);
 
 /* 打开/读写/关闭：返回 >=0 的 FAT 句柄下标 */
 int  fat16_open(const char *rel, uint32_t flags);

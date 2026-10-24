@@ -82,6 +82,18 @@ int fs_mkdir_as(const char *path, uint32_t uid, uint32_t gid);
 int fs_unlink(const char *path);
 int fs_unlink_as(const char *path, uint32_t uid, uint32_t gid);
 
+/* ---- rename / move（rename(2) 的简化版） ----
+ * 在同一卷内改名或移动；new_path 是完整的目标路径（不做 `mv` 的"移入目录"语义）。
+ * 返回 E_OK 或 E_*：
+ *   E_NOENT  源不存在 / 路径里的父目录不存在
+ *   E_INVAL  跨卷、路径非法、把目录移动到自己的子树里、只读后端
+ *   E_ACCES  源或目标父目录缺少 w+x（uid==0 时绕过）
+ *   E_EXIST  目标类型不匹配，或目标是非空目录
+ *   E_BUSY   目标文件仍被打开（替换它会破坏已有句柄）
+ * fs_rename() 按 root 身份执行（内核内部用）；用户态走 fs_rename_as()。 */
+int fs_rename(const char *old_path, const char *new_path);
+int fs_rename_as(const char *old_path, const char *new_path, uint32_t uid, uint32_t gid);
+
 /* 权限：改变 mode（仅属主/root）、改变属主属组（仅 root） */
 int fs_chmod(const char *path, uint32_t mode, uint32_t uid);
 int fs_chown(const char *path, uint32_t uid, uint32_t gid);
@@ -162,6 +174,10 @@ typedef struct fs_backend {
                    uint32_t name_max, fs_stat_t *out);
     int (*mkdir)(const char *rel, uint32_t uid, uint32_t gid);
     int (*unlink)(const char *rel, uint32_t uid, uint32_t gid);
+    /* 改名/移动（同一后端内）。返回 E_OK / E_*。
+     * VFS 负责路由和跨卷拒绝；权限模型（源/目标父目录 w+x）由后端按自己的
+     * 元数据判断：ramfs 有 Unix 权限位，FAT16 没有（视为不限）。 */
+    int (*rename)(const char *oldrel, const char *newrel, uint32_t uid, uint32_t gid);
 } fs_backend_t;
 
 /* 各后端实例 */

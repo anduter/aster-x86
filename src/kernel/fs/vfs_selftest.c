@@ -12,6 +12,7 @@
  * ============================================================================= */
 #include "fs.h"
 #include "fat16.h"
+#include "include/fs.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
 
@@ -247,6 +248,9 @@ void fs_backend_selftest(void)
     if (ep_test_write_atomic() != 0) return;
     if (ep_test_unlink_open() != 0) return;
     kprintln("fs: error-path selftest ok");
+
+    /* 9. rename/move（单独文件，细节见 fs_rename_selftest.c） */
+    fs_rename_selftest();
 
     kprintln("fs: backend selftest ok");
 }

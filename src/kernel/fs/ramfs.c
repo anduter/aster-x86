@@ -764,6 +764,96 @@ int fs_listdir(const char *path, uint32_t index,
     return E_NOENT;
 }
 
+/* ==================== rename / move ==================== */
+
+/* 目标目录是否位于 node 的子树里（含 node 自己）：防止把目录移进自己的内部，
+ * 那会形成环（父链走不到卷根），之后的 fsck/序列化都会卡住。 */
+static bool dir_is_inside(fs_node_t *dir, fs_node_t *node)
+{
+    uint32_t guard = 0;
+
+    while (dir != 0 && guard++ < FS_MAX_NODES) {
+        if (dir == node) return true;
+        dir = dir->parent;
+    }
+    return false;
+}
+
+/* ramfs 的 rename 实现（调用方已持 fs_lock）。
+ *
+ * 覆盖策略（与 POSIX rename 接近，但显式写死）：
+ *   - 目标不存在：直接改名/移动；
+ *   - 目标是文件、源也是文件：允许替换；目标仍被打开则 E_BUSY
+ *     （槽位会被 memset 复用，旧句柄会读写到别人的数据）；
+ *   - 目标是空目录、源也是目录：允许替换；
+ *   - 目标是非空目录、或源/目标类型不一致：E_EXIST；
+ *   - 把目录移动到自己的子树里：E_INVAL；
+ *   - 跨卷（system: -> data:）：E_INVAL，VFS 层也会先拒一次。
+ * 源文件即使被打开也允许改名：句柄指向节点而不是名字，改名后照样读写。 */
+static int ramfs_rename_impl(const char *oldrel, const char *newrel,
+                             uint32_t uid, uint32_t gid)
+{
+    fs_volume_t *ovol = 0;
+    fs_volume_t *nvol = 0;
+    fs_node_t *odir = 0;
+    fs_node_t *ndir = 0;
+    fs_node_t *node;
+    fs_node_t *target;
+    char oname[FS_NAME_MAX];
+    char nname[FS_NAME_MAX];
+    int r;
+
+    r = split_parent(oldrel, &ovol, &odir, oname);
+    if (r != E_OK) return E_NOENT;              /* 父路径不合法/不存在 */
+
+    node = find_child(odir, oname);
+    if (node == 0) return E_NOENT;
+
+    r = split_parent(newrel, &nvol, &ndir, nname);
+    if (r != E_OK) return E_NOENT;
+    if (nvol != ovol) return E_INVAL;           /* 跨卷 */
+
+    if (!may_access(odir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) return E_ACCES;
+    if (!may_access(ndir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) return E_ACCES;
+
+    if (node->type == FS_TYPE_DIR && dir_is_inside(ndir, node)) return E_INVAL;
+
+    target = find_child(ndir, nname);
+    if (target == node) return E_OK;            /* 同一节点：幂等，不改名 */
+
+    if (target != 0) {
+        if (target->type == FS_TYPE_DIR) {
+            if (node->type != FS_TYPE_DIR) return E_EXIST;   /* 文件不能顶掉目录 */
+            if (target->first_child != 0) return E_EXIST;    /* 非空目录 */
+        } else if (node->type == FS_TYPE_DIR) {
+            return E_EXIST;                                  /* 目录不能顶掉文件 */
+        }
+        if (target->type == FS_TYPE_FILE && node_is_open(target)) return E_BUSY;
+
+        unlink_child(ndir, target);
+        memset(target, 0, sizeof(*target));
+    }
+
+    unlink_child(odir, node);
+    strncpy(node->name, nname, FS_NAME_MAX - 1U);
+    node->name[FS_NAME_MAX - 1U] = '\0';
+    link_child(ndir, node);
+
+    odir->mtime = rtc_now();
+    ndir->mtime = rtc_now();
+    return E_OK;
+}
+
+/* 加锁包装：和公开 fs_* 一样，整次 rename 是原子的 */
+static int ramfs_rename_locked(const char *oldrel, const char *newrel,
+                               uint32_t uid, uint32_t gid)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = ramfs_rename_impl(oldrel, newrel, uid, gid);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
 /* ==================== 持久化：磁盘格式 ==================== */
 
 /* 当前用于持久化的块设备名（ata0 / ram0），由启动流程设置 */
@@ -1370,6 +1460,12 @@ static int ramfs_be_unlink(const char *rel, uint32_t uid, uint32_t gid)
     return (fs_unlink_as(rel, uid, gid) == E_OK) ? 0 : -1;
 }
 
+static int ramfs_be_rename(const char *oldrel, const char *newrel,
+                           uint32_t uid, uint32_t gid)
+{
+    return ramfs_rename_locked(oldrel, newrel, uid, gid);
+}
+
 const fs_backend_t ramfs_backend = {
     "ramfs",
     ramfs_probe,
@@ -1381,5 +1477,6 @@ const fs_backend_t ramfs_backend = {
     ramfs_be_stat,
     ramfs_be_listdir,
     ramfs_be_mkdir,
-    ramfs_be_unlink
+    ramfs_be_unlink,
+    ramfs_be_rename
 };
