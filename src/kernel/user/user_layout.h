@@ -8,8 +8,9 @@
  * 0x40100000 .. 0x40200000   用户栈（向下增长，底部 4KB 为 guard）
  * 0x40200000 .. 0x40300000   用户堆（brk 向上增长）
  * 0x40300000 .. 0x40400000   信号蹦床 / 预留页
+ * 0x40400000 .. 0x40500000   匿名 mmap 区（每进程独立）
  *
- * fork 的 COW 范围覆盖到 0x40400000，确保栈、堆、蹦床页都被复制。
+ * fork 的 COW 范围覆盖到 0x40500000，确保栈、堆、蹦床、mmap 页都被复制。
  * ============================================================================= */
 
 #define USER_LAYOUT_CODE_BASE     0x40000000U
@@ -24,7 +25,9 @@
 #define USER_LAYOUT_HEAP_ASLR_SLOTS 64U  /* 堆基址在 256KB 范围内随机 */
 #define USER_LAYOUT_TRAMPOLINE    0x40300000U
 #define USER_LAYOUT_TRAMPOLINE_ASLR_SLOTS 64U
-#define USER_LAYOUT_CLONE_END     0x40400000U
+#define USER_LAYOUT_MMAP_BASE     0x40400000U
+#define USER_LAYOUT_MMAP_END      0x40500000U
+#define USER_LAYOUT_CLONE_END     0x40500000U
 
 /* 栈底 guard：低 4KB 永不映射，栈增长到这里就拒绝。 */
 #define USER_LAYOUT_STACK_GUARD_END (USER_LAYOUT_STACK_LIMIT + 0x1000U)

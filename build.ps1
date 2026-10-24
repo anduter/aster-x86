@@ -224,11 +224,28 @@ if ($Run) {
 if ($Test -or $Shot) {
     $serial = Join-Path $root 'serial.log'
     Remove-Item $serial -ErrorAction SilentlyContinue
+    $udpEcho = $null
+    if ($Test) {
+        $udpEcho = Start-Job -ScriptBlock {
+            $u = New-Object System.Net.Sockets.UdpClient(12345)
+            try {
+                $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+                for ($i = 0; $i -lt 16; $i++) {
+                    $data = $u.Receive([ref]$ep)
+                    [void]$u.Send($data, $data.Length, $ep)
+                }
+            } catch { }
+            $u.Close()
+        }
+    }
+
     $qargs = @(
         '-drive', ("file={0},format=raw,if=floppy" -f ($imgPath -replace '\\', '/')), '-boot', 'a',
         '-drive', $diskArg,
         '-drive', $fatArg,
-        '-m', "$Mem", '-vga', $Vga, '-cpu', $Cpu, '-smp', '2', '-nic', 'user,model=e1000', '-display', 'none', '-no-reboot',
+        '-m', "$Mem", '-vga', $Vga, '-cpu', $Cpu, '-smp', '2',
+        '-nic', 'user,model=e1000',
+        '-display', 'none', '-no-reboot',
         '-serial', "file:$serial",
         '-qmp', 'tcp:127.0.0.1:4444,server,nowait'
     )
@@ -236,8 +253,17 @@ if ($Test -or $Shot) {
     Write-Host "=== qemu (headless) ===" -ForegroundColor Cyan
     $q = Start-Process -FilePath 'qemu-system-i386' -ArgumentList $qargs -PassThru -WindowStyle Hidden
 
-    $bootWait = [Math]::Min(6, [Math]::Max(2, $TimeoutSec - 2))
-    Start-Sleep -Seconds $bootWait
+    # 等"shell 真的起来了"再注入，而不是固定 sleep：
+    # 启动路径越加越长（服务注册、echosvc、ring3probe 等），固定 10 秒会
+    # 在慢一点的机器上把按键注入到 shell 还没开始读键盘的时候。
+    $bootDeadline = (Get-Date).AddSeconds([Math]::Max(20, $TimeoutSec))
+    while ((Get-Date) -lt $bootDeadline) {
+        if (Test-Path $serial) {
+            $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
+            if ($snap -and $snap.Contains('ushell: ready')) { break }
+        }
+        Start-Sleep -Milliseconds 250
+    }
 
     if ($Test) {
         try {
@@ -248,8 +274,8 @@ if ($Test -or $Shot) {
         }
     }
 
-    $rest = [Math]::Max(1, $TimeoutSec - $bootWait)
-    Start-Sleep -Seconds $rest
+    # 给注入的命令留出执行时间（help/fork/sectest 都要跑一会儿）
+    Start-Sleep -Seconds 6
 
     if ($Shot) {
         try {
@@ -261,6 +287,10 @@ if ($Test -or $Shot) {
     }
 
     if (-not $q.HasExited) { Stop-Process -Id $q.Id -Force }
+    if ($udpEcho -ne $null) {
+        Stop-Job -Job $udpEcho -ErrorAction SilentlyContinue
+        Remove-Job -Job $udpEcho -Force -ErrorAction SilentlyContinue
+    }
 
     $out = if (Test-Path $serial) { Get-Content $serial -Raw } else { '' }
     Write-Host "=== serial ===" -ForegroundColor Cyan
@@ -299,10 +329,16 @@ if ($Test -or $Shot) {
             @{ Name = '文件系统调用可用';         Ok = ($out -match 'ushell: fs syscalls ok') },
             @{ Name = 'legacy int 0x81 系统调用可用'; Ok = (($out -match 'sys: int 0x81 works') -and ($out -match 'sys: write=\d+')) },
             @{ Name = 'native int 0x80 ABI 可用'; Ok = (($out -match 'native: ABI 0\.1 gate ok') -and ($out -match 'native: handle table ok') -and ($out -match 'native: ring3 ABI 0\.1 ok')) },
+            @{ Name = 'native handle revoke';      Ok = ($out -match 'native: handle revoke ok') },
             @{ Name = 'native process_create/wait'; Ok = ($out -match 'native: process_create/wait ok') },
             @{ Name = 'native channel IPC';       Ok = ($out -match 'native: channel ok') },
             @{ Name = 'channel 跨进程阻塞唤醒';   Ok = ($out -match 'native: channel block ok') },
             @{ Name = 'native port connect';      Ok = ($out -match 'native: port ok') },
+            @{ Name = 'service registry';          Ok = ($out -match 'native: service ok') },
+            @{ Name = 'supervisor service';        Ok = ($out -match 'native: supervisor ok') },
+            @{ Name = 'supervisor 自动拉起 echo';  Ok = ($out -match 'supervisor: restart echo -> pid \d+') },
+            @{ Name = 'service manifest';          Ok = ($out -match 'native: manifest ok') },
+            @{ Name = 'service 生命周期无泄漏';    Ok = ($out -match 'service: lifecycle ok \(200 cycles\)') },
             @{ Name = '沙箱拒绝 SYS_OPEN';        Ok = ($out -match 'sandbox: open denied') },
             @{ Name = '沙箱拒绝 native HANDLE_DUP'; Ok = ($out -match 'sandbox: native denied') },
             @{ Name = 'ELF W^X 加载'; Ok = ($out -match 'user: ELF text RO / data RW \(W\^X loader\)') },
@@ -314,7 +350,8 @@ if ($Test -or $Shot) {
             @{ Name = '内核高半区 W^X'; Ok = ($out -match 'vmm: kernel W\^X active') },
             @{ Name = '启动链内核签名'; Ok = ($out -match 'boot: KERNEL SIGNATURE OK') },
             @{ Name = '用户态程序运行';           Ok = (($out -match 'user: entering ring3') -and ($out -match 'hello from ring3')) },
-            @{ Name = 'ring3 userdemo 在 AP';     Ok = ($out -match 'user: entering ring3 \(builtin demo.*cpu=1') },
+            @{ Name = 'ring3 userdemo 运行';     Ok = ($out -match 'user: entering ring3 \(builtin demo') },
+            @{ Name = 'ring3 AP 探针';           Ok = ($out -match 'user: entering ring3 \(ring3 AP probe.*cpu=1') },
             @{ Name = '异常可恢复';               Ok = ($out -match 'sys: unmapped user pointer -> -1') },
             @{ Name = '时钟中断在推进';           Ok = ($out -match 'thread: heartbeat [1-9]\d* pid=\d+ cpu=1') },
             @{ Name = 'ring3 shell 已启动';       Ok = ($out -match 'ushell: ready') },
@@ -347,6 +384,10 @@ if ($Test -or $Shot) {
             @{ Name = 'PCI bus master 已启用';    Ok = ($out -match 'e1000: PCI CMD=\w+ \(memory=1 busmaster=1\)') },
             @{ Name = 'ARP 应答可用';             Ok = ($out -match 'net: ARP reply gw=') },
             @{ Name = 'ICMP echo 可用';           Ok = ($out -match 'net: ICMP echo reply seq=\d+') },
+            @{ Name = 'UDP echo 可用';            Ok = ($out -match 'net: UDP echo reply') },
+            @{ Name = '用户态 UDP';               Ok = ($out -match 'sectest: udp ok') },
+            @{ Name = 'socket fd UDP';            Ok = ($out -match 'sectest: socket udp ok') },
+            @{ Name = 'VFS chroot 越界拒绝';      Ok = ($out -match 'sectest: chroot ok') },
             @{ Name = '权限模型可用';             Ok = ($out -match 'auth: permission model ok') },
             @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: 2 cpu') },
             @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*2 cpu\(s\) discovered.*AP startup pending') },

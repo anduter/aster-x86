@@ -133,7 +133,7 @@ ring3 用户程序
 
 - 内核与用户态编译启用 `-Wall -Wextra -Werror`；
 - `build.ps1 -Test` 自动启动 QEMU、注入命令、断言串口日志；
-- 当前回归 67 项全绿；
+- 当前回归 83 项全绿；
 - 新增 W^X 加载断言；
 - P3.1 将用户地址布局收敛到 `user_layout.h`，栈、堆、蹦床页互不重叠。
 
@@ -203,7 +203,7 @@ ring3 用户程序
 - demo 尝试打开 `system:/bin/shell`（legacy）和 `HANDLE_DUP`（native）：
   - `sandbox: open denied`
   - `sandbox: native denied`
-- 当前回归 67 项，两项都是硬断言。
+- 当前回归 83 项，两项都是硬断言。
 - 局限：策略仍按程序名硬编码；尚未升级为基于句柄权限的 capability 沙箱。
 
 ### 4.12 RSA 签名包 / 执行时验签
@@ -298,6 +298,18 @@ data/stack/heap RW+NX。`err=15` 的栈/rodata 取指回归证明 NX 真正生�
 | fd capability rights | 只读打开 `fd write denied`；drop WRITE `cap drop denied`；跨进程发送 `cap recv hello from ramfs` |
 | 通用 capability 表 | `cap: table selftest ok`；install → transfer → close/revoke，generation 防旧句柄 |
 | native process_create/wait | `native: process_create/wait ok`；按注册程序名创建子进程，子进程可在 AP 运行 |
+| native capability | `native: handle table ok`；restrict 降权、transfer 移动、revoke 失效、generation 防旧句柄 |
+| 匿名 mmap | `sectest: mmap ok`；mmap 页写读 + munmap，页表/物理页回收 |
+| Channel IPC | `native: channel ok`；成对 endpoint、send/recv、阻塞 recv + wakeup、native handle rights |
+| Channel 阻塞唤醒 | `native: channel block ok`；子进程 sleep 后 send，父进程从 CHAN wait key 唤醒 |
+| Service registry | `native: service ok`；name → Port 注册/发现，再 connect/accept |
+| Supervisor | `native: supervisor ok`；服务循环 accept/查询 registry/回复，`proc_block` 不再假醒 |
+| ring3 AP | `ring3 AP probe ok`；最小 write/exit 用户程序固定 AP，独立于 fork/IPC |
+| Service manifest | `native: manifest ok`；supervisor 检查 supervisor + echo 服务清单 |
+| 网络 RX/UDP | `net: ARP reply`、`net: ICMP echo reply`、`net: UDP echo reply`；e1000 RX + ARP/ICMP/UDP |
+| 用户态 UDP | `sectest: udp ok`；SYS_UDP_SEND/RECV + 宿主回显 |
+| socket fd | `sectest: socket udp ok`；socket→sendto→recvfrom→close，fd rights |
+| Port IPC | `native: port ok`；create → connect → accept（含阻塞 accept）→ channel 数据 |
 | AP ring3 | `user: entering ring3 (builtin demo ... cpu=1)`；跨 CPU console 由 spinlock 原子化 |
 | MADT 多核发现 | `madt: 2 cpu(s)`；`smp: 2/2 cpus online, 1 AP GDT/TSS/IDT ready, AP ticks=... ipi=...`；heartbeat 在 AP 执行 |
 | 启动链 kernel 签名 | `boot: KERNEL SIGNATURE OK`；篡改 kernel 输出 INVALID 并停机 |

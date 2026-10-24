@@ -27,6 +27,7 @@
 #include "../core/rtc.h"
 #include "../core/pci.h"
 #include "../core/e1000.h"
+#include "../core/net.h"
 #include "../core/acpi.h"
 #include "../lib/kprintf.h"
 #include "../proc/proc.h"
@@ -108,6 +109,14 @@ static int copy_user_string(char *dst, uint32_t dst_size, uint32_t uptr)
     return E_INVAL;                    /* 路径太长 */
 }
 
+static int path_has_parent(const char *p)
+{
+    for (; p[0] != '\0' && p[1] != '\0'; p++) {
+        if (p[0] == '.' && p[1] == '.') return 1;
+    }
+    return 0;
+}
+
 /* 把用户给的路径转成绝对路径：
  *   以 '/' 开头或含 ':'  -> 原样（绝对路径/指定驱动号）
  *   其它                -> 拼上当前进程的 cwd
@@ -116,14 +125,43 @@ static void make_abs_path(char *out, uint32_t out_max, const char *in)
 {
     proc_t *p = proc_current();
     const char *cwd = (p != 0 && p->cwd[0] != '\0') ? p->cwd : "system:";
+    const char *root = (p != 0) ? p->root : "";
     uint32_t n = 0;
     uint32_t i;
 
-    if (in[0] == '/' || strchr(in, ':') != 0) {
+    /* rooted namespace：拒绝 ".." 越界（简化但安全的策略） */
+    if (root[0] != '\0' && path_has_parent(in)) {
+        out[0] = '\0';
+        return;
+    }
+
+    if (in[0] == '/') {
+        if (root[0] == '\0') {
+            strncpy(out, in, out_max - 1U);
+            out[out_max - 1U] = '\0';
+            return;
+        }
+        for (i = 0; root[i] != '\0' && n + 1U < out_max; i++) out[n++] = root[i];
+        while (n > 0U && out[n - 1U] == '/') n--;
+        if (n + 1U < out_max) out[n++] = '/';
+        for (i = 1; in[i] != '\0' && n + 1U < out_max; i++) out[n++] = in[i];
+        out[n] = '\0';
+        return;
+    }
+
+    if (strchr(in, ':') != 0) {
+        if (root[0] != '\0') {
+            uint32_t rl = (uint32_t)strlen(root);
+            if (rl > 0U && strncmp(in, root, rl) != 0) {
+                out[0] = '\0';
+                return;
+            }
+        }
         strncpy(out, in, out_max - 1U);
         out[out_max - 1U] = '\0';
         return;
     }
+
     if (in[0] == '\0') {
         strncpy(out, cwd, out_max - 1U);
         out[out_max - 1U] = '\0';
@@ -174,55 +212,31 @@ static int fd_alloc(proc_t *p, uint32_t handle, uint32_t rights)
     return fd_alloc_kind(p, FD_KIND_FILE, handle, rights);
 }
 
-/* 判断是不是 FAT16 交换盘路径："fat:/NAME" 或 "fat:NAME" */
-static const char *fat_path(const char *path)
-{
-    if (path == 0) return 0;
-    if ((path[0] != 'f' && path[0] != 'F') ||
-        (path[1] != 'a' && path[1] != 'A') ||
-        (path[2] != 't' && path[2] != 'T') ||
-        path[3] != ':') {
-        return 0;
-    }
-    return path + 4;
-}
-
 static int sys_open_user(uint32_t path_ptr, uint32_t flags)
 {
     char rel[256];
     char path[256];
     proc_t *p = proc_current();
-    uint32_t h;
+    uint8_t be = FS_BE_RAMFS;
+    int h;
     int fd;
-    const char *fatrel;
 
     if (p == 0) return -1;
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
-    fatrel = fat_path(rel);
-    if (fatrel != 0) {
-        if (!fat16_mounted()) return -1;
-        fd = fd_alloc_kind(p, FD_KIND_FAT16, 0, open_rights(flags));
-        if (fd < 0) return -1;
-        int fh = fat16_open(fatrel, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT));
-        if (fh < 0) {
-            memset(&p->fds[fd], 0, sizeof(p->fds[fd]));
-            return -1;
-        }
-        p->fds[fd].handle = (uint32_t)fh;
-        return fd;
-    }
-
+    /* "fat:..." 含 ':'，make_abs_path 会原样保留；
+     * 具体路由（ramfs / FAT16）交给 fs 层，syscall 层不再判断文件系统类型。 */
     make_abs_path(path, sizeof(path), rel);
 
-    h = fs_open(path, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT));
-    if (h == 0U) return -1;
+    h = fs_open_ex(path, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT), &be);
+    if (h < 0) return -1;
 
-    fd = fd_alloc(p, h, open_rights(flags));
+    fd = fd_alloc(p, (uint32_t)h, open_rights(flags));
     if (fd < 0) {
-        fs_close(h);
+        fs_close_ex(be, h);
         return -1;
     }
+    p->fds[fd].fs_be = be;
     return fd;
 }
 
@@ -258,14 +272,7 @@ static int sys_fread_user(int fd, uint32_t ubuf, uint32_t len)
         return n;
     }
 
-    if (f->kind == FD_KIND_FAT16) {
-        n = fat16_read((int)f->handle, buf, len);
-        if (n < 0) return n;
-        if (copy_to_user((void *)(uintptr_t)ubuf, buf, (uint32_t)n) != E_OK) return -1;
-        return n;
-    }
-
-    n = fs_read(f->handle, buf, len);
+    n = fs_read_ex(f->fs_be, (int)f->handle, buf, len);
     if (n < 0) return n;
     if (copy_to_user((void *)(uintptr_t)ubuf, buf, (uint32_t)n) != E_OK) return -1;
     return n;
@@ -295,10 +302,8 @@ static int sys_fwrite_user(int fd, uint32_t ubuf, uint32_t len)
             for (uint32_t i = 0; i < n; i++) console_putc(buf[i]);
         } else if (f->kind == FD_KIND_PIPE_W) {
             if (pipe_write((int)f->handle, buf, n) != (int)n) return -1;
-        } else if (f->kind == FD_KIND_FAT16) {
-            if (fat16_write((int)f->handle, buf, n) != (int)n) return -1;
         } else {
-            if (fs_write(f->handle, buf, n) != (int)n) return -1;
+            if (fs_write_ex(f->fs_be, (int)f->handle, buf, n) != (int)n) return -1;
         }
         done += n;
     }
@@ -314,13 +319,11 @@ static int sys_close_user(int fd)
     if (f == 0 || fd < 3) return -1;
 
     if (f->kind == FD_KIND_FILE) {
-        fs_close(f->handle);
+        fs_close_ex(f->fs_be, (int)f->handle);
     } else if (f->kind == FD_KIND_PIPE_W) {
         pipe_unref_write((int)f->handle);
     } else if (f->kind == FD_KIND_PIPE_R) {
         pipe_unref_read((int)f->handle);
-    } else if (f->kind == FD_KIND_FAT16) {
-        fat16_close((int)f->handle);
     }
     memset(f, 0, sizeof(*f));
     return 0;
@@ -338,23 +341,13 @@ static int sys_list_user(uint32_t path_ptr, uint32_t index, uint32_t ubuf)
         /* 没有路径参数：模块层，列出驱动器 */
         path[0] = '\0';
     } else {
-        const char *fatrel;
-
         if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) {
             return -1;
-        }
-
-        fatrel = fat_path(rel);
-        if (fatrel != 0) {
-            if (!fat16_mounted()) return -1;
-            if (fat16_listdir(fatrel, index, name, sizeof(name), &st) != E_OK) return -1;
-            n = (uint32_t)strlen(name) + 1U;
-            return (copy_to_user((void *)(uintptr_t)ubuf, name, n) == E_OK) ? 0 : -1;
         }
         make_abs_path(path, sizeof(path), rel);
     }
 
-    if (fs_listdir(path, index, name, sizeof(name), &st) != E_OK) return -1;
+    if (fs_listdir_ex(path, index, name, sizeof(name), &st, 0) != 0) return -1;
 
     n = (uint32_t)strlen(name) + 1U;
     if (copy_to_user((void *)(uintptr_t)ubuf, name, n) != E_OK) return -1;
@@ -366,34 +359,22 @@ static int sys_mkdir_user(uint32_t path_ptr)
 {
     char rel[256];
     char path[256];
-    const char *fatrel;
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
-    fatrel = fat_path(rel);
-    if (fatrel != 0) {
-        return (fat16_mounted() && fat16_mkdir(fatrel) == E_OK) ? 0 : -1;
-    }
-
     make_abs_path(path, sizeof(path), rel);
-    return (fs_mkdir(path) == E_OK) ? 0 : -1;
+    return (fs_mkdir_ex(path, 0) == 0) ? 0 : -1;
 }
 
 static int sys_unlink_user(uint32_t path_ptr)
 {
     char rel[256];
     char path[256];
-    const char *fatrel;
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
-    fatrel = fat_path(rel);
-    if (fatrel != 0) {
-        return (fat16_mounted() && fat16_unlink(fatrel) == E_OK) ? 0 : -1;
-    }
-
     make_abs_path(path, sizeof(path), rel);
-    return (fs_unlink(path) == E_OK) ? 0 : -1;
+    return (fs_unlink_ex(path, 0) == 0) ? 0 : -1;
 }
 
 static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
@@ -402,20 +383,11 @@ static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
     char path[256];
     fs_stat_t st;
     uint32_t out[6];
-    const char *fatrel;
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
-    fatrel = fat_path(rel);
-    if (fatrel != 0) {
-        if (!fat16_mounted() || fat16_stat(fatrel, &st) != E_OK) return -1;
-        st.mode = 0;
-        st.uid = 0;
-        st.gid = 0;
-    } else {
-        make_abs_path(path, sizeof(path), rel);
-        if (fs_stat(path, &st) != E_OK) return -1;
-    }
+    make_abs_path(path, sizeof(path), rel);
+    if (fs_stat_ex(path, &st, 0) != 0) return -1;
 
     out[0] = (uint32_t)st.type;
     out[1] = st.size;
@@ -631,6 +603,26 @@ void syscall_dispatch(interrupt_frame_t *f)
     case SYS_CHDIR:
         ret = sys_chdir_user(f->ebx);
         break;
+    case SYS_CHROOT: {
+        proc_t *p = proc_current();
+        char rel[FS_PATH_MAX];
+        char path[FS_PATH_MAX];
+        fs_stat_t st;
+
+        if (p == 0 || copy_user_string(rel, sizeof(rel), f->ebx) != E_OK) {
+            ret = -1;
+            break;
+        }
+        make_abs_path(path, sizeof(path), rel);
+        if (path[0] == '\0' || fs_stat(path, &st) != 0 || st.type != FS_TYPE_DIR) {
+            ret = -1;
+            break;
+        }
+        strcpy(p->root, path);
+        strcpy(p->cwd, path);
+        ret = 0;
+        break;
+    }
     case SYS_GETCWD:
         ret = sys_getcwd_user(f->ebx, f->ecx);
         break;
@@ -712,7 +704,7 @@ void syscall_dispatch(interrupt_frame_t *f)
         /* 先释放 newfd 原有的内容 */
         if (p->fds[newfd].used) {
             if (p->fds[newfd].kind == FD_KIND_FILE) {
-                fs_close(p->fds[newfd].handle);
+                fs_close_ex(p->fds[newfd].fs_be, (int)p->fds[newfd].handle);
             } else if (p->fds[newfd].kind == FD_KIND_PIPE_W) {
                 pipe_unref_write((int)p->fds[newfd].handle);
             } else if (p->fds[newfd].kind == FD_KIND_PIPE_R) {
@@ -724,7 +716,12 @@ void syscall_dispatch(interrupt_frame_t *f)
         if (p->fds[newfd].kind == FD_KIND_PIPE_W) {
             pipe_ref_write((int)p->fds[newfd].handle);
         } else if (p->fds[newfd].kind == FD_KIND_FILE) {
-            fs_ref(p->fds[newfd].handle);
+            if (fs_ref_ex(p->fds[newfd].fs_be, (int)p->fds[newfd].handle) != E_OK) {
+                /* 该后端不支持句柄共享（如 FAT16）：拒绝 dup2，避免双重关闭 */
+                memset(&p->fds[newfd], 0, sizeof(p->fds[newfd]));
+                ret = -1;
+                break;
+            }
         }
         ret = newfd;
         break;
@@ -860,15 +857,178 @@ void syscall_dispatch(interrupt_frame_t *f)
 
         tfd = fd_alloc_kind(target, FD_KIND_FILE, src->handle, rights);
         if (tfd < 0) { ret = -1; break; }
-        if (fs_ref(src->handle) != E_OK) {
+        if (fs_ref_ex(src->fs_be, (int)src->handle) != E_OK) {
             memset(&target->fds[tfd], 0, sizeof(target->fds[tfd]));
             ret = -1;
             break;
         }
+        target->fds[tfd].fs_be = src->fs_be;
         ret = tfd;
         break;
     }
 
+    case SYS_MMAP: {
+        proc_t *p = proc_current();
+        uint32_t len = (f->ebx + 0xFFFU) & ~0xFFFU;
+        uint32_t slot = PROC_MMAP_MAX;
+
+        if (p == 0 || len == 0U ||
+            len > USER_LAYOUT_MMAP_END - USER_LAYOUT_MMAP_BASE ||
+            p->mmap_next + len > USER_LAYOUT_MMAP_END - USER_LAYOUT_MMAP_BASE) {
+            ret = -1;
+            break;
+        }
+        for (uint32_t i = 0; i < PROC_MMAP_MAX; i++) {
+            if (p->mmaps[i].len == 0U) { slot = i; break; }
+        }
+        if (slot == PROC_MMAP_MAX) { ret = -1; break; }
+
+        uint32_t base = USER_LAYOUT_MMAP_BASE + p->mmap_next;
+        for (uint32_t off = 0; off < len; off += PAGE_SIZE) {
+            void *page = pmm_alloc_page();
+            if (page == 0) {
+                for (uint32_t j = 0; j < off; j += PAGE_SIZE) {
+                    uint32_t ph = vmm_get_phys(base + j);
+                    vmm_unmap_page(base + j);
+                    if (ph != 0U) pmm_free_page((void *)(uintptr_t)ph);
+                }
+                ret = -1;
+                goto mmap_out;
+            }
+            memset(page, 0, PAGE_SIZE);
+            if (vmm_map_user_page(base + off, (uint32_t)(uintptr_t)page,
+                                  PTE_PRESENT | PTE_WRITE | PTE_USER | PTE_NOEXEC) != 0) {
+                pmm_free_page(page);
+                for (uint32_t j = 0; j < off; j += PAGE_SIZE) {
+                    uint32_t ph = vmm_get_phys(base + j);
+                    vmm_unmap_page(base + j);
+                    if (ph != 0U) pmm_free_page((void *)(uintptr_t)ph);
+                }
+                ret = -1;
+                goto mmap_out;
+            }
+        }
+        p->mmaps[slot].base = base;
+        p->mmaps[slot].len = len;
+        p->mmap_next += len;
+        ret = (int)base;
+mmap_out:
+        break;
+    }
+    case SYS_MUNMAP: {
+        proc_t *p = proc_current();
+        uint32_t addr = f->ebx;
+        uint32_t len = (f->ecx + 0xFFFU) & ~0xFFFU;
+        uint32_t slot = PROC_MMAP_MAX;
+
+        if (p == 0 || len == 0U) { ret = -1; break; }
+        for (uint32_t i = 0; i < PROC_MMAP_MAX; i++) {
+            if (p->mmaps[i].len == len && p->mmaps[i].base == addr) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == PROC_MMAP_MAX) { ret = -1; break; }
+
+        for (uint32_t off = 0; off < len; off += PAGE_SIZE) {
+            uint32_t ph = vmm_get_phys(addr + off);
+            vmm_unmap_page(addr + off);
+            if (ph != 0U) pmm_free_page((void *)(uintptr_t)ph);
+        }
+        p->mmaps[slot].base = 0;
+        p->mmaps[slot].len = 0;
+        ret = 0;
+        break;
+    }
+    case SYS_UDP_SEND: {
+        struct {
+            uint8_t  ip[4];
+            uint16_t port;
+            uint16_t len;
+            uint8_t  data[64];
+        } req;
+
+        if (copy_from_user(&req, (const void *)(uintptr_t)f->ebx, sizeof(req)) != E_OK ||
+            req.len > sizeof(req.data)) {
+            ret = -1;
+            break;
+        }
+        ret = net_udp_send_to(req.ip, req.port, req.data, req.len);
+        break;
+    }
+    case SYS_UDP_RECV: {
+        struct {
+            uint8_t  ip[4];
+            uint16_t port;
+            uint16_t len;
+            uint8_t  data[64];
+        } req;
+        int n;
+
+        if (copy_from_user(&req, (const void *)(uintptr_t)f->ebx, sizeof(req)) != E_OK) {
+            ret = -1;
+            break;
+        }
+        n = net_udp_recv(req.ip, &req.port, req.data, sizeof(req.data), 30000000U);
+        if (n < 0) { ret = -1; break; }
+        req.len = (uint16_t)n;
+        ret = (copy_to_user((void *)(uintptr_t)f->ebx, &req, sizeof(req)) == E_OK) ? n : -1;
+        break;
+    }
+    case SYS_SOCKET: {
+        proc_t *p = proc_current();
+        int fd = -1;
+
+        if (p != 0) {
+            fd = fd_alloc_kind(p, FD_KIND_UDP, 12345U,
+                               FD_RIGHT_READ | FD_RIGHT_WRITE);
+        }
+        ret = fd;
+        break;
+    }
+    case SYS_SENDTO: {
+        proc_t *p = proc_current();
+        proc_fd_t *fd = fd_get(p, (int)f->ebx);
+        struct {
+            uint8_t  ip[4];
+            uint16_t port;
+            uint16_t len;
+            uint8_t  data[64];
+        } req;
+
+        if (fd == 0 || fd->kind != FD_KIND_UDP ||
+            (fd->rights & FD_RIGHT_WRITE) == 0U ||
+            copy_from_user(&req, (const void *)(uintptr_t)f->ecx, sizeof(req)) != E_OK ||
+            req.len > sizeof(req.data)) {
+            ret = -1;
+            break;
+        }
+        ret = net_udp_send_to(req.ip, req.port, req.data, req.len);
+        break;
+    }
+    case SYS_RECVFROM: {
+        proc_t *p = proc_current();
+        proc_fd_t *fd = fd_get(p, (int)f->ebx);
+        struct {
+            uint8_t  ip[4];
+            uint16_t port;
+            uint16_t len;
+            uint8_t  data[64];
+        } req;
+        int n;
+
+        if (fd == 0 || fd->kind != FD_KIND_UDP ||
+            (fd->rights & FD_RIGHT_READ) == 0U ||
+            copy_from_user(&req, (const void *)(uintptr_t)f->ecx, sizeof(req)) != E_OK) {
+            ret = -1;
+            break;
+        }
+        n = net_udp_recv(req.ip, &req.port, req.data, sizeof(req.data), 30000000U);
+        if (n < 0) { ret = -1; break; }
+        req.len = (uint16_t)n;
+        ret = (copy_to_user((void *)(uintptr_t)f->ecx, &req, sizeof(req)) == E_OK) ? n : -1;
+        break;
+    }
     case SYS_RESINFO: {
         /* ebx=用户 u32[10]：物理页/堆/进程/系统调用/COW/FS/设备/PCI */
         unsigned int out[10];

@@ -14,6 +14,9 @@
 #include "../lib/string.h"
 #include "../proc/proc.h"
 #include "../proc/proc_internal.h"
+#include "../ipc/channel.h"
+#include "../ipc/port.h"
+#include "../core/service.h"
 
 #define NATIVE_HANDLE_MAX 16
 /* v0 只声明真正实现的能力；sealed image / sandbox 尚未接入，不能提前置位。 */
@@ -26,6 +29,7 @@ typedef struct {
     uint32_t rights;
     uint32_t object_id;
     uint32_t parent;
+    bool     revoked;
 } native_slot_t;
 
 typedef struct {
@@ -51,8 +55,7 @@ static int handle_slot(uint32_t handle, uint32_t *slot)
     return NATIVE_E_OK;
 }
 
-static native_slot_t *table_lookup(native_table_t *t, uint32_t handle,
-                                   uint32_t rights)
+static native_slot_t *table_find(native_table_t *t, uint32_t handle)
 {
     uint32_t slot;
     native_slot_t *s;
@@ -61,6 +64,15 @@ static native_slot_t *table_lookup(native_table_t *t, uint32_t handle,
     s = &t->slot[slot];
     if (!s->used) return 0;
     if ((uint16_t)(handle >> 8) != s->generation) return 0;
+    return s;
+}
+
+static native_slot_t *table_lookup(native_table_t *t, uint32_t handle,
+                                   uint32_t rights)
+{
+    native_slot_t *s = table_find(t, handle);
+
+    if (s == 0 || s->revoked) return 0;
     if ((rights & ~s->rights) != 0U) return 0;
     return s;
 }
@@ -115,9 +127,11 @@ static int table_info(native_table_t *t, uint32_t handle,
 
 static int table_close(native_table_t *t, uint32_t handle)
 {
-    native_slot_t *s = table_lookup(t, handle, 0);
+    native_slot_t *s = table_find(t, handle);
 
     if (s == 0) return NATIVE_E_BADF;
+    if (s->type == NATIVE_OBJ_CHANNEL) chan_release(s->object_id);
+    if (s->type == NATIVE_OBJ_PORT) port_release(s->object_id);
     s->used = false;
     s->generation++;
     if (s->generation == 0U) s->generation = 1;
@@ -140,7 +154,62 @@ static uint32_t table_dup(native_table_t *t, uint32_t handle, uint32_t rights,
         return 0;
     }
     out = table_add(t, s->type, rights, s->object_id, handle);
+    if (out != 0U && s->type == NATIVE_OBJ_CHANNEL) {
+        chan_retain(s->object_id);
+    }
+    if (out != 0U && s->type == NATIVE_OBJ_PORT) {
+        port_retain(s->object_id);
+    }
     *err = (out != 0U) ? NATIVE_E_OK : NATIVE_E_NOSPC;
+    return out;
+}
+
+static int table_restrict(native_table_t *t, uint32_t handle, uint32_t drop)
+{
+    native_slot_t *s = table_lookup(t, handle, 0);
+
+    if (s == 0) return NATIVE_E_BADF;
+    s->rights &= ~drop;
+    return NATIVE_E_OK;
+}
+
+/* 撤销句柄：立即失效；对象引用仍由 close/进程退出释放。 */
+static int table_revoke(native_table_t *t, uint32_t handle)
+{
+    native_slot_t *s = table_lookup(t, handle, 0);
+
+    if (s == 0) return NATIVE_E_BADF;
+    s->revoked = true;
+    s->rights = 0;
+    return NATIVE_E_OK;
+}
+
+static uint32_t table_transfer(native_table_t *src, native_table_t *dst,
+                               uint32_t handle, uint32_t rights, int *err)
+{
+    native_slot_t *s = table_lookup(src, handle, 0);
+    uint32_t out;
+
+    if (s == 0) {
+        *err = NATIVE_E_BADF;
+        return 0;
+    }
+    if (rights == 0U) rights = s->rights;
+    if ((rights & ~s->rights) != 0U) {
+        *err = NATIVE_E_ACCESS;
+        return 0;
+    }
+
+    out = table_add(dst, s->type, rights, s->object_id, 0);
+    if (out == 0U) {
+        *err = NATIVE_E_NOSPC;
+        return 0;
+    }
+
+    s->used = false;
+    s->generation++;
+    if (s->generation == 0U) s->generation = 1;
+    *err = NATIVE_E_OK;
     return out;
 }
 
@@ -174,6 +243,12 @@ void native_proc_copy(proc_t *parent, proc_t *child)
         if (!src->slot[i].used) continue;
         (void)table_add(&proc_tables[ci], src->slot[i].type,
                         src->slot[i].rights, src->slot[i].object_id, 0);
+        if (src->slot[i].type == NATIVE_OBJ_CHANNEL) {
+            chan_retain(src->slot[i].object_id);
+        }
+        if (src->slot[i].type == NATIVE_OBJ_PORT) {
+            port_retain(src->slot[i].object_id);
+        }
     }
 }
 
@@ -181,7 +256,19 @@ void native_proc_free(proc_t *p)
 {
     int i = proc_table_index(p);
 
-    if (i >= 0) memset(&proc_tables[i], 0, sizeof(proc_tables[i]));
+    if (i >= 0) {
+        for (uint32_t j = 0; j < NATIVE_HANDLE_MAX; j++) {
+            if (proc_tables[i].slot[j].used &&
+                proc_tables[i].slot[j].type == NATIVE_OBJ_CHANNEL) {
+                chan_release(proc_tables[i].slot[j].object_id);
+            }
+            if (proc_tables[i].slot[j].used &&
+                proc_tables[i].slot[j].type == NATIVE_OBJ_PORT) {
+                port_release(proc_tables[i].slot[j].object_id);
+            }
+        }
+        memset(&proc_tables[i], 0, sizeof(proc_tables[i]));
+    }
 }
 
 static native_table_t *current_table(void)
@@ -201,6 +288,19 @@ static int native_sandbox_bit(uint32_t nr)
     case NATIVE_SYS_HANDLE_CLOSE: return 3;
     case NATIVE_SYS_HANDLE_DUP:   return 4;
     case NATIVE_SYS_HANDLE_INFO:  return 5;
+    case NATIVE_SYS_HANDLE_RESTRICT: return 9;
+    case NATIVE_SYS_HANDLE_TRANSFER: return 10;
+    case NATIVE_SYS_HANDLE_REVOKE: return 21;
+    case NATIVE_SYS_CHANNEL_CREATE: return 11;
+    case NATIVE_SYS_CHANNEL_SEND: return 12;
+    case NATIVE_SYS_CHANNEL_RECV: return 13;
+    case NATIVE_SYS_PORT_CREATE: return 14;
+    case NATIVE_SYS_PORT_CONNECT: return 15;
+    case NATIVE_SYS_PORT_ACCEPT: return 16;
+    case NATIVE_SYS_CHANNEL_RECV_BLOCK: return 17;
+    case NATIVE_SYS_PORT_ACCEPT_BLOCK: return 18;
+    case NATIVE_SYS_SERVICE_REGISTER: return 19;
+    case NATIVE_SYS_SERVICE_CONNECT: return 20;
     case NATIVE_SYS_PROCESS_CREATE: return 7;
     case NATIVE_SYS_PROCESS_WAIT:   return 8;
     case NATIVE_SYS_DEBUG_WRITE:  return 6;
@@ -232,7 +332,7 @@ static int native_debug_write(uint32_t ptr, uint32_t len)
 
 void native_syscall_dispatch(interrupt_frame_t *f)
 {
-    int ret;
+    int ret = NATIVE_E_OK;
     proc_t *np = proc_current();
 
     /* native ABI 与 legacy 一样受沙箱 allowlist 约束。 */
@@ -291,6 +391,202 @@ void native_syscall_dispatch(interrupt_frame_t *f)
             r = NATIVE_E_FAULT;
         }
         ret = r;
+        break;
+    }
+    case NATIVE_SYS_HANDLE_RESTRICT: {
+        native_table_t *t = current_table();
+
+        ret = (t != 0) ? table_restrict(t, f->ebx, f->ecx) : NATIVE_E_BADF;
+        break;
+    }
+    case NATIVE_SYS_HANDLE_REVOKE: {
+        native_table_t *t = current_table();
+
+        ret = (t != 0) ? table_revoke(t, f->ebx) : NATIVE_E_BADF;
+        break;
+    }
+    case NATIVE_SYS_HANDLE_TRANSFER: {
+        proc_t *target = proc_find(f->ebx);
+        native_table_t *src = current_table();
+        int ti = proc_table_index(target);
+        uint32_t h = 0;
+        int err = NATIVE_E_BADF;
+
+        if (src != 0 && ti >= 0 && target != proc_current()) {
+            h = table_transfer(src, &proc_tables[ti], f->ecx, f->edx, &err);
+        }
+        ret = (h != 0U) ? (int)h : err;
+        break;
+    }
+    case NATIVE_SYS_CHANNEL_CREATE: {
+        native_table_t *t = current_table();
+        uint32_t a = 0, b = 0;
+        uint32_t ha, hb;
+        uint32_t pair[2];
+
+        if (t == 0 || chan_create_pair(&a, &b) != 0) {
+            ret = NATIVE_E_NOSPC;
+            break;
+        }
+        ha = table_add(t, NATIVE_OBJ_CHANNEL,
+                       NATIVE_R_READ | NATIVE_R_WRITE, a, 0);
+        hb = table_add(t, NATIVE_OBJ_CHANNEL,
+                       NATIVE_R_READ | NATIVE_R_WRITE, b, 0);
+        if (ha == 0U || hb == 0U) {
+            if (ha != 0U) (void)table_close(t, ha);
+            else chan_release(a);
+            if (hb != 0U) (void)table_close(t, hb);
+            else chan_release(b);
+            ret = NATIVE_E_NOSPC;
+            break;
+        }
+        pair[0] = ha;
+        pair[1] = hb;
+        ret = (copy_to_user((void *)(uintptr_t)f->ebx, pair, sizeof(pair)) == E_OK)
+                  ? NATIVE_E_OK : NATIVE_E_FAULT;
+        break;
+    }
+    case NATIVE_SYS_CHANNEL_SEND: {
+        native_table_t *t = current_table();
+        native_slot_t *s = (t != 0) ? table_lookup(t, f->ebx, NATIVE_R_WRITE) : 0;
+        uint8_t msg[CHAN_MSG_LEN];
+        uint32_t n = f->edx;
+
+        if (s == 0 || s->type != NATIVE_OBJ_CHANNEL) {
+            ret = NATIVE_E_BADF;
+            break;
+        }
+        if (n > sizeof(msg)) n = sizeof(msg);
+        if (copy_from_user(msg, (const void *)(uintptr_t)f->ecx, n) != E_OK) {
+            ret = NATIVE_E_FAULT;
+            break;
+        }
+        ret = chan_send(s->object_id, msg, n);
+        break;
+    }
+    case NATIVE_SYS_CHANNEL_RECV: {
+        native_table_t *t = current_table();
+        native_slot_t *s = (t != 0) ? table_lookup(t, f->ebx, NATIVE_R_READ) : 0;
+        uint8_t msg[CHAN_MSG_LEN];
+        int n;
+
+        if (s == 0 || s->type != NATIVE_OBJ_CHANNEL) {
+            ret = NATIVE_E_BADF;
+            break;
+        }
+        n = chan_recv(s->object_id, msg, sizeof(msg));
+        if (n < 0) { ret = n; break; }
+        ret = (copy_to_user((void *)(uintptr_t)f->ecx, msg, (uint32_t)n) == E_OK)
+                  ? n : NATIVE_E_FAULT;
+        break;
+    }
+    case NATIVE_SYS_PORT_CREATE: {
+        native_table_t *t = current_table();
+        int id = port_create();
+        uint32_t h;
+
+        if (t == 0 || id < 0) { ret = NATIVE_E_NOSPC; break; }
+        h = table_add(t, NATIVE_OBJ_PORT,
+                      NATIVE_R_CONNECT | NATIVE_R_ACCEPT | NATIVE_R_MANAGE,
+                      (uint32_t)id, 0);
+        if (h == 0U) { port_release((uint32_t)id); ret = NATIVE_E_NOSPC; }
+        else ret = (int)h;
+        break;
+    }
+    case NATIVE_SYS_PORT_CONNECT: {
+        native_table_t *t = current_table();
+        native_slot_t *s = (t != 0) ? table_lookup(t, f->ebx, NATIVE_R_CONNECT) : 0;
+        uint32_t client = 0;
+        uint32_t h;
+
+        if (s == 0 || s->type != NATIVE_OBJ_PORT) { ret = NATIVE_E_BADF; break; }
+        if (port_connect(s->object_id, &client) != 0) { ret = NATIVE_E_AGAIN; break; }
+        h = table_add(t, NATIVE_OBJ_CHANNEL, NATIVE_R_READ | NATIVE_R_WRITE, client, 0);
+        if (h == 0U) { chan_release(client); ret = NATIVE_E_NOSPC; }
+        else ret = (int)h;
+        break;
+    }
+    case NATIVE_SYS_PORT_ACCEPT: {
+        native_table_t *t = current_table();
+        native_slot_t *s = (t != 0) ? table_lookup(t, f->ebx, NATIVE_R_ACCEPT) : 0;
+        uint32_t server = 0;
+        uint32_t h;
+
+        if (s == 0 || s->type != NATIVE_OBJ_PORT) { ret = NATIVE_E_BADF; break; }
+        if (port_accept(s->object_id, &server) != 0) { ret = NATIVE_E_AGAIN; break; }
+        h = table_add(t, NATIVE_OBJ_CHANNEL, NATIVE_R_READ | NATIVE_R_WRITE, server, 0);
+        if (h == 0U) { chan_release(server); ret = NATIVE_E_NOSPC; }
+        else ret = (int)h;
+        break;
+    }
+    case NATIVE_SYS_CHANNEL_RECV_BLOCK: {
+        native_table_t *t = current_table();
+        native_slot_t *s = (t != 0) ? table_lookup(t, f->ebx, NATIVE_R_READ) : 0;
+        uint8_t msg[CHAN_MSG_LEN];
+        int n;
+
+        if (s == 0 || s->type != NATIVE_OBJ_CHANNEL) { ret = NATIVE_E_BADF; break; }
+        n = chan_recv_block(s->object_id, msg, sizeof(msg));
+        if (n < 0) { ret = n; break; }
+        ret = (copy_to_user((void *)(uintptr_t)f->ecx, msg, (uint32_t)n) == E_OK)
+                  ? n : NATIVE_E_FAULT;
+        break;
+    }
+    case NATIVE_SYS_PORT_ACCEPT_BLOCK: {
+        native_table_t *t = current_table();
+        native_slot_t *s = (t != 0) ? table_lookup(t, f->ebx, NATIVE_R_ACCEPT) : 0;
+        uint32_t server = 0;
+        uint32_t h;
+
+        if (s == 0 || s->type != NATIVE_OBJ_PORT) { ret = NATIVE_E_BADF; break; }
+        if (port_accept_block(s->object_id, &server) != 0) { ret = NATIVE_E_AGAIN; break; }
+        h = table_add(t, NATIVE_OBJ_CHANNEL, NATIVE_R_READ | NATIVE_R_WRITE, server, 0);
+        if (h == 0U) { chan_release(server); ret = NATIVE_E_NOSPC; }
+        else ret = (int)h;
+        break;
+    }
+    case NATIVE_SYS_SERVICE_REGISTER: {
+        native_table_t *t = current_table();
+        native_slot_t *s = (t != 0) ? table_lookup(t, f->edx, NATIVE_R_MANAGE) : 0;
+        char name[SERVICE_NAME];
+        uint32_t n = f->ecx;
+
+        if (s == 0 || s->type != NATIVE_OBJ_PORT ||
+            n == 0U || n >= SERVICE_NAME) {
+            ret = NATIVE_E_INVAL;
+            break;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            if (copy_from_user(&name[i], (const void *)(uintptr_t)(f->ebx + i), 1) != E_OK) {
+                ret = NATIVE_E_FAULT;
+                break;
+            }
+        }
+        if (ret == NATIVE_E_FAULT) break;
+        name[n] = '\0';
+        ret = service_register(name, s->object_id);
+        break;
+    }
+    case NATIVE_SYS_SERVICE_CONNECT: {
+        native_table_t *t = current_table();
+        char name[SERVICE_NAME];
+        uint32_t n = f->ecx;
+        uint32_t client = 0;
+        uint32_t h;
+
+        if (t == 0 || n == 0U || n >= SERVICE_NAME) { ret = NATIVE_E_INVAL; break; }
+        for (uint32_t i = 0; i < n; i++) {
+            if (copy_from_user(&name[i], (const void *)(uintptr_t)(f->ebx + i), 1) != E_OK) {
+                ret = NATIVE_E_FAULT;
+                break;
+            }
+        }
+        if (ret == NATIVE_E_FAULT) break;
+        name[n] = '\0';
+        if (service_connect(name, &client) != 0) { ret = NATIVE_E_NOENT; break; }
+        h = table_add(t, NATIVE_OBJ_CHANNEL, NATIVE_R_READ | NATIVE_R_WRITE, client, 0);
+        if (h == 0U) { chan_release(client); ret = NATIVE_E_NOSPC; }
+        else ret = (int)h;
         break;
     }
     case NATIVE_SYS_PROCESS_CREATE: {
@@ -369,9 +665,11 @@ static int native_call3(int n, int a, int b, int c)
 static void native_handle_selftest(void)
 {
     native_table_t t;
+    native_table_t t2;
     struct native_handle_info info;
     uint32_t self;
     uint32_t dup;
+    uint32_t moved;
     int ok = 1;
 
     self = table_init(&t, 0x1234U);
@@ -396,6 +694,29 @@ static void native_handle_selftest(void)
 
         if (bad != 0U || derr != NATIVE_E_ACCESS) ok = 0;
     }
+
+    /* restrict：撤掉 SIGNAL 后 WAIT 仍可用，SIGNAL 不再可用 */
+    if (ok && table_restrict(&t, self, NATIVE_R_SIGNAL) != NATIVE_E_OK) ok = 0;
+    if (ok && table_lookup(&t, self, NATIVE_R_WAIT) == 0) ok = 0;
+    if (ok && table_lookup(&t, self, NATIVE_R_SIGNAL) != 0) ok = 0;
+
+    /* transfer：source handle 失效，target 得到同一对象 */
+    (void)table_init(&t2, 0x5678U);
+    moved = 0;
+    if (ok) {
+        int terr = NATIVE_E_OK;
+        moved = table_transfer(&t, &t2, self, NATIVE_R_WAIT, &terr);
+        if (moved == 0U || terr != NATIVE_E_OK) ok = 0;
+    }
+    if (ok && table_info(&t, self, &info) != NATIVE_E_BADF) ok = 0;
+    if (ok && table_info(&t2, moved, &info) != NATIVE_E_OK) ok = 0;
+
+    if (ok && table_revoke(&t2, moved) != NATIVE_E_OK) ok = 0;
+    if (ok && table_lookup(&t2, moved, 0) != 0) ok = 0;
+    if (ok && table_close(&t2, moved) != NATIVE_E_OK) ok = 0;
+
+    if (ok) kprintln("native: handle revoke ok");
+    else    kprintln("native: handle revoke FAILED");
 
     if (ok) kprintln("native: handle table ok");
     else    kprintln("native: handle table FAILED");

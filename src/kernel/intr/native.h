@@ -62,8 +62,21 @@
 #define NATIVE_SYS_HANDLE_CLOSE 0x10
 #define NATIVE_SYS_HANDLE_DUP   0x11
 #define NATIVE_SYS_HANDLE_INFO  0x12
+#define NATIVE_SYS_HANDLE_RESTRICT 0x13 /* ebx=handle, ecx=drop rights */
+#define NATIVE_SYS_HANDLE_TRANSFER 0x14 /* ebx=pid, ecx=handle, edx=rights */
+#define NATIVE_SYS_HANDLE_REVOKE 0x15   /* ebx=handle */
 #define NATIVE_SYS_PROCESS_CREATE 0x20   /* ebx=name, ecx=len, edx=rights -> proc handle */
 #define NATIVE_SYS_PROCESS_WAIT   0x21   /* ebx=proc handle, ecx=&status -> pid */
+#define NATIVE_SYS_CHANNEL_CREATE 0x30   /* ebx=u32[2] -> 0 */
+#define NATIVE_SYS_CHANNEL_SEND   0x31   /* ebx=handle, ecx=buf, edx=len */
+#define NATIVE_SYS_CHANNEL_RECV   0x32   /* ebx=handle, ecx=buf, edx=max */
+#define NATIVE_SYS_PORT_CREATE    0x33   /* -> port handle */
+#define NATIVE_SYS_PORT_CONNECT   0x34   /* ebx=port handle -> client channel */
+#define NATIVE_SYS_PORT_ACCEPT    0x35   /* ebx=port handle -> server channel */
+#define NATIVE_SYS_CHANNEL_RECV_BLOCK 0x36 /* ebx=handle, ecx=buf, edx=max */
+#define NATIVE_SYS_PORT_ACCEPT_BLOCK 0x37  /* ebx=port handle -> server channel */
+#define NATIVE_SYS_SERVICE_REGISTER 0x38 /* ebx=name, ecx=len, edx=port handle */
+#define NATIVE_SYS_SERVICE_CONNECT  0x39 /* ebx=name, ecx=len -> client channel */
 #define NATIVE_SYS_DEBUG_WRITE  0x50
 
 /* ABI feature bits */

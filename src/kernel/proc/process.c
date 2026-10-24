@@ -2,6 +2,7 @@
 #include "proc_internal.h"
 #include "../core/percpu.h"
 #include "../core/program.h"
+#include "../core/error.h"
 #include "../lib/kprintf.h"
 #include "../lib/string.h"
 #include "../heap.h"
@@ -162,8 +163,11 @@ proc_t *proc_spawn(const char *program_name)
     p->uid = 0;                     /* 内核创建的第一个进程是 root */
     p->gid = 0;
     strcpy(p->cwd, "system:/");     /* 默认工作目录：system 驱动器根 */
+    p->root[0] = '\0';              /* 默认全局 namespace */
     memset(p->fds, 0, sizeof(p->fds));
     cap_init(&p->caps);
+    p->mmap_next = 0;
+    memset(p->mmaps, 0, sizeof(p->mmaps));
     p->fds[0].used = true; p->fds[0].kind = 1; p->fds[0].rights = FD_RIGHT_READ;  /* stdin  */
     p->fds[1].used = true; p->fds[1].kind = 1; p->fds[1].rights = FD_RIGHT_WRITE; /* stdout */
     p->fds[2].used = true; p->fds[2].kind = 1; p->fds[2].rights = FD_RIGHT_WRITE; /* stderr */
@@ -176,11 +180,16 @@ proc_t *proc_spawn(const char *program_name)
         p->sandboxed = true;
         p->syscall_mask = (1ULL << SYS_WRITE) | (1ULL << SYS_EXIT) |
                           (1ULL << SYS_GETPID) | (1ULL << SYS_YIELD) |
-                          (1ULL << SYS_SLEEP);
+                          (1ULL << SYS_SLEEP) | (1ULL << SYS_FORK) |
+                          (1ULL << SYS_WAIT);
         /* native: ABI_VERSION(0), EXIT(1), YIELD(2), DEBUG_WRITE(6),
          * PROCESS_CREATE(7), PROCESS_WAIT(8)。 */
         p->native_mask = (1U << 0) | (1U << 1) | (1U << 2) |
-                         (1U << 6) | (1U << 7) | (1U << 8);
+                         (1U << 6) | (1U << 7) | (1U << 8) |
+                         (1U << 11) | (1U << 12) | (1U << 13) |
+                         (1U << 14) | (1U << 15) | (1U << 16) |
+                         (1U << 17) | (1U << 18) |
+                         (1U << 19) | (1U << 20);
     }
 
     native_proc_init(p);                        /* Native ABI self handle */
@@ -321,9 +330,12 @@ proc_t *proc_fork(struct interrupt_frame *f)
     child->user_trampoline = parent->user_trampoline;
 
     strcpy(child->cwd, parent->cwd);
+    strcpy(child->root, parent->root);
     child->uid = parent->uid;               /* fork 继承身份 */
     child->gid = parent->gid;
     memcpy(child->fds, parent->fds, sizeof(child->fds));
+    child->mmap_next = parent->mmap_next;
+    memcpy(child->mmaps, parent->mmaps, sizeof(child->mmaps));
     cap_fork(&child->caps, &parent->caps);
     memcpy(child->sig_handlers, parent->sig_handlers, sizeof(child->sig_handlers));
     native_proc_copy(parent, child);
@@ -332,7 +344,10 @@ proc_t *proc_fork(struct interrupt_frame *f)
     for (int i = 0; i < PROC_FD_MAX; i++) {
         if (!child->fds[i].used) continue;
         if (child->fds[i].kind == FD_KIND_FILE) {
-            fs_ref(child->fds[i].handle);
+            if (fs_ref_ex(child->fds[i].fs_be, (int)child->fds[i].handle) != E_OK) {
+                /* 后端不支持共享（FAT16）：子进程不继承这个 fd */
+                memset(&child->fds[i], 0, sizeof(child->fds[i]));
+            }
         }
     }
     pipe_fork_inherit(child);
@@ -418,8 +433,12 @@ void proc_block(unsigned int chan)
     if (next != 0) {
         proc_switch_to(next);       /* 被唤醒后回到这里 */
     } else {
-        /* 没有别的可运行线程：等一个中断把当前线程唤醒 */
-        __asm__ volatile ("sti; hlt");
+        /* 没有别的可运行线程：睡到真正被 proc_wakeup 改成 READY 为止。
+         * 不能只执行一次 hlt 就返回，否则 timer/NMI 等任意中断都会让
+         * 阻塞进程“假醒”，在 accept/recv 里反复空转。 */
+        while (p->state == PROC_BLOCKED) {
+            __asm__ volatile ("sti; hlt");
+        }
     }
 
     p->state = PROC_RUNNING;
@@ -595,7 +614,7 @@ void proc_exit(int code)
         for (int i = 0; i < PROC_FD_MAX; i++) {
             if (!p->fds[i].used) continue;
             if (p->fds[i].kind == FD_KIND_FILE) {
-                fs_close(p->fds[i].handle);
+                fs_close_ex(p->fds[i].fs_be, (int)p->fds[i].handle);
             } else if (p->fds[i].kind == FD_KIND_PIPE_W) {
                 pipe_unref_write((int)p->fds[i].handle);
             } else if (p->fds[i].kind == FD_KIND_PIPE_R) {

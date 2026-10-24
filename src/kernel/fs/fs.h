@@ -105,4 +105,33 @@ int fs_check(char *report, uint32_t max);
 /* 已用节点数（诊断） */
 unsigned int fs_node_count(void);
 
+/* =============================================================================
+ * VFS 后端接口
+ *
+ * `fs_*` 是内存卷（ramfs）的实现；`fs_*_ex` 是文件系统层对外的统一入口：
+ * 它按路径前缀（"fat:"）路由到具体后端，并把"后端 id"一起返回。
+ *
+ * 调用方（syscall / proc）只认 (fs_be, handle) 这个二元组，
+ * 不再需要判断"这个 fd 属于哪个文件系统"。
+ * 新增一个后端 = 在 vfs.c 里加一条路由 + 一组适配函数，调用方不动。
+ * ============================================================================= */
+#define FS_BE_RAMFS 0U
+#define FS_BE_FAT16 1U
+
+/* 打开：成功返回后端句柄（>=0），失败返回 -1；*be 写回后端 id */
+int fs_open_ex(const char *path, uint32_t flags, uint8_t *be);
+int fs_read_ex(uint8_t be, int h, void *buf, uint32_t len);
+int fs_write_ex(uint8_t be, int h, const void *buf, uint32_t len);
+int fs_close_ex(uint8_t be, int h);
+int fs_ref_ex(uint8_t be, int h);
+
+int fs_stat_ex(const char *path, fs_stat_t *out, uint8_t *be);
+int fs_listdir_ex(const char *path, uint32_t index, char *name, uint32_t name_max,
+                  fs_stat_t *out, uint8_t *be);
+int fs_mkdir_ex(const char *path, uint8_t *be);
+int fs_unlink_ex(const char *path, uint8_t *be);
+
+/* 路径属于哪个后端（给驱动器枚举/调试用） */
+int fs_is_fat(const char *path);
+
 #endif

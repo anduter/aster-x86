@@ -1,12 +1,14 @@
 #include "program.h"
 #include "object.h"
 #include "error.h"
+#include "supervisor.h"
 #include "../lib/kprintf.h"
 #include "../lib/string.h"
 #include "../mm/memtest.h"
 #include "../apps/shell.h"
 #include "../apps/heartbeat.h"
 #include "../apps/spin.h"
+#include "../apps/echosvc.h"
 #include "../user/user_mode.h"
 
 static program_t programs[PROG_MAX];
@@ -32,6 +34,14 @@ static void prog_userdemo_entry(void)
     }
 }
 
+/* 最小 ring3 探针：只 write/exit，用于 AP ring3 回归 */
+static void prog_ring3probe_entry(void)
+{
+    if (user_probe_run() != 0) {
+        kprintln("user: probe setup failed");
+    }
+}
+
 /* shell 现在是一个 ring3 程序：从 /bin/shell 载入执行。
    载入失败才退回内核内建 shell（保证系统仍可用）。 */
 static void prog_shell_entry(void)
@@ -50,10 +60,14 @@ void prog_init(void)
     prog_register("memtest", 1, "run the memory tests", prog_memtest_entry);
     prog_register("heartbeat", 1, "print a heartbeat every second", heartbeat_entry);
     prog_register("userdemo",  1, "run a tiny ring3 program", prog_userdemo_entry);
+    prog_register("supervisor", 1, "service registry supervisor", supervisor_entry);
+    prog_register("ring3probe", 1, "tiny ring3 AP probe", prog_ring3probe_entry);
+    prog_register("echosvc",   1, "echo service for supervisor", echosvc_entry);
     prog_register("spin",      1, "busy-wait 2s (scheduler load test)", spin_entry);
 
     /* heartbeat 是验证 AP 调度/计时器的探针，亲和到 AP；其余程序按负载放置。 */
     (void)prog_set_flags("heartbeat", PROG_F_PIN_AP);
+    (void)prog_set_flags("ring3probe", PROG_F_PIN_AP);
 }
 
 int prog_set_flags(const char *name, uint32_t flags)

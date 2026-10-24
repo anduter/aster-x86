@@ -8,7 +8,13 @@
 
 #include "ulib.h"
 
-/* 系统调用号（与内核 intr/syscall.h 保持一致） */
+/* 与内核 syscall.c 的 SYS_UDP_* 请求布局一致 */
+struct udp_req {
+    unsigned char  ip[4];
+    unsigned short port;
+    unsigned short len;
+    unsigned char  data[64];
+};
 #define SYS_WRITE    1
 #define SYS_EXIT     5
 #define SYS_OPEN     6
@@ -17,6 +23,14 @@
 #define SYS_CLOSE    9
 #define SYS_CAP_DROP 46
 #define SYS_CAP_SEND 47
+#define SYS_MMAP     48
+#define SYS_MUNMAP   49
+#define SYS_UDP_SEND 50
+#define SYS_UDP_RECV 51
+#define SYS_SOCKET   52
+#define SYS_SENDTO   53
+#define SYS_RECVFROM 54
+#define SYS_CHROOT   55
 #define SYS_GETCHAR  10
 #define SYS_LIST     11
 #define SYS_DRIVES   12
@@ -602,6 +616,91 @@ static void cmd_sectest(void)
             }
         } else {
             putstr("sectest: cap xfer pipe failed\n");
+        }
+    }
+
+    /* 匿名 mmap：映射一页、写读、munmap。 */
+    {
+        int m = sc(SYS_MMAP, 4096, 3, 0);
+        if (m > 0) {
+            *(volatile unsigned int *)(unsigned int)m = 0x5A5A1234U;
+            if (*(volatile unsigned int *)(unsigned int)m == 0x5A5A1234U) {
+                putstr("sectest: mmap ok\n");
+            } else {
+                putstr("sectest: mmap read FAIL\n");
+            }
+            sc(SYS_MUNMAP, m, 4096, 0);
+        } else {
+            putstr("sectest: mmap FAIL\n");
+        }
+    }
+
+    /* 用户态 UDP：发到宿主回显端口，再收回来。 */
+    {
+        struct udp_req req;
+
+        req.ip[0] = 10; req.ip[1] = 0; req.ip[2] = 2; req.ip[3] = 2;
+        req.port = 12345;
+        req.len = 4;
+        memcpy(req.data, "ping", 4);
+
+        if (sc(SYS_UDP_SEND, (int)(unsigned int)&req, 0, 0) == 0) {
+            req.len = sizeof(req.data);
+            int n = sc(SYS_UDP_RECV, (int)(unsigned int)&req, 0, 0);
+            if (n == 4 && req.data[0] == 'p' && req.data[1] == 'i' &&
+                req.data[2] == 'n' && req.data[3] == 'g') {
+                putstr("sectest: udp ok\n");
+            } else {
+                putstr("sectest: udp recv FAIL\n");
+            }
+        } else {
+            putstr("sectest: udp send FAIL\n");
+        }
+    }
+
+    /* socket fd 路径：socket -> sendto -> recvfrom -> close */
+    {
+        int s = sc(SYS_SOCKET, 2, 2, 0);    /* AF_INET, SOCK_DGRAM */
+        if (s >= 0) {
+            struct udp_req req;
+
+            req.ip[0] = 10; req.ip[1] = 0; req.ip[2] = 2; req.ip[3] = 2;
+            req.port = 12345;
+            req.len = 4;
+            memcpy(req.data, "sock", 4);
+            if (sc(SYS_SENDTO, s, (int)(unsigned int)&req, 0) == 0) {
+                req.len = sizeof(req.data);
+                int n = sc(SYS_RECVFROM, s, (int)(unsigned int)&req, 0);
+                if (n == 4 && req.data[0] == 's' && req.data[1] == 'o' &&
+                    req.data[2] == 'c' && req.data[3] == 'k') {
+                    putstr("sectest: socket udp ok\n");
+                } else {
+                    putstr("sectest: socket recv FAIL\n");
+                }
+            } else {
+                putstr("sectest: socket send FAIL\n");
+            }
+            sc(SYS_CLOSE, s, 0, 0);
+        } else {
+            putstr("sectest: socket FAIL\n");
+        }
+    }
+
+    /* VFS namespace：子进程 chroot 后 ../ 不能逃逸；父进程不受影响。 */
+    {
+        int pid = sc(SYS_FORK, 0, 0, 0);
+        if (pid == 0) {
+            if (sc(SYS_CHROOT, (int)(unsigned int)"system:/bin", 0, 0) == 0) {
+                int f = sc(SYS_OPEN, (int)(unsigned int)"../host.txt", 0, 0);
+                if (f < 0) putstr("sectest: chroot ok\n");
+                else { sc(SYS_CLOSE, f, 0, 0); putstr("sectest: chroot ESCAPE\n"); }
+            } else {
+                putstr("sectest: chroot FAIL\n");
+            }
+            sc(SYS_EXIT, 0, 0, 0);
+        } else if (pid > 0) {
+            int status = 0;
+            sc(SYS_WAIT, pid, (int)(unsigned int)&status, 0);
         }
     }
 }

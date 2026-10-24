@@ -41,12 +41,20 @@ typedef enum {
 #define FD_KIND_PIPE_R  2 /* 管道读端，handle = 管道下标 */
 #define FD_KIND_PIPE_W  3 /* 管道写端，handle = 管道下标 */
 #define FD_KIND_FAT16   4 /* FAT16 交换盘文件，handle = fat16 句柄下标 */
+#define FD_KIND_UDP     5 /* UDP socket，handle = 本地端口 */
 #define FD_RIGHT_READ   0x1U
 #define FD_RIGHT_WRITE  0x2U
+#define PROC_MMAP_MAX   4U
+
+typedef struct {
+    uint32_t base;
+    uint32_t len;
+} proc_mmap_t;
 
 typedef struct {
     bool     used;
     uint8_t  kind;        /* FD_KIND_* */
+    uint8_t  fs_be;       /* 该 fd 属于哪个文件系统后端（FS_BE_*），仅 FD_KIND_FILE 有效 */
     uint32_t handle;      /* fs 句柄或管道下标 */
     uint32_t rights;      /* FD_RIGHT_*：per-process capability rights */
 } proc_fd_t;
@@ -65,6 +73,7 @@ typedef struct process {
     bool         slept;         /* 是否曾经睡过（只打印一次日志） */
     uint32_t     parent_pid;    /* 父进程 pid（wait 用） */
     char         cwd[192];      /* 当前目录（形如 "system:/docs"） */
+    char         root[192];     /* VFS namespace 根；空 = 全局根 */
     uint32_t     user_brk;      /* 用户堆当前边界（brk 系统调用） */
     uint32_t     user_stack_top;/* 本进程随机化后的栈顶（ASLR） */
     uint32_t     user_stack_va; /* 初始栈页虚拟地址（栈顶 - 4KB） */
@@ -72,6 +81,8 @@ typedef struct process {
     uint32_t     user_trampoline;/* 本进程随机化后的信号蹦床页（ASLR） */
     proc_fd_t    fds[PROC_FD_MAX];  /* 文件描述符表 */
     cap_table_t  caps;              /* 通用对象 capability 表 */
+    uint32_t     mmap_next;         /* 匿名 mmap 区当前偏移 */
+    proc_mmap_t  mmaps[PROC_MMAP_MAX];
     uint32_t     user_eip;      /* fork 子进程返回到的用户地址 */
     uint32_t     user_esp;
     uint32_t     fork_regs[4];  /* fork 子进程恢复的 ebx/ebp/esi/edi */

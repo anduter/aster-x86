@@ -44,6 +44,8 @@
 
 extern uint8_t user_demo_start[];
 extern uint8_t user_demo_end[];
+extern uint8_t user_probe_start[];
+extern uint8_t user_probe_end[];
 
 /* ---------------- ELF32 解析（不依赖 struct 对齐） ---------------- */
 
@@ -339,6 +341,29 @@ int user_mode_run(void)
     }
 
     return enter_user(USER_CODE_VA, stack_phys, 0, "builtin demo");
+}
+
+int user_probe_run(void)
+{
+    uint32_t size = (uint32_t)(uintptr_t)(user_probe_end - user_probe_start);
+    void *code_phys;
+    void *stack_phys;
+
+    if (size == 0U || size > USER_STACK_SIZE) return -1;
+
+    code_phys  = pmm_alloc_page();
+    stack_phys = pmm_alloc_page();
+    if (code_phys == 0 || stack_phys == 0) return -1;
+
+    memset(code_phys, 0, USER_STACK_SIZE);
+    memcpy(code_phys, user_probe_start, size);
+
+    if (vmm_map_user_page(USER_CODE_VA, (uint32_t)(uintptr_t)code_phys,
+                          PTE_PRESENT | PTE_USER) != 0) {
+        return -1;
+    }
+
+    return enter_user(USER_CODE_VA, stack_phys, 0, "ring3 AP probe");
 }
 
 int user_exec(const char *path)

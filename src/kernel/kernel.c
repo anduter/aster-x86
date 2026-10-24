@@ -32,6 +32,10 @@
 #include "core/pci.h"
 #include "core/e1000.h"
 #include "core/net.h"
+#include "core/supervisor.h"
+
+/* 服务/IPC 生命周期泄漏自检（core/service_selftest.c） */
+void service_lifecycle_selftest(void);
 #include "core/acpi.h"
 #include "core/apic.h"
 #include "core/percpu.h"
@@ -369,6 +373,8 @@ void kernel_main(void)
     /* 进程模块：把程序变成可调度的内核线程，然后交给调度器。
        shell 与 heartbeat 都是程序表里的程序，内核不解释任何命令。 */
     proc_init();
+    supervisor_init();
+    service_lifecycle_selftest();
     if (proc_spawn("shell") == 0) {
         panic("cannot spawn shell program");
     }
@@ -380,6 +386,9 @@ void kernel_main(void)
     }
     if (proc_spawn("userdemo") == 0) {
         panic("cannot spawn userdemo program");
+    }
+    if (proc_spawn("ring3probe") == 0) {
+        kprintln("proc: ring3probe spawn failed");
     }
 
     /* 多核调度回归：4 个忙等线程由负载放置决定落在哪颗核上（不看名字）。

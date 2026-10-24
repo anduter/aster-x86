@@ -51,6 +51,14 @@
 #define SYS_SETUID     45 /* ebx=uid, ecx=gid               -> 0 / -1（root 才能降权） */
 #define SYS_CAP_DROP   46 /* ebx=fd, ecx=要撤销的 rights    -> 0 / -1 */
 #define SYS_CAP_SEND   47 /* ebx=pid, ecx=fd, edx=rights   -> 目标 fd / -1 */
+#define SYS_MMAP       48 /* ebx=len, ecx=prot             -> 用户 VA / -1 */
+#define SYS_MUNMAP     49 /* ebx=addr, ecx=len             -> 0 / -1 */
+#define SYS_UDP_SEND   50 /* ebx=&udp_req                 -> 0 / -1 */
+#define SYS_UDP_RECV   51 /* ebx=&udp_req                 -> payload len / -1 */
+#define SYS_SOCKET     52 /* ebx=domain, ecx=type, edx=proto -> fd / -1 */
+#define SYS_SENDTO     53 /* ebx=fd, ecx=&udp_req          -> 0 / -1 */
+#define SYS_RECVFROM   54 /* ebx=fd, ecx=&udp_req          -> len / -1 */
+#define SYS_CHROOT     55 /* ebx=path                      -> 0 / -1 */
 
 /* 用户/内核代码统一用这个宏发起系统调用 */
 static inline int sys_call(int num, int a, int b, int c)
