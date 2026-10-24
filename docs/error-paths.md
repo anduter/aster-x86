@@ -225,6 +225,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\error-path-check.ps1 -
 ```
 2026-10-24 21:01:44 name=errap test=True exit=0 elapsed=14.0s === TEST PASS (97/97) ===
 2026-10-24 21:03:01 name=errap test=True exit=0 elapsed=23.2s === TEST PASS (97/97) ===
+2026-10-24 21:09:43 name=errap test=True exit=0 elapsed=23.9s === TEST PASS (97/97) ===
+```
+
+前两次是“连续两次 97/97”；第三次由 `tools/error-path-check.ps1` 端到端驱动
+（等 flake 会话修好 `build.ps1` 的 `EchoPort` 默认值后重跑），同样 97/97：
+
+```
+[error-path] checks:
+  PASS  regression exit code is 0
+  PASS  no error-path FAILED marker
+  PASS  error-path selftest passed
+  PASS  VFS backend selftest still passed
+  PASS  no backend selftest FAILED marker
+[error-path] marker:
+    fs: error-path selftest ok
+[error-path] verdict: === TEST PASS (97/97) ===
+[error-path] PASS
 ```
 
 第二次运行串口里的相关标记：
@@ -270,13 +287,17 @@ ushell: fs syscalls ok
 
 这两点都与本次改动无关（源码未变，此前两次 97/97 均已通过），按约定本会话
 **没有修改** `build.ps1`。`-ReuseLog` 复检直接使用最后一次成功运行的串口日志，
-因此不受影响；等 flake 会话把 `EchoPort` 默认值改回 12345 后再跑一次完整
-`tools/error-path-check.ps1` 即可（命令见 §4.2）。
+因此不受影响。flake 会话修复后（`EchoPort = 12345`、BOM/解析正常），本会话已用
+`tools/error-path-check.ps1` 端到端重跑并通过（见 §5.1 第三条）。
 
 ### 5.4 提交
 
 | 提交 | 内容 |
 |---|---|
-| `5977574`（`59775742667186619095ff436870fc2e814e5016`） | 22 处错误路径修复 + `fs/vfs_selftest.c` 断言 + `tools/error-path-check.ps1` |
-| `[docs]` 提交（见 `git log`） | 本文件 `docs/error-paths.md` |
+| `5977574`（`59775742667186619095ff436870fc2e814e5016`） | 22 处错误路径修复 + `fs/vfs_selftest.c` 断言 + `tools/error-path-check.ps1`（11 个文件，无 rename 相关内容） |
+| `4fbcc6a` | 本文件 `docs/error-paths.md` |
+
+> 边界：FS 功能会话（rename）会继续改 `fs/ramfs.c` / `fs/fat16.c`。本会话的
+> 改动已在上表 `5977574` 一次性提交完毕，工作区里这两个文件之后的新增内容
+> 属于 rename 会话，本会话不再 `git add` 它们。
 
