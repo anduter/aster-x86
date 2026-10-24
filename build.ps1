@@ -263,6 +263,8 @@ if ($Test -or $Shot) {
         }
     }
 
+    if ($Test) { Start-Sleep -Seconds 2 }
+
     $qargs = @(
         '-drive', ("file={0},format=raw,if=floppy" -f ($imgPath -replace '\\', '/')), '-boot', 'a',
         '-drive', $diskArg,
@@ -281,12 +283,17 @@ if ($Test -or $Shot) {
     # 启动路径越加越长（服务注册、echosvc、ring3probe、net 的 TCP 超时探测等），
     # 固定 10 秒会在慢一点的机器上把按键注入到 shell 还没开始读键盘的时候。
     $bootDeadline = (Get-Date).AddSeconds([Math]::Max(60, $TimeoutSec))
+    $bootTicks = 0
     while ((Get-Date) -lt $bootDeadline) {
         if (Test-Path $serial) {
             $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
             if ($snap -and $snap.Contains('ushell: ready')) { break }
         }
         Start-Sleep -Milliseconds 250
+        $bootTicks++
+        if (($bootTicks % 20) -eq 0) {
+            Write-Host ("  [wait boot: {0}s]" -f [int]($bootTicks / 4)) -ForegroundColor DarkGray
+        }
     }
 
     if ($Test) {
@@ -298,23 +305,26 @@ if ($Test -or $Shot) {
         }
     }
 
-    # 等注入的命令跑完：不再猜固定秒数或依赖某一行日志，而是看串口"是否还在增长"。
-    # 连续 3 秒没有新输出即认为命令都执行完了；最多等 90 秒。
-    # （help/fork/sectest/reexec 的耗时随负载变化，固定等待在慢机上一定翻车。）
-    $quietDeadline = (Get-Date).AddSeconds(90)
-    $lastLen = -1
-    $quietSince = Get-Date
-    Start-Sleep -Seconds 2
-    while ((Get-Date) -lt $quietDeadline) {
-        $len = 0
-        if (Test-Path $serial) { $len = (Get-Item $serial).Length }
-        if ($len -ne $lastLen) {
-            $lastLen = $len
-            $quietSince = Get-Date
-        } elseif (((Get-Date) - $quietSince).TotalSeconds -ge 3) {
-            break
+    # 等注入的命令跑完。不能用"串口静默"判断：内核每秒都打心跳，永远不会静默，
+    # 那样每次都会白等到超时。用末条命令的产物做哨兵：
+    # reexec 成功后 shell 会重新打印第二次 "ushell: ready"；没有 reexec 就固定等 5 秒。
+    if ($Keys -match 'reexec') {
+        $doneDeadline = (Get-Date).AddSeconds(45)
+        $doneTicks = 0
+        while ((Get-Date) -lt $doneDeadline) {
+            if (Test-Path $serial) {
+                $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
+                if ($snap -and ([regex]::Matches($snap, 'ushell: ready')).Count -ge 2) { break }
+            }
+            Start-Sleep -Milliseconds 300
+            $doneTicks++
+            if (($doneTicks % 17) -eq 0) {
+                Write-Host ("  [wait commands: {0}s]" -f [int]($doneTicks * 0.3)) -ForegroundColor DarkGray
+            }
         }
-        Start-Sleep -Milliseconds 300
+        Start-Sleep -Milliseconds 800
+    } else {
+        Start-Sleep -Seconds 5
     }
 
     if ($Shot) {
@@ -404,7 +414,7 @@ if ($Test -or $Shot) {
             @{ Name = 'service registry';          Ok = ($out -match 'native: service ok') },
             @{ Name = 'supervisor service';        Ok = ($out -match 'native: supervisor ok') },
             @{ Name = 'service manifest';          Ok = ($out -match 'native: manifest ok') },
-            @{ Name = 'supervisor 自动重启 echo';  Ok = ($out -match 'supervisor: restart echo -> pid \d+') },
+            @{ Name = 'svcwatch 周期重启 echo';    Ok = ($out -match 'svcwatch: restart echo -> pid \d+') },
             @{ Name = 'restart 后服务可用';        Ok = ($out -match 'native: restart ok') },
             @{ Name = 'service 生命周期无泄漏';    Ok = ($out -match 'service: lifecycle ok \(200 cycles\)') },
             @{ Name = '沙箱拒绝 SYS_OPEN';        Ok = ($out -match 'sandbox: open denied') },
@@ -454,10 +464,18 @@ if ($Test -or $Shot) {
             @{ Name = 'ARP 应答可用';             Ok = ($out -match 'net: ARP reply gw=') },
             @{ Name = 'ICMP echo 可用';           Ok = ($out -match 'net: ICMP echo reply seq=\d+') },
             @{ Name = 'UDP echo 可用';            Ok = ($out -match 'net: UDP echo reply') },
+            @{ Name = 'TCP echo 可用';            Ok = ($out -match 'net: TCP echo reply') },
             @{ Name = '用户态 UDP';               Ok = ($out -match 'sectest: udp ok') },
             @{ Name = 'socket fd UDP';            Ok = ($out -match 'sectest: socket udp ok') },
             @{ Name = 'VFS chroot 越界拒绝';      Ok = ($out -match 'sectest: chroot ok') },
             @{ Name = 'VFS 打开 10 文件';         Ok = ($out -match 'sectest: fd limit ok') },
+            @{ Name = 'ring3 FS 服务';            Ok = ($out -match 'sectest: fs service ok') },
+            @{ Name = 'ring3 FS 写路径';          Ok = ($out -match 'sectest: fs write ok') },
+            @{ Name = 'VFS svc 后端';             Ok = ($out -match 'sectest: svc vfs ok') },
+            @{ Name = 'VFS svc 写路径';           Ok = ($out -match 'sectest: svc vfs write ok') },
+            @{ Name = 'VFS blk 服务';             Ok = ($out -match 'sectest: blk service ok') },
+            @{ Name = 'VFS blk 写路径';           Ok = ($out -match 'sectest: blk write ok') },
+            @{ Name = '用户触发 TCP';             Ok = ($out -match 'sectest: tcp ok') },
             @{ Name = '权限模型可用';             Ok = ($out -match 'auth: permission model ok') },
             @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: 2 cpu') },
             @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*2 cpu\(s\) discovered.*AP startup pending') },
