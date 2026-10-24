@@ -600,10 +600,14 @@ ushell: argc=2 argv0=foo
 64. `net: UDP echo reply`（QEMU 用户网络 + 宿主 PowerShell UDP 回显）；
 65. `sectest: udp ok`（ring3 通过 SYS_UDP_SEND/RECV 完成 UDP echo）；
 66. `sectest: socket udp ok`（socket → sendto → recvfrom → close）；
-67. `supervisor: restart echo -> pid N`（supervisor 停止并重新拉起 echosvc）；
+67. `svcwatch: restart echo -> pid N`（周期 watchdog 检测 echo 缺失并拉起 echosvc）；
 68. `sectest: chroot ok`（per-process namespace，rooted 后 `..` 越界被拒绝）；
 69. `native: restart ok`（重启后重新连接 echo 并完成数据往返）；
-70. `net: TCP echo reply`（实验性最小 TCP client；偶发丢 echo，不计入硬回归）。
+70. `sectest: fd limit ok`（per-process fd 上限 16，同时打开 10 个文件）；
+71. `net: TCP echo reply`（TCP client：SYN/SYN-ACK/ACK/data、多连接重试、data 重传）；
+72. `sectest: fs service ok`（ring3 fsd 内存文件服务，经 Port/Channel 读取）；
+73. `sectest: fs write ok`（fsd 写路径：'w'+data，随后 VFS svc 读回新内容）；
+74. `sectest: svc vfs ok`（VFS `svc:` 后端把 open/read 路由到 ring3 fsd）。
 
 失败时返回非 0，可直接接到 CI。
 
