@@ -19,6 +19,7 @@
 |---|---|---|
 | SMP / 中断路由 | 本会话 | `core/smp.*`、`core/percpu.*`、`core/madt.c`、`core/ioapic.*`、`proc/sched.c`、`intr/irq.c` |
 | 网络 / socket | UDP 子代理（完成后释放） | `core/net.*`、`core/e1000.*`、`intr/syscall.c` 的 UDP/socket 分支 |
+| 文件系统 / VFS | fs 会话 | `fs/*`（`fs.h`、`vfs.c`、`ramfs.c`、`fat16.c`）、`block/*` 的只读使用 |
 | 其它区域 | 新会话（请在下方登记） | 待定 |
 
 **共享文件**（改前先声明，避免同时改）：
@@ -54,4 +55,5 @@
 |---|---|---|---|
 | 本会话 | SMP / IOAPIC / IRQ 路由 | 2026-10-24 | 进行中 |
 | UDP 子代理 | 用户态 UDP 接收 | 2026-10-24 | 进行中 |
+| fs 会话 | 文件系统 / VFS 后端接口（`fs/*`） | 2026-10-24 | 进行中 |
 | 新会话 | （待登记） | | |

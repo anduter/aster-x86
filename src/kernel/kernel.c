@@ -36,6 +36,9 @@
 
 /* 服务/IPC 生命周期泄漏自检（core/service_selftest.c） */
 void service_lifecycle_selftest(void);
+
+/* VFS 后端一致性自检（fs/vfs_selftest.c） */
+void fs_backend_selftest(void);
 #include "core/acpi.h"
 #include "core/apic.h"
 #include "core/percpu.h"
@@ -379,6 +382,9 @@ void kernel_main(void)
 
     /* 块设备 + 磁盘格式：存盘后重新挂载，文件应完好 */
     disk_selftest();
+
+    /* VFS 后端一致性：ramfs / FAT16 走同一条 ops 表 */
+    fs_backend_selftest();
 
     /* 进程模块：把程序变成可调度的内核线程，然后交给调度器。
        shell 与 heartbeat 都是程序表里的程序，内核不解释任何命令。 */
