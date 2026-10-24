@@ -1,18 +1,19 @@
 # watch-changes.ps1 - repo change watcher (event-driven progress reporting)
 #
-# v2: reports only meaningful milestones, with debounce:
+# v3: reports only milestones, with debounce:
 #   - HEAD changed (new commit)
 #   - OS_VERSION changed
-#   - the SET of changed/untracked files changed (added/removed paths)
-#   Editing an already-dirty file does NOT trigger (avoids reporting every save).
+#   - the set of UNTRACKED files changed (new module/file appeared)
+#   Editing tracked files that are already dirty does NOT trigger, so bursts of
+#   iterative edits are coalesced into one report at the next commit.
 #   When triggered, wait until the snapshot is stable for SettleSec, then report
 #   once and exit 0.
 #
-# usage: pwsh -File tools/watch-changes.ps1 -Repo D:\OS_Project -IntervalSec 45 -SettleSec 60
+# usage: pwsh -File tools/watch-changes.ps1 -Repo D:\OS_Project -IntervalSec 90 -SettleSec 120
 param(
     [string]$Repo = 'D:\OS_Project',
-    [int]$IntervalSec = 45,
-    [int]$SettleSec = 60,
+    [int]$IntervalSec = 90,
+    [int]$SettleSec = 120,
     [int]$MaxHours = 12
 )
 
@@ -24,11 +25,12 @@ function Get-Snapshot {
     $ver = (Select-String -Path src\kernel\version.h -Pattern 'OS_VERSION' -ErrorAction SilentlyContinue |
             ForEach-Object { $_.Line.Trim() })
     $statusLines = (cmd /c "git status --porcelain 2>nul")
-    $paths = @($statusLines | ForEach-Object { $_.ToString().Substring(3).Trim() } | Sort-Object)
+    $untracked = @($statusLines | Where-Object { $_.ToString().StartsWith('??') } |
+                   ForEach-Object { $_.ToString().Substring(3).Trim() } | Sort-Object)
     $diffstat = ((cmd /c "git diff --stat 2>nul") | Select-Object -Last 1)
 
-    # trigger key: HEAD + version + sorted set of changed paths
-    $key = "HEAD=$head`nVER=$ver`nPATHS=" + ($paths -join '|')
+    # trigger key: HEAD + version + sorted set of untracked paths
+    $key = "HEAD=$head`nVER=$ver`nUNTRACKED=" + ($untracked -join '|')
     $sha = [Security.Cryptography.SHA256]::Create()
     $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key))).Replace('-', '')
 
@@ -36,7 +38,7 @@ function Get-Snapshot {
         Hash = $hash
         Head = $head
         Ver  = $ver
-        Paths = $paths
+        Untracked = $untracked
         Status = ($statusLines -join "`n")
         DiffStat = $diffstat
     }
@@ -65,8 +67,8 @@ while ((Get-Date) -lt $deadline) {
     Write-Output ("OLD VER : {0}" -f $base.Ver)
     Write-Output ("NEW VER : {0}" -f $last.Ver)
     Write-Output ("DIFFSTAT: {0}" -f $last.DiffStat)
-    Write-Output '--- changed paths ---'
-    if ($last.Paths.Count -eq 0) { Write-Output '(clean)' } else { $last.Paths | ForEach-Object { Write-Output $_ } }
+    Write-Output '--- untracked files ---'
+    if ($last.Untracked.Count -eq 0) { Write-Output '(none)' } else { $last.Untracked | ForEach-Object { Write-Output $_ } }
     exit 0
 }
 
