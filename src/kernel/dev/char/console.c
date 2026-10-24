@@ -15,9 +15,9 @@
  * ============================================================================= */
 #include "console.h"
 #include "fb.h"
-#include "io.h"
-#include "lib/string.h"
-#include "core/spinlock.h"
+#include "../../io.h"
+#include "../../lib/string.h"
+#include "../../core/spinlock.h"
 
 /* 字体缩放：1 = 标准 8x12 单元，2 = 放大一倍（更清晰但字符更大） */
 #ifndef FONT_SCALE

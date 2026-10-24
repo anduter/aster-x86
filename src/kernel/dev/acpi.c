@@ -7,7 +7,7 @@
  *    QEMU/PIIX4 上 S5 的 SLP_TYP 是 0，这里按 0 处理。
  * ============================================================================= */
 #include "acpi.h"
-#include "io.h"
+#include "../io.h"
 #include "../lib/kprintf.h"
 
 static uint32_t pm1a_cnt;      /* PM1a 控制寄存器 I/O 端口 */

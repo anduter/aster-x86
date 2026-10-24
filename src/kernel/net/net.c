@@ -8,9 +8,9 @@
  * 没有 IRQ、没有完整协议栈、没有 socket。
  * ============================================================================= */
 #include "net.h"
-#include "e1000.h"
-#include "error.h"
-#include "spinlock.h"
+#include "../dev/net/e1000.h"
+#include "../core/error.h"
+#include "../core/spinlock.h"
 #include "../lib/string.h"
 #include "../lib/kprintf.h"
 

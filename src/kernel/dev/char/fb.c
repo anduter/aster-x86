@@ -5,8 +5,8 @@
  * 对外提供画点、填充矩形、8x8 点阵字符输出等基础绘图功能。
  * ============================================================================= */
 #include "fb.h"
-#include "types.h"
-#include "lib/kprintf.h"
+#include "../../types.h"
+#include "../../lib/kprintf.h"
 
 uint32_t fb_addr;                /* 显存物理地址 */
 uint16_t fb_w, fb_h;             /* 横向/纵向分辨率 */

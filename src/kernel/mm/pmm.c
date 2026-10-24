@@ -1,5 +1,5 @@
 #include "pmm.h"
-#include "io.h"
+#include "../io.h"
 #include "../types.h"
 #include "../heap.h"
 #include "../core/spinlock.h"

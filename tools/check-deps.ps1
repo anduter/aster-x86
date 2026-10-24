@@ -31,7 +31,7 @@ foreach ($f in $files) {
     $content = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
 
     # migration forwarder headers are transitional; do not count them
-    if ($f.Extension -eq '.h' -and $content -match 'migration forwarder') {
+    if ($f.Extension -eq '.h' -and $content -match 'FORWARD_H') {
         $skippedFwd++
         continue
     }
