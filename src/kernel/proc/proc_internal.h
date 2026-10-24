@@ -27,6 +27,18 @@ void sched_dequeue(proc_t *p);
 /* 按当前负载选一个 CPU（最小负载，平局优先 BSP）。 */
 uint32_t sched_place(const proc_t *p);
 
+/* 设置静态优先级（0..7，越小越高）；返回 0 成功，-1 参数非法。
+ * 已入队的进程会同时迁移到新优先级桶；运行中/阻塞中只改字段。 */
+int sched_set_priority(proc_t *p, uint8_t prio);
+
+/* 调整 aging 窗口（tick）；仅供自检缩短等待时间，正常路径用
+ * SCHED_AGING_TICKS。 */
+void sched_set_aging_ticks(uint32_t ticks);
+
+/* 调度器自检入口（sched_selftest.c）：注册并创建 3 个不同优先级的
+ * 忙等线程，验证优先级顺序与 aging。由 sched_start() 在选第一个进程前调用。 */
+void sched_selftest_start(void);
+
 /* 给指定 CPU 发重新调度 IPI。 */
 void sched_kick(uint32_t cpu);
 

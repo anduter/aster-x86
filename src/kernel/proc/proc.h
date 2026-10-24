@@ -10,6 +10,15 @@
 #define PROC_STACK_CANARY 0x5354414BU   /* 'STAK'，检测内核栈向下溢出 */
 #define PROC_TIMESLICE    5U        /* 每个时间片 5 个 tick = 50ms */
 
+/* 调度优先级：数值越小优先级越高，0 = 最高，7 = 最低，默认 4。
+ * 默认值 4 时所有进程同优先级，调度行为与旧的纯轮转等价。 */
+#define PROC_PRIO_LEVELS   8
+#define PROC_PRIO_DEFAULT  4
+
+/* aging：READY 但一直没被调度的进程每等待这么多 tick 提升一级，
+ * 防止低优先级线程被高优先级线程长期饿死（100Hz 下 20 tick = 200ms）。 */
+#define SCHED_AGING_TICKS  20U
+
 typedef enum {
     PROC_FREE = 0,
     PROC_READY,
@@ -69,6 +78,12 @@ typedef struct process {
     void        *esp;           /* 切换时保存的栈指针 */
     void        *page_dir;     /* 本进程页目录（PAE 下为 PDPT；切换时装入 CR3） */
     uint32_t     timeslice;     /* 剩余 tick 数 */
+    uint8_t      base_prio;     /* 静态优先级 0..7（越小越高），默认 4 */
+    uint8_t      eff_prio;      /* 当前有效优先级：aging 提升后暂时小于 base */
+    uint16_t     wait_ticks;    /* 在 runqueue 上连续等待的 tick 数（aging 用） */
+    bool         prio_set;      /* base_prio 是否已经初始化（新进程首次入队时置默认值） */
+    uint32_t     runs;          /* 被调度上 CPU 的累计次数（诊断/自检用） */
+    uint32_t     aged;          /* aging 提升过多少次（诊断/自检用） */
     unsigned int wait_chan;     /* 阻塞时睡在哪个通道 */
     bool         slept;         /* 是否曾经睡过（只打印一次日志） */
     uint32_t     parent_pid;    /* 父进程 pid（wait 用） */
