@@ -396,7 +396,7 @@ static void proc_reap(proc_t *p)
     memset(p, 0, sizeof(*p));
 }
 
-int proc_wait(int pid, int *status)
+int proc_wait_options(int pid, int *status, int options)
 {
     proc_t *me = proc_current();
 
@@ -413,7 +413,10 @@ int proc_wait(int pid, int *status)
             break;
         }
 
-        if (child == 0) return -1;
+        /* 没有匹配的子进程：阻塞版沿用 -1；WNOHANG 按约定立即返回 0 */
+        if (child == 0) {
+            return ((options & PROC_WAIT_WNOHANG) != 0U) ? 0 : -1;
+        }
 
         if (child->state == PROC_ZOMBIE) {
             int code = child->exit_code;
@@ -424,8 +427,16 @@ int proc_wait(int pid, int *status)
             return (int)cpid;
         }
 
+        /* 有子进程但都活着：WNOHANG 不阻塞，直接告诉调用方“还没好” */
+        if ((options & PROC_WAIT_WNOHANG) != 0U) return 0;
+
         proc_block(PROC_WAIT_CHILD);
     }
+}
+
+int proc_wait(int pid, int *status)
+{
+    return proc_wait_options(pid, status, 0);
 }
 
 /* 阻塞：把当前线程标记为 BLOCKED 并切走，被唤醒后从这里返回。
@@ -582,6 +593,13 @@ void proc_check_signals(struct interrupt_frame *f)
         return;
     }
 
+    /* SIGCHLD 的默认动作是“忽略”，不能走下面通用的“默认终止”：
+     * 否则子进程正常退出会把没装 handler 的父进程（shell）杀掉。 */
+    if (sig == SIGCHLD && handler == SIG_DFL) {
+        p->pending_sig = 0U;
+        return;
+    }
+
     if (handler > SIG_IGN && f != 0 && (f->cs & 3U) == 3U) {
         if (deliver_signal(f, (int)sig, handler)) {
             p->pending_sig = 0U;        /* 已投递：跳到用户 handler */
@@ -649,6 +667,7 @@ void proc_exit_finish(void)
     uint32_t cpu = smp_cpu_id();
     proc_t *p = proc_exit_self[cpu];
     proc_t *next = proc_exit_next[cpu];
+    uint32_t ppid = (p != 0) ? p->parent_pid : 0U;
 
     if (next != 0) {
         this_cpu()->idle_active = false;
@@ -671,6 +690,18 @@ void proc_exit_finish(void)
     p->exit_code = proc_exit_code[cpu];
     p->state = PROC_ZOMBIE;
     proc_wakeup(PROC_WAIT_CHILD);
+
+    /* 通知父进程子进程已退出：SIGCHLD 默认动作是“忽略”（见
+     * proc_check_signals 的 SIG_DFL 特例），所以不装 handler 的父进程不会
+     * 被杀；装了 handler 的会收到，SIG_IGN 的由 proc_send_signal 丢弃。
+     * ppid 在发布 ZOMBIE 之前就取好（发布后父进程可能立刻 reap 并清空 p）。 */
+    if (ppid != 0U) {
+        proc_t *parent = proc_find(ppid);
+
+        if (parent != 0 && parent != p) {
+            proc_send_signal(parent, SIGCHLD);
+        }
+    }
 
     if (next == 0) {
         /* 本 CPU 没有可运行线程：在退出栈上进入 idle。
@@ -777,6 +808,15 @@ void proc_root_copy(proc_t *parent, proc_t *child)
 proc_t *proc_current(void)
 {
     return (proc_t *)this_cpu()->current;
+}
+
+/* 当前进程的父 pid：内核线程/启动早期没有父进程，返回 0。
+ * fork 时已写入 child->parent_pid，这里只做读取。 */
+int proc_getppid(void)
+{
+    proc_t *p = proc_current();
+
+    return (p != 0) ? (int)p->parent_pid : 0;
 }
 
 uint32_t proc_count(void)

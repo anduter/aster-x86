@@ -2,6 +2,7 @@
 #define PROC_PROC_H
 
 #include "../types.h"
+#include "include/abi.h"      /* SIG_DFL/SIG_IGN/SIGCHLD：与用户态 ABI 单一来源 */
 #include "include/security.h"
 
 /* 进程表上限与线程栈大小 */
@@ -33,13 +34,12 @@ typedef enum {
 #define PROC_WAIT_SLEEP 0x534C4550U   /* "SLEP" */
 #define PROC_WAIT_PIPE  0x50495045U   /* "PIPE" */
 
-/* 信号：0=SIG_DFL（默认终止），1=SIG_IGN（忽略），>1=用户处理函数地址 */
+/* 信号：0=SIG_DFL（默认终止），1=SIG_IGN（忽略），>1=用户处理函数地址。
+ * SIG_DFL/SIG_IGN/SIGCHLD 由 include/abi.h 统一定义（内核与用户态同一来源）。 */
 #define SIGINT   2
 #define SIGKILL  9
 #define SIGTERM  15
 #define NSIG_MAX 32
-#define SIG_DFL  0U
-#define SIG_IGN  1U
 
 /* 每进程文件描述符表：0=stdin, 1=stdout, 2=stderr */
 #define PROC_FD_MAX 16
@@ -145,6 +145,17 @@ proc_t *proc_fork(struct interrupt_frame *f);
 
 /* 等待子进程退出并回收；status 收退出码。返回子 pid，失败 -1。 */
 int proc_wait(int pid, int *status);
+
+/* 带 options 的等待（SYS_WAITPID 用）：
+ *   - options == 0：同 proc_wait()；
+ *   - options & PROC_WAIT_WNOHANG：没有僵尸可回收时立即返回 0（不阻塞），
+ *     有僵尸则回收并返回其 pid；没有匹配的子进程也返回 0（见文档 §5.2）；
+ *   - 参数非法/无当前进程返回 -1。 */
+#define PROC_WAIT_WNOHANG 0x1U
+int proc_wait_options(int pid, int *status, int options);
+
+/* 当前进程的父 pid；内核线程/无父返回 0。 */
+int proc_getppid(void);
 
 /* 按 pid 查找活动进程；找不到返回 0。 */
 proc_t *proc_find(uint32_t pid);

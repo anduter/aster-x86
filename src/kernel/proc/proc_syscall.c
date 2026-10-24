@@ -36,11 +36,13 @@ bool proc_syscall_owns(uint32_t nr)
     /* 2..5   : GETPID/UPTIME/YIELD/EXIT
      * 18..20 : FORK/EXEC/WAIT
      * 23..24 : KILL/SLEEP
-     * 30..31 : SIGACTION/SIGRETURN */
+     * 30..31 : SIGACTION/SIGRETURN
+     * 60..61 : WAITPID/GETPPID（ABI v1.1 追加） */
     return (nr >= SYS_GETPID && nr <= SYS_EXIT) ||
            (nr >= SYS_FORK && nr <= SYS_WAIT) ||
            (nr >= SYS_KILL && nr <= SYS_SLEEP) ||
-           (nr >= SYS_SIGACTION && nr <= SYS_SIGRETURN);
+           (nr >= SYS_SIGACTION && nr <= SYS_SIGRETURN) ||
+           nr == SYS_WAITPID || nr == SYS_GETPPID;
 }
 
 int proc_syscall(interrupt_frame_t *f)
@@ -50,6 +52,9 @@ int proc_syscall(interrupt_frame_t *f)
     switch (f->eax) {
     case SYS_GETPID:
         ret = sys_getpid();
+        break;
+    case SYS_GETPPID:
+        ret = proc_getppid();
         break;
     case SYS_UPTIME:
         ret = sys_uptime();
@@ -120,6 +125,20 @@ int proc_syscall(interrupt_frame_t *f)
     case SYS_WAIT: {
         int status = 0;
         int child = proc_wait((int)f->ebx, &status);
+
+        if (child > 0 && f->ecx != 0U) {
+            if (copy_to_user((void *)(uintptr_t)f->ecx, &status, sizeof(status)) != E_OK) {
+                child = -1;
+            }
+        }
+        ret = child;
+        break;
+    }
+    case SYS_WAITPID: {
+        /* options 在 edx：0 = 阻塞等待（同 SYS_WAIT），WNOHANG = 不阻塞。
+         * WNOHANG 返回 0 时不写 status，也不碰用户缓冲。 */
+        int status = 0;
+        int child = proc_wait_options((int)f->ebx, &status, (int)f->edx);
 
         if (child > 0 && f->ecx != 0U) {
             if (copy_to_user((void *)(uintptr_t)f->ecx, &status, sizeof(status)) != E_OK) {
