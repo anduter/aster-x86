@@ -180,7 +180,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\session-run.ps1 -Name 
 ```
 
 产物：`.obj-pm/`、`.dist-pm/`、`serial-pm.log`、`logs-session-pm.log`（均不提交）。
-预期：`=== TEST PASS (97/97) ===`，并且 `serial-pm.log` 里能看到：
+预期：`=== TEST PASS (98/98) ===`（flake 会话在 `build.ps1` 加了 rename 检查，
+所以是 98 不是 97），并且 `serial-pm.log` 里能看到：
 
 ```
 sched: priority ok (order=0,1,2)
@@ -190,12 +191,390 @@ pmm: double-free detected
 heap: check ok (...)
 ```
 
-## 5. 已知边界 / 待办
+## 5. B 部分设计：waitpid(WNOHANG) / SIGCHLD / getppid / mprotect（待实施）
 
-- **B 部分未做**：`waitpid(WNOHANG)`、`SIGCHLD`、`getppid()`、`mprotect()`
-  依赖 `proc/process.c` / `mm/vmm.c`，本会话开始时这两个文件已被 #PF 会话
-  （`a58f7dd5`）修改且未提交（`git status` 显示 `M`），按约定不碰，等其
-  提交后再做。
+> 状态：设计冻结，等 API 会话（7ebab102）提交 `include/abi.h` 单一来源、
+> `ulib.*` / `user_shell.c` 迁移后实施。本节只写设计，代码尚未提交。
+> `proc/process.c`、`mm/vmm.c` 已干净、可由本会话直接修改；
+> `proc/proc_syscall.c`、`mm/mm_syscall.c`、`include/abi.h`、`src/user/*`
+> 需要等对应会话让出。
+
+### 5.1 ABI：只追加编号，不改既有语义
+
+`SYS_WAIT`（20）保持“阻塞等待”，语义/返回值不变（冻结的 ABI）。新增：
+
+| 编号 | 名称 | 参数（ebx/ecx/edx） | 返回 |
+| --- | --- | --- | --- |
+| 60 | `SYS_WAITPID` | pid / `int *status` / options | 子 pid / 0（WNOHANG 无僵尸）/ -1 |
+| 61 | `SYS_GETPPID` | — | 父 pid（0 = 无） |
+| 62 | `SYS_MPROTECT` | addr / len / prot | 0 / -1 |
+
+`include/abi.h` 追加用户可见常量（数值沿用 POSIX）：
+
+```c
+#define WNOHANG     1
+#define PROT_NONE   0
+#define PROT_READ   1
+#define PROT_WRITE  2
+#define PROT_EXEC   4
+#define SIGCHLD     17
+#define SIG_DFL     0u
+#define SIG_IGN     1u
+```
+
+同时按 `abi.h` 的版本规则：`OS_ABI_VERSION_MINOR` 0→1、`SYS_NR_MAX` 59→62；
+`SYS_ABI_VERSION` 的 feature bits 可新增 `OS_ABI_F_WAITPID` / `OS_ABI_F_MPROTECT`
+（只增不减）。`SYS_WAIT` 的 edx 当前被忽略，仍保持忽略，不拿它当 options，
+避免“同编号两种语义”。
+
+### 5.2 waitpid(pid, status, WNOHANG)
+
+内核实现（`proc/process.c`）：
+
+```c
+int proc_wait_options(int pid, int *status, int options);   /* 新 */
+int proc_wait(int pid, int *status)                          /* 旧入口，等价 options=0 */
+{
+    return proc_wait_options(pid, status, 0);
+}
+```
+
+循环扫描 `proc_table[]` 中 `parent_pid == current->pid` 的进程：
+
+| 情况 | options == 0（SYS_WAIT） | options & WNOHANG |
+| --- | --- | --- |
+| 找到 ZOMBIE | `proc_reap()`，写 status，返回子 pid | 同左 |
+| 有子进程但都活着 | `proc_block(PROC_WAIT_CHILD)` 后重扫 | **立即返回 0** |
+| 没有匹配的子进程 | 返回 -1（保持现状） | **返回 0** |
+| 当前无进程 / 参数非法 | -1 | -1 |
+
+`pid` 约定：`pid > 0` 精确匹配；`pid == 0` / `pid < 0` 匹配任意子进程
+（教学简化：没有进程组；与 POSIX `waitpid(-pgid)` 不同，文档注明）。
+`status` 只在真正回收到子进程时通过 `copy_to_user` 写回；WNOHANG 返回 0
+时不碰用户缓冲。
+
+**取舍**：POSIX 在“没有子进程”时返回 -1（ECHILD），这里按本任务要求统一
+返回 0（“无子进程可回收时立即返回 0”）。这样调用方只需区分 `>0`（回收了）
+和 `==0`（还没好，可继续轮询/做别的事），代价是拿不到 ECHILD。
+
+`proc/proc_syscall.c`：`SYS_WAITPID` 用 `f->ebx/ecx/edx`，status 拷贝失败时
+返回 -1（不泄漏“已回收”的假象）；`proc_syscall_owns()` 增加 `SYS_WAITPID`
+/`SYS_GETPPID`。
+
+### 5.3 SIGCHLD
+
+- `proc.h` 增加 `#define SIGCHLD 17`（与 `abi.h` 的 17 保持一致；测试
+  `_Static_assert(SIGCHLD == 17)` 可放在 process.c）。
+- 子进程退出路径：`proc_exit_finish()` 在 `sched_dequeue` + 写 `exit_code` +
+  `state = PROC_ZOMBIE` **之后**，按 `parent_pid` 找父进程（跳过
+  `PROC_FREE`/`PROC_ZOMBIE`/`is_user == false`），`proc_send_signal(parent,
+  SIGCHLD)`。`proc_send_signal` 会置 `pending_sig`，父进程 BLOCKED 时同时
+  `sched_wake()`，所以阻塞在 `proc_wait()` 的父进程会被叫醒并重扫子进程表。
+- **默认动作必须是“忽略”**：`proc_check_signals()` 现在对 `SIG_DFL` 一律
+  `proc_exit(128+sig)`；增加特例：
+
+```c
+if (handler == SIG_DFL && sig == SIGCHLD) { p->pending_sig = 0; return; }
+```
+
+  否则 shell 会因为子进程正常退出而被杀掉。`SIG_IGN` 仍走现有的“清
+  pending 返回”；`handler > SIG_IGN` 走 `deliver_signal()` 投递到用户 handler。
+- 已知限制（沿用现状，文档注明）：
+  - `pending_sig` 只有一个槽，多个子进程连续退出会被合并成一次 SIGCHLD
+    （POSIX 允许对 SIGCHLD 合并）；其它信号也可能覆盖它。
+  - 不实现 SIG_IGN 的“自动回收”：子进程仍是 ZOMBIE，仍需 `waitpid` 回收。
+  - 父进程先退出时孤儿僵尸没有 reparent 到 pid 1，仍沿用现状（后续可做
+    “退出时把 ZOMBIE 挂到 pid 1”或父进程退出时清理）。
+
+### 5.4 getppid
+
+`proc_getppid()`（process.c）：
+
+```c
+int proc_getppid(void)
+{
+    proc_t *p = proc_current();
+    return (p != 0) ? (int)p->parent_pid : 0;
+}
+```
+
+`proc_spawn()` 的内核线程 `parent_pid = 0`；`proc_fork()` 已经写入
+`child->parent_pid = parent->pid`，所以不需要改 fork。SYS_GETPPID 直接返回它；
+用户库 `getppid()` 封装。
+
+### 5.5 mprotect(addr, len, prot)
+
+**prot 位 → PTE**（`mm/vmm.c` 新增 `int vmm_protect_page(unsigned int virt,
+unsigned int prot)`，`mm/vmm.h` 声明）：
+
+| prot | PTE 效果 |
+| --- | --- |
+| `PROT_READ` | `PRESENT|USER`；清 `WRITE`；置 NX（除非同时带 `PROT_EXEC`） |
+| `PROT_WRITE` | 加 `WRITE`（x86 写隐含读）；**不隐含执行**，仍置 NX |
+| `PROT_EXEC` | 清 NX（bit 63，仅 `vmm_nx_enabled` 时）；读权限按 READ 位 |
+| `PROT_NONE` | **v1 简化 = 只读 + NX**（仍然可读） |
+
+`PROT_NONE` 真正“不可读”需要把 PTE 的 present 清 0，同时让
+`vmm_clear_user_space()` / `vmm_clone_user_pages()` 认识“非 present 但仍持有
+物理页”的 PTE，否则会泄漏物理页或让 fork 丢映射。这超出 B 的范围，列为
+后续项；本版在文档和注释里明确写“PROT_NONE 暂等价只读+NX”，避免误用。
+
+**校验（`mm/mm_syscall.c`，先整段校验、再逐页修改，避免非法区间改一半）**：
+
+1. `p = proc_current()` 非空；`len > 0`；`addr` 4KB 对齐；
+2. `addr + len` 不回绕，且整个区间落在 `[USER_LAYOUT_CODE_BASE,
+   USER_LAYOUT_MMAP_END)`；
+3. `prot & ~(PROT_READ|PROT_WRITE|PROT_EXEC)` == 0（`PROT_NONE`=0 合法）；
+4. 每一页 `vmm_user_flags()` 必须 `PRESENT|USER`（guard 页未映射 → -1，
+   正好保持 guard 不可 mprotect 成可写）。
+
+**COW 处理**（关键，否则会破坏 fork 语义）：
+
+- 请求 `PROT_WRITE` 且 PTE 带 `PTE_COW`：先 `vmm_cow_fault(va)` 私有化当前
+  进程的页（可能分配新页、清 COW、置 WRITE）；失败（OOM）→ -1。
+- 清除 `PROT_WRITE` 且 `pmm_page_ref(phys) > 1`：置 `PTE_COW`，保证将来任一
+  进程写时走 COW，而不是两个进程写同一物理页。
+- 保留 `PWT/PCD/DIRTY` 等既有位，只改 `WRITE/COW/NX`。
+
+**TLB flush 策略**：
+
+- `vmm_protect_page()` 内对每个页做一次 `invlpg`（和现有 `vmm_map_page`
+  一致），保证当前 CPU 立即看到新权限；
+- **v1 不做远端 shootdown**：每个进程只有一个线程，某 CPU 上的 TLB 只会在
+  它加载该进程 CR3 时缓存该地址空间；进程迁移离开时 CR3 已切走（无 PCID，
+  CR3 写入会刷新非全局 TLB），所以不存在别的 CPU 持有本进程的旧 PTE。
+- 若未来支持“同一地址空间多 CPU 并发”或 PCID，则在 `mm_syscall.c` 整段
+  修改完成后调用**一次** `smp_tlb_shootdown()`（`proc/smp.h` 已有），不要
+  逐页广播。文档里保留这个 TODO，避免后人误以为漏了。
+
+**其它语义**：
+
+- 部分成功：整段校验通过后逐页改；若中途 COW 复制 OOM，前面的页已生效、
+  返回 -1（POSIX 是全有或全无）。这是教学实现的已知简化，测试只覆盖
+  合法区间和非法区间，不注入 OOM。
+- 用户页不强制 W^X：`PROT_WRITE|PROT_EXEC` 允许（mmap 默认 NX，要执行
+  必须显式 `PROT_EXEC`），符合现有 mmap 的保守默认。
+- mprotect 可以把本进程的代码页改成可写/可执行：这是进程对自身地址空间的
+  权限，不是跨进程越权；现有 `sectest: code write ... status=142`（未调用
+  mprotect）不受影响。若以后要禁止自修改代码，需要记录每个 mapping 的
+  原始权限并在 mprotect 时比较，列为后续项。
+- NX 不可用时（`vmm_nx_enabled == 0`）：`PROT_READ` 的页仍可执行；自检里
+  NX 相关断言按 `vmm_nx_enabled` 条件跳过（QEMU `+nx` 下始终可用）。
+
+### 5.6 要改的文件清单（按依赖顺序）
+
+| 顺序 | 文件 | 改动 | 当前归属/状态 |
+| --- | --- | --- | --- |
+| 1 | `src/kernel/include/abi.h` | 编号 60..62、`WNOHANG`/`PROT_*`/`SIGCHLD`、minor++、`SYS_NR_MAX=62` | API 会话（7ebab102）在飞 |
+| 2 | `src/kernel/proc/proc.h` | `SIGCHLD 17`；`proc_wait_options`/`proc_getppid` 声明 | 本会话 |
+| 3 | `src/kernel/proc/process.c` | `proc_wait_options`、`proc_getppid`、exit 时发 SIGCHLD、SIGCHLD 默认忽略 | 本会话（已干净） |
+| 4 | `src/kernel/mm/vmm.h` / `vmm.c` | `vmm_protect_page()`：PTE 更新 + COW + NX + invlpg | 本会话（已干净） |
+| 5 | `src/kernel/mm/mm_syscall.c` | `SYS_MPROTECT` case、区间校验、`owns()` | 474e5d40 / 待让出 |
+| 6 | `src/kernel/proc/proc_syscall.c` | `SYS_WAITPID` / `SYS_GETPPID` case、`owns()` | 474e5d40 / 待让出 |
+| 7 | `src/kernel/proc/trap/syscall.h` | 无需改（只是转发 `abi.h`） | — |
+| 8 | `src/user/ulib.h` / `ulib.c` | `waitpid()` / `getppid()` / `mprotect()` / `signal()` 封装 | API 会话 |
+| 9 | `src/user/user_shell.c` | `sectest` 增加 B 自检块 | API/#PF 会话 |
+| 10 | `build.ps1` | 新增 `sectest:` 检查项（98 → 98+N） | flake 会话 |
+| 11 | `docs/process-memory.md` | 本节 + 实测记录 | 本会话 |
+
+依赖顺序：1 → 2/3/4 → 5/6 → 8 → 9 → 10。2/3/4 可以先做（不依赖 1 的
+具体编号，先写死 `SIGCHLD 17`），但编译要等 1 的常量。
+
+### 5.7 B 自检草案（只进文档，代码待解锁后再提交）
+
+放在现有 `sectest` 命令里（`build.ps1` 已经注入 `sectest`，不用改注入
+按键），输出沿用现有 `sectest: ... ok/FAIL` 风格。用户库先加封装：
+
+```c
+/* ulib.h */
+int waitpid(int pid, int *status, int options);
+int getppid(void);
+int mprotect(void *addr, unsigned int len, int prot);
+int signal(int sig, unsigned int handler);     /* SIG_DFL/SIG_IGN/用户地址 */
+```
+
+> 以下自检是**伪代码草案**：沿用 `user_shell.c` 现有的 `sc()/putstr()/printf()`
+> 风格；`fork()/exit()/mmap()/sleep_ms()` 是现有 `sc(SYS_*)` 的简写，
+> `sleep_ms()` 可用 `sc(SYS_SLEEP, ms, 0, 0)` 代替。
+
+#### 测试 1：getppid（用管道把子进程看到的 parent pid 带回父进程比较）
+
+```c
+int fds[2];
+sc(SYS_PIPE, (int)fds, 0, 0);
+int pid = sc(SYS_FORK, 0, 0, 0);
+if (pid == 0) {
+    int pp = getppid();
+    sc(SYS_FWRITE, fds[1], (int)&pp, sizeof(pp));
+    sc(SYS_EXIT, 0, 0, 0);
+}
+int pp = -1, st;
+sc(SYS_FREAD, fds[0], (int)&pp, sizeof(pp));
+waitpid(pid, &st, 0);
+printf("sectest: getppid %s (child sees %d, self %d)\n",
+       (pp == getpid()) ? "ok" : "FAIL", pp, getpid());
+```
+
+#### 测试 2：waitpid WNOHANG
+
+```c
+int pid = sc(SYS_FORK, 0, 0, 0);
+if (pid == 0) { sleep_ms(200); sc(SYS_EXIT, 7, 0, 0); }
+
+int st = -1;
+int first = waitpid(pid, &st, WNOHANG);      /* 子进程还活着 -> 0 */
+int spins = 0, r = first;
+while (r == 0 && spins++ < 2000) { sc(SYS_YIELD, 0, 0, 0); r = waitpid(pid, &st, WNOHANG); }
+if (first == 0 && r == pid && st == 7) putstr("sectest: waitpid wnohang ok\n");
+else putstr("sectest: waitpid wnohang FAIL\n");
+
+/* 没有匹配子进程时也必须立即返回 0（本任务约定，见 5.2） */
+if (waitpid(99999, &st, WNOHANG) == 0) putstr("sectest: waitpid no-child ok\n");
+else putstr("sectest: waitpid no-child FAIL\n");
+```
+
+#### 测试 3：SIGCHLD（默认忽略 / 显式 handler / SIG_IGN）
+
+```c
+static volatile int g_sigchld;
+static void sigchld_handler(int sig) { (void)sig; g_sigchld++; }
+
+/* a) 默认动作：父进程不能被 SIGCHLD 杀掉 */
+int pid = fork(); if (pid == 0) exit(0);
+sleep_ms(50);
+if (waitpid(pid, 0, 0) == pid) putstr("sectest: sigchld default ignored ok\n");
+else putstr("sectest: sigchld default ignored FAIL\n");
+
+/* b) 显式 handler：子进程退出后 handler 至少跑一次 */
+signal(SIGCHLD, sigchld_handler);
+g_sigchld = 0;
+pid = fork(); if (pid == 0) exit(0);
+sleep_ms(100);
+int w = waitpid(pid, 0, 0);
+printf("sectest: sigchld handler %s (sigchld=%d wait=%d)\n",
+       (g_sigchld > 0 && w == pid) ? "ok" : "FAIL", g_sigchld, w);
+
+/* c) SIG_IGN：父进程存活，SIGCHLD 被丢弃；僵尸仍需 waitpid */
+signal(SIGCHLD, SIG_IGN);
+pid = fork(); if (pid == 0) exit(0);
+sleep_ms(50);
+printf("sectest: sigchld ignored %s\n", (waitpid(pid, 0, 0) == pid) ? "ok" : "FAIL");
+signal(SIGCHLD, SIG_DFL);       /* 恢复默认（默认=忽略，见 5.3） */
+```
+
+注意 `sleep_ms` 被 SIGCHLD 唤醒会提前返回（`proc_sleep_ticks` 目前不区分
+信号唤醒），所以测试要用 `waitpid` 兜底，不能依赖 sleep 时长。
+
+#### 测试 4：mprotect（写保护 / 可执行 / COW / 非法参数）
+
+```c
+/* a) RO -> 子进程写 -> 142 */
+unsigned char *p = mmap(4096);
+p[0] = 0x41;
+int pid = fork();
+if (pid == 0) {
+    if (mprotect(p, 4096, PROT_READ) != 0) exit(99);
+    p[1] = 0x42;                         /* 应 #PF */
+    putstr("sectest: mprotect ro SURVIVED\n");
+    exit(0);
+}
+int st; waitpid(pid, &st, 0);
+printf("sectest: mprotect ro deny %s (status=%d)\n", (st == 142) ? "ok" : "FAIL", st);
+
+/* b) NX -> EXEC：往 mmap 页写一条 ret，mprotect 后可执行 */
+pid = fork();
+if (pid == 0) {
+    unsigned char *q = mmap(4096);
+    q[0] = 0xC3;                         /* ret */
+    if (mprotect(q, 4096, PROT_READ | PROT_EXEC) != 0) exit(98);
+    ((void (*)(void))q)();
+    exit(0);
+}
+waitpid(pid, &st, 0);
+printf("sectest: mprotect exec %s (status=%d)\n", (st == 0) ? "ok" : "FAIL", st);
+
+/* c) EXEC -> NX：先给执行权、再收回，子进程执行应 142 */
+pid = fork();
+if (pid == 0) {
+    unsigned char *q = mmap(4096);
+    q[0] = 0xC3;                                    /* ret */
+    if (mprotect(q, 4096, PROT_READ | PROT_EXEC) != 0) exit(97);
+    if (mprotect(q, 4096, PROT_READ) != 0) exit(96);/* 收回执行权 */
+    ((void (*)(void))q)();                          /* 应 #PF */
+    putstr("sectest: mprotect nx SURVIVED\n");
+    exit(0);
+}
+waitpid(pid, &st, 0);
+printf("sectest: mprotect nx deny %s (status=%d)\n", (st == 142) ? "ok" : "FAIL", st);
+
+/* d) COW：父页 0xAB -> fork -> 子 mprotect(WRITE) 后写 0xCD；
+      父进程读回必须仍是 0xAB（mprotect 触发 COW 私有化） */
+p[0] = 0xAB;
+pid = fork();
+if (pid == 0) {
+    if (mprotect(p, 4096, PROT_READ | PROT_WRITE) != 0) exit(95);
+    p[0] = 0xCD;                                    /* 只改子进程的私有副本 */
+    exit(0);
+}
+waitpid(pid, &st, 0);
+printf("sectest: mprotect cow %s (parent byte=0x%02x status=%d)\n",
+       (st == 0 && p[0] == 0xAB) ? "ok" : "FAIL", p[0], st);
+
+/* e) 非法参数：非对齐 / len=0 / 内核地址 / 未知 prot 位，全部必须 -1 */
+int bad = 0;
+if (mprotect(p + 1, 4096, PROT_READ) == -1) bad++;
+if (mprotect(p, 0, PROT_READ) == -1) bad++;
+if (mprotect((void *)0x80000000u, 4096, PROT_READ) == -1) bad++;
+if (mprotect(p, 4096, 0x8) == -1) bad++;
+printf("sectest: mprotect invalid %s\n", (bad == 4) ? "ok" : "FAIL");
+```
+
+#### 期望的串口行（build.ps1 后续按这些加检查）
+
+```
+sectest: getppid ok (child sees <pid>, self <pid>)
+sectest: waitpid wnohang ok
+sectest: waitpid no-child ok
+sectest: sigchld default ignored ok
+sectest: sigchld handler ok (sigchld=1 wait=<pid>)
+sectest: sigchld ignored ok
+sectest: mprotect ro deny ok (status=142)
+sectest: mprotect exec ok (status=0)
+sectest: mprotect nx deny ok (status=142)
+sectest: mprotect cow ok
+sectest: mprotect invalid ok
+```
+
+`build.ps1` 检查草案（flake 会话加；7 条，预计 98 → 105）：
+
+```powershell
+@{ Name='waitpid WNOHANG'; Ok = ($out -match 'sectest: waitpid wnohang ok') -and
+                                     ($out -match 'sectest: waitpid no-child ok') },
+@{ Name='SIGCHLD 默认忽略'; Ok = ($out -match 'sectest: sigchld default ignored ok') },
+@{ Name='SIGCHLD handler'; Ok = ($out -match 'sectest: sigchld handler ok') },
+@{ Name='getppid';          Ok = ($out -match 'sectest: getppid ok') },
+@{ Name='mprotect 写保护';  Ok = ($out -match 'sectest: mprotect ro deny ok \(status=142\)') },
+@{ Name='mprotect NX';      Ok = (($out -match 'sectest: mprotect exec ok') -and
+                                  ($out -match 'sectest: mprotect nx deny ok')) },
+@{ Name='mprotect COW/非法'; Ok = (($out -match 'sectest: mprotect cow ok') -and
+                                   ($out -match 'sectest: mprotect invalid ok')) },
+```
+
+#### 回归风险与不变量
+
+- `SYS_WAIT`（20）行为不变：`proc_wait()` 仍是 `options=0` 的包装；现有
+  `fork`/`sectest`/`native process_create/wait` 全部走旧路径。
+- SIGCHLD 默认忽略：所有“子进程正常退出后父进程继续跑”的现有回归都必须
+  仍然通过（这是 B 最大的行为风险点，先加默认忽略再实现发信号）。
+- `mprotect` 只改用户页 PTE，不碰内核映射；`PROT_NONE` 不做 present=0，
+  不给 teardown/fork 增加新状态。
+- 新 syscall 编号只追加，`SYS_ABI_VERSION` minor++，不改任何既有编号。
+
+## 6. 已知边界 / 待办
+
+- **B 部分**：设计见 §5，尚未提交代码。阻塞方是 API 会话（7ebab102）的
+  `include/abi.h` / `src/user/ulib.*` / `user_shell.c` 迁移；`process.c` /
+  `vmm.c` 已干净可用，`proc_syscall.c` / `mm_syscall.c` 待 474e5d40 让出。
 - 优先级目前只在内核内部（`sched_set_priority`）可调，还没有用户态
   `setpriority` 系统调用；fork 子进程走 `sched_enqueue` 的默认优先级 4，
   暂不继承父进程优先级（需要改 `process.c`）。
