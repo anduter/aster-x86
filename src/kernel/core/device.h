@@ -2,6 +2,6 @@
 #define CORE_DEVICE_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../dev/device.h"
+#include "include/dev.h"
 
 #endif

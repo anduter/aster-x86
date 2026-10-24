@@ -8,11 +8,11 @@
  * 没有 IRQ、没有完整协议栈、没有 socket。
  * ============================================================================= */
 #include "net.h"
-#include "../dev/net/e1000.h"
-#include "../core/error.h"
-#include "../core/spinlock.h"
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
+#include "include/dev.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 #define NET_RX_MAX 2048U
 

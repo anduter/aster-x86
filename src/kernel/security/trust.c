@@ -14,10 +14,10 @@ void *memcpy(void *dst, const void *src, uint32_t n);
 void *memset(void *dst, int c, uint32_t n);
 int memcmp(const void *a, const void *b, uint32_t n);
 #else
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
-#include "../heap.h"
-#include "../panic.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/mm.h"
+#include "include/kernel.h"
 #endif
 
 /* -------------------------------------------------------------------------

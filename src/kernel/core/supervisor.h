@@ -2,6 +2,6 @@
 #define CORE_SUPERVISOR_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../svc/supervisor.h"
+#include "include/svc.h"
 
 #endif

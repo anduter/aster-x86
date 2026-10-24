@@ -2,6 +2,6 @@
 #define INTR_FAULT_FORWARD_H
 
 /* migration forwarder: implementation moved to proc/trap/. */
-#include "../proc/trap/fault.h"
+#include "include/proc.h"
 
 #endif

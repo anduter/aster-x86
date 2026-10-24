@@ -2,6 +2,6 @@
 #define CORE_PERCPU_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../proc/percpu.h"
+#include "include/proc.h"
 
 #endif

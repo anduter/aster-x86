@@ -6,13 +6,13 @@
  * ============================================================================= */
 #include "supervisor.h"
 #include "service.h"
-#include "../ipc/port.h"
-#include "../ipc/channel.h"
-#include "../proc/proc.h"
-#include "../proc/proc_internal.h"
-#include "../apps/echosvc.h"
-#include "../lib/kprintf.h"
-#include "../lib/string.h"
+#include "include/svc.h"
+#include "include/svc.h"
+#include "include/proc.h"
+#include "include/proc.h"
+#include "include/apps.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 static int sup_port = -1;
 

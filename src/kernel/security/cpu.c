@@ -7,7 +7,7 @@
  * 只有 CPUID.07H:EBX 对应位为 1 时才置 CR4 位；否则保持关闭并打印状态。
  * ============================================================================= */
 #include "cpu.h"
-#include "../lib/kprintf.h"
+#include "include/kernel.h"
 
 volatile int smap_enabled;
 static int smep_on;

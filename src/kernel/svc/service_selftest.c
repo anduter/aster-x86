@@ -7,11 +7,11 @@
  * 每轮结束把两端都释放掉；跑完还能再建一个新连接，就说明没有耗尽。
  * ============================================================================= */
 #include "service.h"
-#include "../core/error.h"
-#include "../ipc/port.h"
-#include "../ipc/channel.h"
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
+#include "include/kernel.h"
+#include "include/svc.h"
+#include "include/svc.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 #define SELFTEST_NAME   "selftest"
 #define SELFTEST_CYCLES 200U

@@ -13,11 +13,11 @@
  * ============================================================================= */
 #include "proc.h"
 #include "proc_internal.h"
-#include "../core/percpu.h"
-#include "../core/spinlock.h"
-#include "../core/apic.h"
-#include "../lib/kprintf.h"
-#include "../lib/string.h"
+#include "include/proc.h"
+#include "include/kernel.h"
+#include "include/dev.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 /* 全局调度锁：BSP/AP 不能同时改同一份 runqueue / 进程状态。 */
 static spinlock_t sched_lock = SPINLOCK_INIT;

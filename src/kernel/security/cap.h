@@ -2,7 +2,7 @@
 #define PROC_CAP_H
 
 #include "../types.h"
-#include "../core/object.h"
+#include "include/mm.h"
 
 #define CAP_TABLE_MAX 16U
 

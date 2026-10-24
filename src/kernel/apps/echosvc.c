@@ -2,12 +2,12 @@
  * apps/echosvc.c - 可被 supervisor 自动拉起的 echo 服务
  * ============================================================================= */
 #include "echosvc.h"
-#include "../ipc/port.h"
-#include "../ipc/channel.h"
-#include "../core/service.h"
-#include "../core/error.h"
-#include "../lib/kprintf.h"
-#include "../proc/proc.h"
+#include "include/svc.h"
+#include "include/svc.h"
+#include "include/svc.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/proc.h"
 
 static int svc_port = -1;
 static volatile int svc_stop;

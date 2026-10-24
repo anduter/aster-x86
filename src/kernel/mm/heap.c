@@ -1,7 +1,7 @@
-#include "heap.h"
+#include "include/mm.h"
 #include "../io.h"
 #include "../types.h"
-#include "../core/spinlock.h"
+#include "include/kernel.h"
 
 /* 堆锁：块链表是全局共享状态（SMP 下必须串行化） */
 static spinlock_t heap_lock = SPINLOCK_INIT;

@@ -6,7 +6,7 @@
  * ============================================================================= */
 #include "pci.h"
 #include "../io.h"
-#include "../lib/kprintf.h"
+#include "include/kernel.h"
 
 #define PCI_MAX_DEVS 16
 

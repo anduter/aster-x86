@@ -7,9 +7,9 @@
  * ============================================================================= */
 #include "port.h"
 #include "channel.h"
-#include "../lib/string.h"
-#include "../core/spinlock.h"
-#include "../proc/proc.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/proc.h"
 
 #define PORT_WAIT_KEY(id) (0x504F0000U | ((id) & 0xFFFFU))
 

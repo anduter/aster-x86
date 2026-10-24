@@ -30,6 +30,9 @@ foreach ($f in $files) {
     $from = Get-ModuleOf $rel
     $content = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
 
+    # interface headers are the allowed cross-module layer
+    if ($rel -like 'include*') { continue }
+
     # migration forwarder headers are transitional; do not count them
     if ($f.Extension -eq '.h' -and $content -match 'FORWARD_H') {
         $skippedFwd++

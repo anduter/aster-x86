@@ -13,8 +13,8 @@
  *
  * 所有输出同时镜像到 COM1；输入区只在屏幕上画，不进串口（避免和日志混在一起）。
  * ============================================================================= */
-#include "console.h"
-#include "fb.h"
+#include "include/dev.h"
+#include "include/dev.h"
 #include "../../io.h"
 #include "../../lib/string.h"
 #include "../../core/spinlock.h"

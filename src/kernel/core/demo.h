@@ -2,6 +2,6 @@
 #define CORE_DEMO_FORWARD_H
 
 /* migration forwarder: demo moved to apps/ (M0 starts demo). */
-#include "../apps/demo.h"
+#include "include/apps.h"
 
 #endif

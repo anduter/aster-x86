@@ -2,6 +2,6 @@
 #define PROC_CAP_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../security/cap.h"
+#include "include/security.h"
 
 #endif

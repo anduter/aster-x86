@@ -12,10 +12,10 @@
  * ============================================================================= */
 #include "vmm.h"
 #include "../types.h"
-#include "../user/user_layout.h"
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
-#include "../panic.h"
+#include "include/mm.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 /* vmalloc 块头校验失败、重复释放等异常累计次数，自检时用来判断 */
 unsigned int vmm_faults;

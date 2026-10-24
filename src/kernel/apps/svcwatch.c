@@ -1,7 +1,7 @@
 #include "svcwatch.h"
-#include "../core/service.h"
-#include "../proc/proc.h"
-#include "../lib/kprintf.h"
+#include "include/svc.h"
+#include "include/proc.h"
+#include "include/kernel.h"
 
 void svcwatch_entry(void)
 {

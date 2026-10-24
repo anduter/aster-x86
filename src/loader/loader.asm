@@ -164,8 +164,12 @@ cpu_ok          db 0
 
 ; 补齐到 0x1800，再把 32 位内核签名验证器嵌到 0x9800。
 ; 验证器通过后跳到 0x100008；失败只停住并写 COM1。
+; 路径可由 build.ps1 用 -DBOOT_VERIFY_BIN="..." 覆盖（并行会话各有 obj 目录）。
+%ifndef BOOT_VERIFY_BIN
+%define BOOT_VERIFY_BIN "obj/boot_verify.bin"
+%endif
 times 0x1800-($-$$) db 0
-incbin "obj/boot_verify.bin"
+incbin BOOT_VERIFY_BIN
 
 ; 补齐到 16384 字节（32 个扇区），末尾 6 字节留给签名
 times 16384-($-$$)-6 db 0

@@ -7,6 +7,12 @@
 #   .\build.ps1 -Shot x.ppm      # 构建 + 无界面启动 + 截屏到 x.ppm
 #   -Mem 512 -Vga cirrus         # 透传 QEMU 参数
 #   -Keys "help"                 # -Test 时注入的命令（自动补回车）
+#
+# 多会话并行（各会话一套产物，互不覆盖）：
+#   .\build.ps1 -ObjDir .obj-a -DistDir .dist-a -QmpPort 4481 -SerialLog serial-a.log
+#   .\build.ps1 -Test -ObjDir .obj-b -DistDir .dist-b -QmpPort 4491 -SerialLog serial-b.log
+# 注意：-Test 会在宿主监听 UDP/TCP 12345（**客户机里编译期固定的回显端口**），
+# 所以同一时刻只能有一个会话跑 -Test；脚本会在启动 QEMU 前探测该端口并明确报错。
 # =============================================================================
 param(
     [switch]$Test,
@@ -17,13 +23,33 @@ param(
     [string]$Cpu = 'qemu32,+nx,+smep,+smap',
     [int]$FontScale = 1,
     [int]$TimeoutSec = 12,
-    [string]$Keys = "help`nfork`nsectest`necho hi`nreexec"
+    [string]$Keys = "help`nfork`nsectest`necho hi`nreexec",
+    # 并行会话隔离：产物目录 / 镜像目录 / QMP 端口 / 串口日志都可就近覆盖
+    [string]$ObjDir = 'obj',
+    [string]$DistDir = 'dist',
+    [int]$QmpPort = 4444,
+    [string]$SerialLog = ''
 )
 
 try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
+
+# ---- 并行会话：把共享路径收敛成变量，默认值与历史行为一致 ----
+function Resolve-UnderRoot([string]$p) {
+    if ([IO.Path]::IsPathRooted($p)) { return $p }
+    return (Join-Path $root $p)
+}
+$objRoot  = Resolve-UnderRoot $ObjDir
+$distRoot = Resolve-UnderRoot $DistDir
+$serial   = if ($SerialLog) { Resolve-UnderRoot $SerialLog } else { Join-Path $root 'serial.log' }
+$tcpLog   = Join-Path $distRoot 'tcp_host.log'
+
+# nasm 的 incbin 写死了 obj/ 前缀。用 -p 预包含一个生成文件把真实路径注入进去，
+# 避免在命令行上传带引号的 -D（PowerShell 5.1 的原生参数转发会把引号吃掉）。
+# 见 loader.asm / ap_trampoline_blob.asm 里的 %ifndef 默认值。
+$nasmInc = Join-Path $objRoot 'nasm_paths.inc'
 
 # 自带交叉工具链优先
 $tc = Join-Path $root 'tools\i686-elf\bin'
@@ -88,46 +114,73 @@ function Save-Screenshot {
     $client.Close()
 }
 
-New-Item -ItemType Directory -Force -Path obj, dist | Out-Null
+# 端口占用探测：并行会话要快速失败，而不是等 60 秒超时后报一堆假失败
+function Test-PortFree {
+    param([int]$Port, [string]$Proto = 'tcp', [string]$Addr = '127.0.0.1')
+    try {
+        if ($Proto -eq 'udp') {
+            $u = New-Object System.Net.Sockets.UdpClient($Port)
+            $u.Close()
+        } else {
+            $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Parse($Addr), $Port)
+            $l.Start(); $l.Stop()
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $objRoot, $distRoot | Out-Null
+
+# 生成 nasm 预包含文件：把本次的 obj 目录写成 incbin 能用的绝对路径
+$incText = (@(
+    ('%define AP_TRAMPOLINE_BIN "{0}"' -f ((Join-Path $objRoot 'ap_trampoline.bin') -replace '\\', '/')),
+    ('%define BOOT_VERIFY_BIN  "{0}"' -f ((Join-Path $objRoot 'boot_verify.bin')  -replace '\\', '/')),
+    ''
+) -join "`r`n")
+[IO.File]::WriteAllText($nasmInc, $incText, (New-Object System.Text.UTF8Encoding($false)))
+
+Write-Host ("=== session: obj={0} dist={1} qmp={2} serial={3} ===" -f $objRoot, $distRoot, $QmpPort, $serial) -ForegroundColor DarkCyan
 
 Write-Host "=== build ===" -ForegroundColor Cyan
 
-Invoke-Step 'boot sector' 'nasm' @('-f', 'bin', '-i', 'src/boot/', 'src/boot/boot.asm', '-o', 'obj/boot.bin')
-Invoke-Step 'ap trampoline' 'nasm' @('-f', 'bin', 'src/boot/ap_trampoline.asm', '-o', 'obj/ap_trampoline.bin')
+Invoke-Step 'boot sector' 'nasm' @('-f', 'bin', '-i', 'src/boot/', 'src/boot/boot.asm', '-o', (Join-Path $objRoot 'boot.bin'))
+Invoke-Step 'ap trampoline' 'nasm' @('-f', 'bin', 'src/boot/ap_trampoline.asm', '-o', (Join-Path $objRoot 'ap_trampoline.bin'))
 
 # ---- 用户态程序：独立编译，链接到 0x40000000，产出 ELF ----
 Write-Host "=== user program ===" -ForegroundColor Cyan
 Invoke-Step 'user_shell.c' 'i686-elf-gcc' @(
     '-ffreestanding', '-fno-pic', '-fno-pie', '-m32', '-nostdlib', '-fno-builtin',
     '-fno-stack-protector', '-fno-asynchronous-unwind-tables', '-Wall', '-Wextra', '-Werror', '-O0',
-    '-c', 'src/user/user_shell.c', '-o', 'obj/user_shell.o'
+    '-c', 'src/user/user_shell.c', '-o', (Join-Path $objRoot 'user_shell.o')
 )
 Invoke-Step 'ulib.c' 'i686-elf-gcc' @(
     '-ffreestanding', '-fno-pic', '-fno-pie', '-m32', '-nostdlib', '-fno-builtin',
     '-fno-stack-protector', '-fno-asynchronous-unwind-tables', '-Wall', '-Wextra', '-Werror', '-O0',
-    '-c', 'src/user/ulib.c', '-o', 'obj/ulib.o'
+    '-c', 'src/user/ulib.c', '-o', (Join-Path $objRoot 'ulib.o')
 )
-Invoke-Step 'user_shell.elf' 'i686-elf-ld' @('-m', 'elf_i386', '-T', 'src/user/user.ld', '-o', 'obj/user_shell.elf', 'obj/user_shell.o', 'obj/ulib.o')
-Invoke-Step 'user_shell.bin' 'i686-elf-objcopy' @('-O', 'binary', 'obj/user_shell.elf', 'obj/user_shell.bin')
+Invoke-Step 'user_shell.elf' 'i686-elf-ld' @('-m', 'elf_i386', '-T', 'src/user/user.ld', '-o', (Join-Path $objRoot 'user_shell.elf'), (Join-Path $objRoot 'user_shell.o'), (Join-Path $objRoot 'ulib.o'))
+Invoke-Step 'user_shell.bin' 'i686-elf-objcopy' @('-O', 'binary', (Join-Path $objRoot 'user_shell.elf'), (Join-Path $objRoot 'user_shell.bin'))
 Invoke-Step 'sign shell' 'powershell' @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'sign_image.ps1',
-    '-Image', 'obj/user_shell.elf', '-Key', 'keys/shell_private.pem',
-    '-Signature', 'obj/shell.sig', '-OutC', 'obj/shell_signature.c'
+    '-Image', (Join-Path $objRoot 'user_shell.elf'), '-Key', 'keys/shell_private.pem',
+    '-Signature', (Join-Path $objRoot 'shell.sig'), '-OutC', (Join-Path $objRoot 'shell_signature.c')
 )
 
 # src/kernel 下所有 .asm（含 intr/isr.asm 中断桩）都要汇编
 $objs = @()
 Write-Host '=== signature object ===' -ForegroundColor Cyan
-& i686-elf-gcc @CFLAGS -c obj/shell_signature.c -o obj/shell_signature.o
+& i686-elf-gcc @CFLAGS -c (Join-Path $objRoot 'shell_signature.c') -o (Join-Path $objRoot 'shell_signature.o')
 if ($LASTEXITCODE -ne 0) { throw 'shell signature compile failed' }
-$objs += 'obj/shell_signature.o'
+$objs += (Join-Path $objRoot 'shell_signature.o')
 $asmFiles = Get-ChildItem -Path 'src/kernel' -Recurse -Filter *.asm
 foreach ($f in $asmFiles) {
     $rel = $f.FullName.Substring((Resolve-Path 'src/kernel').Path.Length + 1)
-    $obj = Join-Path 'obj' ($rel -replace '\.asm$', '.o')
+    $obj = Join-Path $objRoot ($rel -replace '\.asm$', '.o')
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $obj) | Out-Null
     Write-Host ("  [{0}]" -f $rel) -ForegroundColor DarkGray
-    & nasm -f elf32 -i obj $f.FullName -o $obj
+    & nasm -f elf32 -i $objRoot -p $nasmInc $f.FullName -o $obj
     if ($LASTEXITCODE -ne 0) { throw ("assemble failed: {0}" -f $rel) }
     $objs += $obj
 }
@@ -136,7 +189,7 @@ foreach ($f in $asmFiles) {
 $cFiles = Get-ChildItem -Path 'src/kernel' -Recurse -Filter *.c
 foreach ($f in $cFiles) {
     $rel = $f.FullName.Substring((Resolve-Path 'src/kernel').Path.Length + 1)
-    $obj = Join-Path 'obj' ($rel -replace '\.c$', '.o')
+    $obj = Join-Path $objRoot ($rel -replace '\.c$', '.o')
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $obj) | Out-Null
     Write-Host ("  [{0}]" -f $rel) -ForegroundColor DarkGray
     & i686-elf-gcc @CFLAGS -c $f.FullName -o $obj
@@ -144,37 +197,37 @@ foreach ($f in $cFiles) {
     $objs += $obj
 }
 
-Invoke-Step 'link'    'i686-elf-ld' (@('-m', 'elf_i386', '--no-warn-rwx-segments', '-T', 'src/kernel/linker.ld', '-o', 'obj/kernel.elf') + $objs)
-Invoke-Step 'objcopy' 'i686-elf-objcopy' @('-O', 'binary', 'obj/kernel.elf', 'obj/kernel.bin')
+Invoke-Step 'link'    'i686-elf-ld' (@('-m', 'elf_i386', '--no-warn-rwx-segments', '-T', 'src/kernel/linker.ld', '-o', (Join-Path $objRoot 'kernel.elf')) + $objs)
+Invoke-Step 'objcopy' 'i686-elf-objcopy' @('-O', 'binary', (Join-Path $objRoot 'kernel.elf'), (Join-Path $objRoot 'kernel.bin'))
 
 # ---- loader 内核签名验证器 ----
 Invoke-Step 'sign kernel' 'powershell' @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'sign_image.ps1',
-    '-Image', 'obj/kernel.bin', '-Key', 'keys/shell_private.pem',
-    '-Signature', 'obj/kernel.sig', '-OutC', 'obj/kernel_signature.c',
+    '-Image', (Join-Path $objRoot 'kernel.bin'), '-Key', 'keys/shell_private.pem',
+    '-Signature', (Join-Path $objRoot 'kernel.sig'), '-OutC', (Join-Path $objRoot 'kernel_signature.c'),
     '-Prefix', 'kernel'
 )
 Write-Host '=== boot verifier ===' -ForegroundColor Cyan
-& i686-elf-gcc @CFLAGS '-DBOOT_VERIFY' -c src/kernel/security/trust.c -o obj/boot_trust.o
+& i686-elf-gcc @CFLAGS '-DBOOT_VERIFY' -c src/kernel/security/trust.c -o (Join-Path $objRoot 'boot_trust.o')
 if ($LASTEXITCODE -ne 0) { throw 'boot trust compile failed' }
-& i686-elf-gcc @CFLAGS -c src/boot/verify_support.c -o obj/boot_verify_support.o
+& i686-elf-gcc @CFLAGS -c src/boot/verify_support.c -o (Join-Path $objRoot 'boot_verify_support.o')
 if ($LASTEXITCODE -ne 0) { throw 'boot verify support compile failed' }
-& i686-elf-gcc @CFLAGS -c src/boot/verify_entry.c -o obj/boot_verify_entry.o
+& i686-elf-gcc @CFLAGS -c src/boot/verify_entry.c -o (Join-Path $objRoot 'boot_verify_entry.o')
 if ($LASTEXITCODE -ne 0) { throw 'boot verify entry compile failed' }
-& i686-elf-gcc @CFLAGS -c obj/kernel_signature.c -o obj/kernel_signature.o
+& i686-elf-gcc @CFLAGS -c (Join-Path $objRoot 'kernel_signature.c') -o (Join-Path $objRoot 'kernel_signature.o')
 if ($LASTEXITCODE -ne 0) { throw 'kernel signature compile failed' }
-& i686-elf-ld -m elf_i386 -T src/boot/verify.ld -o obj/boot_verify.elf `
-    obj/boot_verify_entry.o obj/boot_trust.o obj/boot_verify_support.o obj/kernel_signature.o
+& i686-elf-ld -m elf_i386 -T src/boot/verify.ld -o (Join-Path $objRoot 'boot_verify.elf') `
+    (Join-Path $objRoot 'boot_verify_entry.o') (Join-Path $objRoot 'boot_trust.o') (Join-Path $objRoot 'boot_verify_support.o') (Join-Path $objRoot 'kernel_signature.o')
 if ($LASTEXITCODE -ne 0) { throw 'boot verifier link failed' }
-& i686-elf-objcopy -O binary obj/boot_verify.elf obj/boot_verify.bin
+& i686-elf-objcopy -O binary (Join-Path $objRoot 'boot_verify.elf') (Join-Path $objRoot 'boot_verify.bin')
 if ($LASTEXITCODE -ne 0) { throw 'boot verifier objcopy failed' }
 
-Invoke-Step 'loader' 'nasm' @('-f', 'bin', '-i', 'src/loader/', 'src/loader/loader.asm', '-o', 'obj/loader.bin')
+Invoke-Step 'loader' 'nasm' @('-f', 'bin', '-i', 'src/loader/', '-p', $nasmInc, 'src/loader/loader.asm', '-o', (Join-Path $objRoot 'loader.bin'))
 
 # ---- 软盘镜像：LBA0 引导 | LBA1..32 加载器 | LBA33.. 内核 ----
-$b = [IO.File]::ReadAllBytes("$root\obj\boot.bin")
-$l = [IO.File]::ReadAllBytes("$root\obj\loader.bin")
-$k = [IO.File]::ReadAllBytes("$root\obj\kernel.bin")
+$b = [IO.File]::ReadAllBytes((Join-Path $objRoot 'boot.bin'))
+$l = [IO.File]::ReadAllBytes((Join-Path $objRoot 'loader.bin'))
+$k = [IO.File]::ReadAllBytes((Join-Path $objRoot 'kernel.bin'))
 if ($b.Length -ne 512)   { throw "boot.bin is not 512 bytes" }
 if ($l.Length -ne 16384) { throw "loader.bin is not 16384 bytes" }
 if ($k.Length -gt 1474560 - 33 * 512) { throw "kernel.bin exceeds 1.44MB floppy payload capacity" }
@@ -183,20 +236,20 @@ $img = New-Object byte[] 1474560
 [Array]::Copy($b, 0, $img, 0, $b.Length)
 [Array]::Copy($l, 0, $img, 512, $l.Length)
 [Array]::Copy($k, 0, $img, 33 * 512, $k.Length)
-$imgPath = Join-Path $root 'dist\floppy.img'
+$imgPath = Join-Path $distRoot 'floppy.img'
 try {
     [IO.File]::WriteAllBytes($imgPath, $img)
 } catch [System.IO.IOException] {
     # 镜像可能正被 QEMU 打开：本次改用备用文件名，避免整个测试流程失败
-    $imgPath = Join-Path $root 'dist\floppy-run.img'
-    Write-Warning ("dist\floppy.img 被占用，本次改用 {0}" -f $imgPath)
+    $imgPath = Join-Path $distRoot 'floppy-run.img'
+    Write-Warning ("floppy.img 被占用，本次改用 {0}" -f $imgPath)
     [IO.File]::WriteAllBytes($imgPath, $img)
 }
 
 Write-Host ("=== ok: {0}  (kernel {1} bytes) ===" -f $imgPath, $k.Length) -ForegroundColor Green
 
 # 8MB 硬盘镜像（XFS1 持久化）。测试模式每次重建，-Run 模式保留数据。
-$diskPath = Join-Path $root 'dist\disk.img'
+$diskPath = Join-Path $distRoot 'disk.img'
 if ($Test -or $Shot) {
     Remove-Item $diskPath -ErrorAction SilentlyContinue
 }
@@ -207,7 +260,7 @@ if (-not (Test-Path $diskPath)) {
 $diskArg = ("file={0},format=raw,if=ide,index=0" -f ($diskPath -replace '\\', '/'))
 
 # 8MB FAT16 交换盘（ata1）：宿主工具生成，内核以 fat:/ 挂载
-$fatPath = Join-Path $root 'dist\fat.img'
+$fatPath = Join-Path $distRoot 'fat.img'
 if ($Test -or $Shot) {
     Remove-Item $fatPath -ErrorAction SilentlyContinue
 }
@@ -222,8 +275,18 @@ if ($Run) {
 }
 
 if ($Test -or $Shot) {
-    $serial = Join-Path $root 'serial.log'
     Remove-Item $serial -ErrorAction SilentlyContinue
+
+    # 并行会话：端口被占要立刻说清楚，而不是等到回归报一堆"假失败"
+    if (-not (Test-PortFree -Port $QmpPort)) {
+        throw ("QMP 端口 {0} 已被占用（可能另一个会话的 QEMU 还在跑）。换一个 -QmpPort，例如 4481。" -f $QmpPort)
+    }
+    if ($Test) {
+        if (-not (Test-PortFree -Port 12345 -Proto udp) -or
+            -not (Test-PortFree -Port 12345 -Addr '0.0.0.0')) {
+            throw "宿主 12345 端口已被占用：同一时刻只能跑一个 -Test（回显端口在客户机里是编译期常量 12345）。"
+        }
+    }
     $udpEcho = $null
     if ($Test) {
         $udpEcho = Start-Job -ScriptBlock {
@@ -241,9 +304,8 @@ if ($Test -or $Shot) {
 
     $tcpEcho = $null
     if ($Test) {
-        $tcpEcho = Start-Job -ArgumentList $root -ScriptBlock {
-            param($root)
-            $log = Join-Path $root 'tcp_host.log'
+        $tcpEcho = Start-Job -ArgumentList $tcpLog -ScriptBlock {
+            param($log)
             "listen" | Set-Content -Path $log -Encoding ASCII
             $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 12345)
             try {
@@ -273,7 +335,7 @@ if ($Test -or $Shot) {
         '-nic', 'user,model=e1000',
         '-display', 'none', '-no-reboot',
         '-serial', "file:$serial",
-        '-qmp', 'tcp:127.0.0.1:4444,server,nowait'
+        '-qmp', ("tcp:127.0.0.1:{0},server,nowait" -f $QmpPort)
     )
 
     Write-Host "=== qemu (headless) ===" -ForegroundColor Cyan
@@ -299,7 +361,7 @@ if ($Test -or $Shot) {
     if ($Test) {
         try {
             Write-Host ("  [inject command: {0}]" -f $Keys) -ForegroundColor DarkGray
-            Send-Keys -Text ($Keys + "`n") -Port 4444
+            Send-Keys -Text ($Keys + "`n") -Port $QmpPort
         } catch {
             Write-Warning "key injection failed: $_"
         }
@@ -329,7 +391,7 @@ if ($Test -or $Shot) {
 
     if ($Shot) {
         try {
-            Save-Screenshot -Path $Shot -Port 4444
+            Save-Screenshot -Path $Shot -Port $QmpPort
             Write-Host ("screendump -> {0}" -f $Shot) -ForegroundColor Green
         } catch {
             Write-Warning "screendump failed: $_"
@@ -341,7 +403,7 @@ if ($Test -or $Shot) {
     # 并且要等到进程真的退出（最多 5 秒）再读日志。
     if (-not $q.HasExited) {
         try {
-            $qc = New-Object Net.Sockets.TcpClient('127.0.0.1', 4444)
+            $qc = New-Object Net.Sockets.TcpClient('127.0.0.1', $QmpPort)
             $qs = $qc.GetStream()
             $qr = New-Object IO.StreamReader($qs)
             $qw = New-Object IO.StreamWriter($qs)

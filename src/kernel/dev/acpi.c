@@ -8,7 +8,7 @@
  * ============================================================================= */
 #include "acpi.h"
 #include "../io.h"
-#include "../lib/kprintf.h"
+#include "include/kernel.h"
 
 static uint32_t pm1a_cnt;      /* PM1a 控制寄存器 I/O 端口 */
 static uint32_t smi_cmd;

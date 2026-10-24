@@ -1,8 +1,8 @@
 #include "pmm.h"
 #include "../io.h"
 #include "../types.h"
-#include "../heap.h"
-#include "../core/spinlock.h"
+#include "include/mm.h"
+#include "include/kernel.h"
 
 /* 物理页分配器的锁：位图、rover、free_pages、引用计数都受它保护 */
 static spinlock_t pmm_lock = SPINLOCK_INIT;

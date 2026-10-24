@@ -1,6 +1,6 @@
 #include "object.h"
-#include "../core/error.h"
-#include "../core/spinlock.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 /* 对象表：每个槽位记录类型、引用计数和指向真实数据的指针。
  * 数据本身由各子系统（ramfs / program / device）自己管理，

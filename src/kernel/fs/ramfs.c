@@ -9,13 +9,13 @@
  *   - 数据直接放在节点里（每文件 FS_FILE_MAX 字节），所以整卷都在内存中。
  * ============================================================================= */
 #include "fs.h"
-#include "../core/object.h"
-#include "../core/error.h"
-#include "../core/spinlock.h"
-#include "../core/rtc.h"
-#include "../block/block.h"
-#include "../lib/kprintf.h"
-#include "../lib/string.h"
+#include "include/mm.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/dev.h"
+#include "include/dev.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 /* =============================================================================
  * SMP 串行化

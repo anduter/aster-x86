@@ -2,6 +2,6 @@
 #define BLOCK_BLOCK_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../dev/block/block.h"
+#include "include/dev.h"
 
 #endif

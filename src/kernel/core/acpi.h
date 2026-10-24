@@ -2,6 +2,6 @@
 #define CORE_ACPI_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../dev/acpi.h"
+#include "include/dev.h"
 
 #endif

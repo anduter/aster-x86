@@ -2,6 +2,6 @@
 #define BLOCK_ATA_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../dev/block/ata.h"
+#include "include/dev.h"
 
 #endif

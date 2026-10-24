@@ -5,9 +5,9 @@
  * 所有持有写端的 fd（fork / dup2 会复制）都关闭后，读端读空返回 0。
  * ============================================================================= */
 #include "pipe.h"
-#include "../proc/proc.h"
-#include "../core/spinlock.h"
-#include "../lib/string.h"
+#include "include/proc.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 #define PIPE_MAX   8
 #define PIPE_SIZE  1024U

@@ -6,10 +6,10 @@
  * 仍然从 console 开始输出。
  * ============================================================================= */
 #include "splash.h"
-#include "../fb.h"
+#include "include/dev.h"
 #include "../io.h"
-#include "../lib/string.h"
-#include "../version.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 #define SPLASH_BG       0x081018U
 #define SPLASH_PANEL    0x0E1B2CU

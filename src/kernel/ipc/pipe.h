@@ -2,6 +2,6 @@
 #define IPC_PIPE_FORWARD_H
 
 /* migration forwarder: implementation moved; include the new path directly in new code. */
-#include "../fs/pipe.h"
+#include "include/fs.h"
 
 #endif

@@ -12,8 +12,8 @@
  * ============================================================================= */
 #include "fs.h"
 #include "fat16.h"
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 #define SELFTEST_RAM_PATH "system:/vfs_self.txt"
 #define SELFTEST_FAT_PATH "fat:/SELFTEST.TXT"

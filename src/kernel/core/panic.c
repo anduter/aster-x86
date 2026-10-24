@@ -5,11 +5,11 @@
  *       同时把纯文本原因写到 COM1，保证自动测试能抓到。
  * 之后关中断并永久停机。
  * ============================================================================= */
-#include "panic.h"
-#include "../dev/char/fb.h"
+#include "include/kernel.h"
+#include "include/dev.h"
 #include "../io.h"
-#include "../lib/kprintf.h"
-#include "../lib/string.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 /* 面板配色与尺寸 */
 #define PANIC_BORDER_COLOR 0xD00000U    /* 红色边框 */

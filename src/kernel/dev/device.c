@@ -1,10 +1,10 @@
 #include "device.h"
-#include "../mm/object.h"
-#include "../core/error.h"
-#include "../lib/kprintf.h"
-#include "../lib/string.h"
-#include "../console.h"
-#include "../intr/interrupt.h"
+#include "include/mm.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/dev.h"
+#include "include/proc.h"
 
 static device_t devices[DEV_MAX];
 static uint32_t count;

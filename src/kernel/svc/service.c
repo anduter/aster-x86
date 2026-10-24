@@ -5,10 +5,10 @@
  * 这是 init/supervisor 的服务发现最小地基。
  * ============================================================================= */
 #include "service.h"
-#include "../core/error.h"
-#include "../ipc/port.h"
-#include "../lib/string.h"
-#include "../core/spinlock.h"
+#include "include/kernel.h"
+#include "include/svc.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 typedef struct {
     bool     used;

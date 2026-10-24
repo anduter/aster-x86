@@ -5,10 +5,10 @@
  * 再把扇区内容作为一个只读文件暴露给 VFS。
  * ============================================================================= */
 #include "fs.h"
-#include "../core/service.h"
-#include "../ipc/channel.h"
-#include "../proc/proc.h"
-#include "../lib/string.h"
+#include "include/svc.h"
+#include "include/svc.h"
+#include "include/proc.h"
+#include "include/kernel.h"
 
 #define BLK_MAX_HANDLES 8U
 #define BLK_FILE_MAX    128U

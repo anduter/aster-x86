@@ -8,10 +8,10 @@
  *   - 两份 FAT 都回写；写完清空块缓存（块设备层写穿透会自动失效）
  * ============================================================================= */
 #include "fat16.h"
-#include "../block/block.h"
-#include "../core/error.h"
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
+#include "include/dev.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 #define FAT16_MAX_HANDLES 8
 

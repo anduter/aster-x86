@@ -10,14 +10,14 @@
  * 这里没有任何命令解析或交互逻辑 —— shell 是独立程序。
  * ============================================================================= */
 #include "demo.h"
-#include "../core/error.h"
-#include "../mm/object.h"
-#include "../core/program.h"
-#include "../dev/device.h"
-#include "../fs/fs.h"
-#include "../proc/cap.h"
-#include "../lib/kprintf.h"
-#include "../lib/string.h"
+#include "include/kernel.h"
+#include "include/mm.h"
+#include "include/userland.h"
+#include "include/dev.h"
+#include "include/fs.h"
+#include "include/security.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 void demo_run(void)
 {

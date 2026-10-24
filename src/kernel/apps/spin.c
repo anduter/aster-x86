@@ -7,10 +7,10 @@
  *   - 运行结束后自动 proc_exit，不影响后续交互。
  * ============================================================================= */
 #include "spin.h"
-#include "../proc/proc.h"
-#include "../core/percpu.h"
-#include "../intr/interrupt.h"
-#include "../lib/kprintf.h"
+#include "include/proc.h"
+#include "include/proc.h"
+#include "include/proc.h"
+#include "include/kernel.h"
 
 #define SPIN_TICKS 200U     /* 100Hz 下约 2 秒 */
 

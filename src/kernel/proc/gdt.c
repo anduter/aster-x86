@@ -9,8 +9,8 @@
  * AP 先加载自己的 GDT/TSS，再加载共享 IDT；当前 AP 仍关中断 idle。
  * ============================================================================= */
 #include "gdt.h"
-#include "../core/percpu.h"
-#include "../lib/string.h"
+#include "include/proc.h"
+#include "include/kernel.h"
 
 typedef struct {
     uint16_t limit_lo;

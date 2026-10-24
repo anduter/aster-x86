@@ -5,9 +5,9 @@
  * recv 从自己队列取。当前没有阻塞等待/ Port / 跨进程传递，先提供非阻塞语义。
  * ============================================================================= */
 #include "channel.h"
-#include "../lib/string.h"
-#include "../core/spinlock.h"
-#include "../proc/proc.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
+#include "include/proc.h"
 
 #define CHAN_WAIT_KEY(id) (0x43480000U | ((id) & 0xFFFFU))
 

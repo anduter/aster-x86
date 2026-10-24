@@ -11,8 +11,8 @@
  * ============================================================================= */
 #include "fs.h"
 #include "fat16.h"
-#include "../core/error.h"
-#include "../lib/string.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 /* 顺序有意义：特殊后端在前，ramfs 的 probe 永远返回 1，作为兜底放最后 */
 static const fs_backend_t *const backends[] = {

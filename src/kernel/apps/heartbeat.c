@@ -7,12 +7,12 @@
  *   3. 同时在串口留一行纯文本日志，供自动测试断言。
  * ============================================================================= */
 #include "heartbeat.h"
-#include "../proc/proc.h"
-#include "../core/percpu.h"
-#include "../intr/interrupt.h"
-#include "../console.h"
+#include "include/proc.h"
+#include "include/proc.h"
+#include "include/proc.h"
+#include "include/dev.h"
 #include "../io.h"
-#include "../lib/kprintf.h"
+#include "include/kernel.h"
 
 #define HEARTBEAT_PERIOD 100U   /* tick 数，100 Hz 下约 1 秒 */
 

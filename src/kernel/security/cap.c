@@ -5,10 +5,10 @@
  * close/revoke 释放一次对象引用。fd 表仍保留自己的 rights 字段。
  * ============================================================================= */
 #include "cap.h"
-#include "../core/error.h"
-#include "../core/program.h"
-#include "../lib/string.h"
-#include "../lib/kprintf.h"
+#include "include/kernel.h"
+#include "include/userland.h"
+#include "include/kernel.h"
+#include "include/kernel.h"
 
 static uint32_t make_handle(uint32_t slot, uint16_t gen)
 {

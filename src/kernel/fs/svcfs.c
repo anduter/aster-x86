@@ -5,10 +5,10 @@
  * 内容缓存在内核句柄里；文件系统语义由 ring3 fsd 提供。
  * ============================================================================= */
 #include "fs.h"
-#include "../core/service.h"
-#include "../ipc/channel.h"
-#include "../proc/proc.h"
-#include "../lib/string.h"
+#include "include/svc.h"
+#include "include/svc.h"
+#include "include/proc.h"
+#include "include/kernel.h"
 
 #define SVC_MAX_HANDLES 8U
 #define SVC_FILE_MAX    128U

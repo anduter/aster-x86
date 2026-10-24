@@ -6,7 +6,7 @@
  * ============================================================================= */
 #include "kprintf.h"
 #include "string.h"
-#include "../console.h"
+#include "include/dev.h"
 
 #define KPRINTF_BUF_SIZE 512
 
