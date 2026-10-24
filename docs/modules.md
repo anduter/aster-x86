@@ -110,10 +110,10 @@ M8 → 只依赖 include/abi.h
 
 | 项 | 迁移前 | 现在 |
 |---|---|---|
-| 内核目录 | core 45 文件混杂 | core 29 文件（其中 14 个是转发头，实际实现 6 个） |
-| 新模块目录 | — | `mm/ proc/ dev/{block,net,intc} svc/ security/` |
-| 跨模块 include 违规 | 137 | **114**（已排除 19 个转发头、以及 error/atomic/spinlock 原语） |
-| 回归 | 94/94 | **97/97 PASS** |
+| 内核目录 | core 45 文件混杂 | core 26 文件（18 个转发头 + ksym/splash/atomics/error 共 7 个实现文件） |
+| 新模块目录 | — | `mm/ proc/ dev/{block,net,intc,char} net/ svc/ security/` |
+| 跨模块 include 违规 | 137 | **116**（已排除 28 个转发头、以及 error/atomic/spinlock 原语） |
+| 回归 | 94/94 | **97/97 PASS**（每批搬完后复测） |
 
 已落地：
 
@@ -137,3 +137,15 @@ M8 → 只依赖 include/abi.h
 3. `core/net.c` → `net/`（等 net 会话提交）；
 4. 拆 `syscall.c` 到各模块 `*_syscall.c`（最大收益，最后做）；
 5. 全部调用点切到新路径后，删除 19 个转发头与 `core/` 里的空壳。
+
+### 第三批（16:5x）
+
+- console.c/h、b.c/h → dev/char/（根目录转发头保留）；
+- ipc/pipe.c/h → s/（pipe 属 fd 语义）；
+- core/net.c/h → 
+et/；
+- core/supervisor.c/h → svc/；
+- core/program.c/h → user/（M8 程序注册表）；
+- 新增 	ools/fix-includes.ps1：按 basename 自动重写相对 include（跳过转发头，冲突只报告不改）。
+
+剩余：intr/（trap/异常/系统调用门）→ proc/trap/；根目录 kernel.c/panic.c/heap.h 收口；syscall.c 拆分。
