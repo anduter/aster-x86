@@ -24,6 +24,17 @@ static inline int fs_rename(const char *oldpath, const char *newpath)
 int fd_read(int fd, void *buf, int len);
 int fd_write(int fd, const void *buf, int len);
 
+/* ---- 进程/内存（ABI v1.1，pm 会话） ---- */
+/* 等待子进程：options=0 阻塞；WNOHANG 时无可回收子进程立即返回 0。
+ * 成功回收返回子 pid；失败 -1。 */
+int waitpid(int pid, int *status, int options);
+/* 当前进程的父 pid；无父返回 0 */
+int getppid(void);
+/* 修改本进程一段用户内存的保护位（PROT_*）；成功 0，失败 -1 */
+int mprotect(void *addr, unsigned int len, int prot);
+/* 设置信号处理函数（SIG_DFL/SIG_IGN/用户地址）；返回旧 handler，失败 -1 */
+int signal(int sig, unsigned int handler);
+
 int putchar(int c);
 int puts(const char *s);
 int printf(const char *fmt, ...);

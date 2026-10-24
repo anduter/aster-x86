@@ -448,6 +448,251 @@ static void cmd_fork(void)
 static const unsigned char rodata_ret[8] __attribute__((section(".rodata"), used)) =
     { 0xC3, 0, 0, 0, 0, 0, 0, 0 };
 
+/* =============================================================================
+ * B（pm 会话）：进程/内存补缺自检
+ *   getppid / waitpid(WNOHANG) / SIGCHLD（默认忽略、显式 handler、SIG_IGN）/
+ *   mprotect（写保护、NX、COW、非法参数）。
+ * 期望串口行见 docs/process-memory.md §5.7。
+ *
+ * 注意：shell ELF 要装进 ramfs 的 32KB 单文件上限（FS_FILE_MAX），而这一块
+ * 自检代码在 -O0 下会把 .text 顶过 0x40004000 边界、让 .rodata 整体后移一页。
+ * 这里只对“自检区块 + cmd_sectest”用 Os 编译（语义不变，只是代码更小），
+ * 其余 shell 代码保持 -O0。改这里时记得跑一次 build 看 user_shell.elf 大小。
+ * ============================================================================= */
+#pragma GCC push_options
+#pragma GCC optimize ("Os")
+
+static volatile int g_sigchld_count;
+
+static void sectest_sigchld_handler(int sig)
+{
+    (void)sig;
+    g_sigchld_count++;
+}
+
+/* getppid：子进程把看到的父 pid 当作退出码带回，父进程与自己的 pid 比较 */
+static void sectest_getppid(void)
+{
+    int pid = sc(SYS_FORK, 0, 0, 0);
+    int st = -1;
+    int w;
+
+    if (pid == 0) {
+        sc(SYS_EXIT, getppid(), 0, 0);      /* 退出码 = 子进程看到的 ppid */
+    }
+    if (pid < 0) {
+        putstr("sectest: getppid FAIL (fork)\n");
+        return;
+    }
+
+    w = waitpid(pid, &st, 0);
+    printf("sectest: getppid %s (child sees %d, self %d)\n",
+           (w == pid && st == sc(SYS_GETPID, 0, 0, 0)) ? "ok" : "FAIL",
+           st, sc(SYS_GETPID, 0, 0, 0));
+}
+
+/* waitpid(WNOHANG)：子进程还活着时必须返回 0，退出后回收并拿到 status */
+static void sectest_waitpid(void)
+{
+    int pid = sc(SYS_FORK, 0, 0, 0);
+    int st = -1;
+    int first;
+    int r;
+    int spins;
+
+    if (pid == 0) {
+        sc(SYS_SLEEP, 200, 0, 0);       /* 200ms：保证父进程第一次 WNOHANG 时还活着 */
+        sc(SYS_EXIT, 7, 0, 0);
+    }
+    if (pid < 0) {
+        putstr("sectest: waitpid FAIL (fork)\n");
+        return;
+    }
+
+    first = waitpid(pid, &st, WNOHANG);
+    r = first;
+    spins = 0;
+    /* 每次轮询睡 10ms：child 要 200ms 才退出，纯 yield 会在它醒来前就转完 */
+    while (r == 0 && spins++ < 100) {
+        sc(SYS_SLEEP, 10, 0, 0);
+        r = waitpid(pid, &st, WNOHANG);
+    }
+
+    if (first == 0 && r == pid && st == 7) {
+        putstr("sectest: waitpid wnohang ok\n");
+    } else {
+        printf("sectest: waitpid wnohang FAIL (first=%d r=%d st=%d)\n",
+               first, r, st);
+    }
+
+    /* 没有匹配的子进程：本实现按约定立即返回 0（不阻塞、不报 -1） */
+    if (waitpid(99999, &st, WNOHANG) == 0) {
+        putstr("sectest: waitpid no-child ok\n");
+    } else {
+        putstr("sectest: waitpid no-child FAIL\n");
+    }
+}
+
+/* SIGCHLD：默认忽略不能杀父进程；显式 handler 必须收到；SIG_IGN 不影响回收 */
+static void sectest_sigchld(void)
+{
+    int pid;
+    int st = -1;
+    int w;
+
+    /* a) 默认动作 = 忽略 */
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) sc(SYS_EXIT, 0, 0, 0);
+    if (pid < 0) {
+        putstr("sectest: sigchld FAIL (fork)\n");
+        return;
+    }
+    sc(SYS_SLEEP, 100, 0, 0);
+    w = waitpid(pid, &st, 0);
+    if (w == pid) putstr("sectest: sigchld default ignored ok\n");
+    else printf("sectest: sigchld default ignored FAIL (wait=%d)\n", w);
+
+    /* b) 显式 handler：子进程退出后至少跑一次 */
+    if (signal(SIGCHLD, (unsigned int)sectest_sigchld_handler) < 0) {
+        putstr("sectest: sigchld handler FAIL (sigaction)\n");
+        return;
+    }
+    g_sigchld_count = 0;
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) sc(SYS_EXIT, 0, 0, 0);
+    sc(SYS_SLEEP, 150, 0, 0);
+    w = waitpid(pid, &st, 0);
+    printf("sectest: sigchld handler %s (sigchld=%d wait=%d)\n",
+           (g_sigchld_count > 0 && w == pid) ? "ok" : "FAIL",
+           g_sigchld_count, w);
+
+    /* c) SIG_IGN：SIGCHLD 被丢弃，父进程存活，僵尸仍能 waitpid 回收 */
+    signal(SIGCHLD, SIG_IGN);
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) sc(SYS_EXIT, 0, 0, 0);
+    sc(SYS_SLEEP, 100, 0, 0);
+    w = waitpid(pid, &st, 0);
+    printf("sectest: sigchld ignored %s\n", (w == pid) ? "ok" : "FAIL");
+
+    signal(SIGCHLD, SIG_DFL);           /* 恢复默认（默认=忽略） */
+}
+
+/* mprotect：写保护、NX/EXEC 切换、COW 私有化、非法参数 */
+static void sectest_mprotect(void)
+{
+    volatile unsigned char *p;
+    int va;
+    int pid;
+    int st;
+    int w;
+
+    va = sc(SYS_MMAP, 4096, 0, 0);
+    if (va < 0) {
+        putstr("sectest: mprotect FAIL (mmap)\n");
+        return;
+    }
+    p = (volatile unsigned char *)(unsigned int)va;
+    p[0] = 0x41;
+
+    /* a) 子进程改成只读后写：必须 #PF(142)，不能“存活” */
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) {
+        if (mprotect((void *)(unsigned int)va, 4096, PROT_READ) != 0) {
+            sc(SYS_EXIT, 99, 0, 0);
+        }
+        p[1] = 0x42;
+        putstr("sectest: mprotect ro SURVIVED\n");
+        sc(SYS_EXIT, 0, 0, 0);
+    }
+    st = -1;
+    w = waitpid(pid, &st, 0);
+    printf("sectest: mprotect ro deny %s (status=%d)\n",
+           (w == pid && st == 142) ? "ok" : "FAIL", st);
+
+    /* b) NX -> EXEC：mmap 页写一条 ret，mprotect 后可执行 */
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) {
+        volatile unsigned char *q;
+        int qa = sc(SYS_MMAP, 4096, 0, 0);
+
+        if (qa < 0) sc(SYS_EXIT, 98, 0, 0);
+        q = (volatile unsigned char *)(unsigned int)qa;
+        q[0] = 0xC3;                    /* ret */
+        if (mprotect((void *)(unsigned int)qa, 4096,
+                     PROT_READ | PROT_EXEC) != 0) {
+            sc(SYS_EXIT, 97, 0, 0);
+        }
+        __asm__ volatile ("call *%0" : : "r"((unsigned int)qa) : "memory");
+        sc(SYS_EXIT, 0, 0, 0);          /* ret 正常返回说明执行权限已打开 */
+    }
+    st = -1;
+    w = waitpid(pid, &st, 0);
+    printf("sectest: mprotect exec %s (status=%d)\n",
+           (w == pid && st == 0) ? "ok" : "FAIL", st);
+
+    /* c) EXEC -> NX：先给执行权、再收回，执行应 #PF(142) */
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) {
+        volatile unsigned char *q;
+        int qa = sc(SYS_MMAP, 4096, 0, 0);
+
+        if (qa < 0) sc(SYS_EXIT, 96, 0, 0);
+        q = (volatile unsigned char *)(unsigned int)qa;
+        q[0] = 0xC3;
+        if (mprotect((void *)(unsigned int)qa, 4096,
+                     PROT_READ | PROT_EXEC) != 0) {
+            sc(SYS_EXIT, 95, 0, 0);
+        }
+        if (mprotect((void *)(unsigned int)qa, 4096, PROT_READ) != 0) {
+            sc(SYS_EXIT, 94, 0, 0);
+        }
+        __asm__ volatile ("call *%0" : : "r"((unsigned int)qa) : "memory");
+        putstr("sectest: mprotect nx SURVIVED\n");
+        sc(SYS_EXIT, 0, 0, 0);
+    }
+    st = -1;
+    w = waitpid(pid, &st, 0);
+    printf("sectest: mprotect nx deny %s (status=%d)\n",
+           (w == pid && st == 142) ? "ok" : "FAIL", st);
+
+    /* d) COW：父页 0xAB -> fork -> 子 mprotect(WRITE) 后写 0xCD；
+     *    父进程读回必须仍是 0xAB（mprotect 请求写会先私有化） */
+    p[0] = 0xAB;
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) {
+        if (mprotect((void *)(unsigned int)va, 4096,
+                     PROT_READ | PROT_WRITE) != 0) {
+            sc(SYS_EXIT, 93, 0, 0);
+        }
+        p[0] = 0xCD;
+        sc(SYS_EXIT, 0, 0, 0);
+    }
+    st = -1;
+    w = waitpid(pid, &st, 0);
+    printf("sectest: mprotect cow %s (parent byte=0x%02x status=%d)\n",
+           (w == pid && st == 0 && p[0] == 0xAB) ? "ok" : "FAIL", p[0], st);
+
+    /* e) 非法参数：非对齐 / len=0 / 内核地址 / 未知 prot 位，全部 -1 */
+    {
+        int bad = 0;
+
+        if (mprotect((void *)(unsigned int)(va + 1), 4096, PROT_READ) == -1) bad++;
+        if (mprotect((void *)(unsigned int)va, 0, PROT_READ) == -1) bad++;
+        if (mprotect((void *)0x80000000u, 4096, PROT_READ) == -1) bad++;
+        if (mprotect((void *)(unsigned int)va, 4096, 0x8) == -1) bad++;
+        printf("sectest: mprotect invalid %s (bad=%d)\n",
+               (bad == 4) ? "ok" : "FAIL", bad);
+    }
+}
+
+static void sectest_process_memory(void)
+{
+    sectest_getppid();
+    sectest_waitpid();
+    sectest_sigchld();
+    sectest_mprotect();
+}
+
 /* 安全回归：子进程分别尝试写代码页、写栈 guard、执行栈、执行 rodata。 */
 static void cmd_sectest(void)
 {
@@ -805,7 +1050,12 @@ static void cmd_sectest(void)
     /* 用户触发 TCP echo：boot 不再做 TCP，避免 host listener 未就绪拖死启动。 */
     if (sc(SYS_TCP_TEST, 0, 0, 0) == 0) putstr("sectest: tcp ok\n");
     else putstr("sectest: tcp FAIL\n");
+
+    /* B（pm 会话）：getppid / waitpid(WNOHANG) / SIGCHLD / mprotect */
+    sectest_process_memory();
 }
+
+#pragma GCC pop_options
 
 /* ---------------- 历史记录 ---------------- */
 

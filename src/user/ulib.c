@@ -51,6 +51,28 @@ int fd_write(int fd, const void *buf, int len)
     return syscall3(SYS_FWRITE, fd, (int)buf, len);
 }
 
+/* ---- 进程/内存（ABI v1.1，pm 会话） ---- */
+
+int waitpid(int pid, int *status, int options)
+{
+    return syscall3(SYS_WAITPID, pid, (int)status, options);
+}
+
+int getppid(void)
+{
+    return syscall3(SYS_GETPPID, 0, 0, 0);
+}
+
+int mprotect(void *addr, unsigned int len, int prot)
+{
+    return syscall3(SYS_MPROTECT, (int)(usize)addr, (int)len, prot);
+}
+
+int signal(int sig, unsigned int handler)
+{
+    return syscall3(SYS_SIGACTION, sig, (int)handler, 0);
+}
+
 int putchar(int c)
 {
     char ch = (char)c;
