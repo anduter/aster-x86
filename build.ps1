@@ -14,7 +14,7 @@ param(
     [string]$Shot = '',
     [int]$Mem = 256,
     [string]$Vga = 'std',
-    [string]$Cpu = 'max',
+    [string]$Cpu = 'qemu32,+nx,+smep,+smap',
     [int]$FontScale = 1,
     [int]$TimeoutSec = 12,
     [string]$Keys = "help`nfork`nsectest`necho hi`nreexec"
@@ -239,6 +239,30 @@ if ($Test -or $Shot) {
         }
     }
 
+    $tcpEcho = $null
+    if ($Test) {
+        $tcpEcho = Start-Job -ArgumentList $root -ScriptBlock {
+            param($root)
+            $log = Join-Path $root 'tcp_host.log'
+            "listen" | Set-Content -Path $log -Encoding ASCII
+            $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 12345)
+            try {
+                $l.Start()
+                for ($i = 0; $i -lt 8; $i++) {
+                    $c = $l.AcceptTcpClient()
+                    "accept $i" | Add-Content -Path $log -Encoding ASCII
+                    $s = $c.GetStream()
+                    $buf = New-Object byte[] 64
+                    $n = $s.Read($buf, 0, $buf.Length)
+                    "read $n" | Add-Content -Path $log -Encoding ASCII
+                    if ($n -gt 0) { $s.Write($buf, 0, $n); $s.Flush() }
+                    $c.Close()
+                }
+            } catch { "error $_" | Add-Content -Path $log -Encoding ASCII }
+            $l.Stop()
+        }
+    }
+
     $qargs = @(
         '-drive', ("file={0},format=raw,if=floppy" -f ($imgPath -replace '\\', '/')), '-boot', 'a',
         '-drive', $diskArg,
@@ -254,9 +278,9 @@ if ($Test -or $Shot) {
     $q = Start-Process -FilePath 'qemu-system-i386' -ArgumentList $qargs -PassThru -WindowStyle Hidden
 
     # 等"shell 真的起来了"再注入，而不是固定 sleep：
-    # 启动路径越加越长（服务注册、echosvc、ring3probe 等），固定 10 秒会
-    # 在慢一点的机器上把按键注入到 shell 还没开始读键盘的时候。
-    $bootDeadline = (Get-Date).AddSeconds([Math]::Max(20, $TimeoutSec))
+    # 启动路径越加越长（服务注册、echosvc、ring3probe、net 的 TCP 超时探测等），
+    # 固定 10 秒会在慢一点的机器上把按键注入到 shell 还没开始读键盘的时候。
+    $bootDeadline = (Get-Date).AddSeconds([Math]::Max(60, $TimeoutSec))
     while ((Get-Date) -lt $bootDeadline) {
         if (Test-Path $serial) {
             $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
@@ -274,8 +298,24 @@ if ($Test -or $Shot) {
         }
     }
 
-    # 给注入的命令留出执行时间（help/fork/sectest 都要跑一会儿）
-    Start-Sleep -Seconds 6
+    # 等注入的命令跑完：不再猜固定秒数或依赖某一行日志，而是看串口"是否还在增长"。
+    # 连续 3 秒没有新输出即认为命令都执行完了；最多等 90 秒。
+    # （help/fork/sectest/reexec 的耗时随负载变化，固定等待在慢机上一定翻车。）
+    $quietDeadline = (Get-Date).AddSeconds(90)
+    $lastLen = -1
+    $quietSince = Get-Date
+    Start-Sleep -Seconds 2
+    while ((Get-Date) -lt $quietDeadline) {
+        $len = 0
+        if (Test-Path $serial) { $len = (Get-Item $serial).Length }
+        if ($len -ne $lastLen) {
+            $lastLen = $len
+            $quietSince = Get-Date
+        } elseif (((Get-Date) - $quietSince).TotalSeconds -ge 3) {
+            break
+        }
+        Start-Sleep -Milliseconds 300
+    }
 
     if ($Shot) {
         try {
@@ -286,10 +326,37 @@ if ($Test -or $Shot) {
         }
     }
 
+    # 关键：-serial file: 是带缓冲的，Stop-Process 强杀会丢掉未刷盘的日志，
+    # harness 只读到前 1~2KB，导致大量“假失败”。先走 QMP quit 让 QEMU 正常退出，
+    # 并且要等到进程真的退出（最多 5 秒）再读日志。
+    if (-not $q.HasExited) {
+        try {
+            $qc = New-Object Net.Sockets.TcpClient('127.0.0.1', 4444)
+            $qs = $qc.GetStream()
+            $qr = New-Object IO.StreamReader($qs)
+            $qw = New-Object IO.StreamWriter($qs)
+            $null = $qr.ReadLine()                      # QMP greeting
+            $qw.WriteLine('{"execute":"qmp_capabilities"}'); $qw.Flush()
+            $null = $qr.ReadLine()
+            $qw.WriteLine('{"execute":"quit"}'); $qw.Flush()
+            $qc.Close()
+        } catch {
+            # QMP 不可用就退回强杀
+        }
+        for ($i = 0; $i -lt 50; $i++) {
+            if ($q.HasExited) { break }
+            Start-Sleep -Milliseconds 100
+        }
+    }
     if (-not $q.HasExited) { Stop-Process -Id $q.Id -Force }
+    Start-Sleep -Milliseconds 300
     if ($udpEcho -ne $null) {
         Stop-Job -Job $udpEcho -ErrorAction SilentlyContinue
         Remove-Job -Job $udpEcho -Force -ErrorAction SilentlyContinue
+    }
+    if ($tcpEcho -ne $null) {
+        Stop-Job -Job $tcpEcho -ErrorAction SilentlyContinue
+        Remove-Job -Job $tcpEcho -Force -ErrorAction SilentlyContinue
     }
 
     $out = if (Test-Path $serial) { Get-Content $serial -Raw } else { '' }
@@ -336,8 +403,9 @@ if ($Test -or $Shot) {
             @{ Name = 'native port connect';      Ok = ($out -match 'native: port ok') },
             @{ Name = 'service registry';          Ok = ($out -match 'native: service ok') },
             @{ Name = 'supervisor service';        Ok = ($out -match 'native: supervisor ok') },
-            @{ Name = 'supervisor 自动拉起 echo';  Ok = ($out -match 'supervisor: restart echo -> pid \d+') },
             @{ Name = 'service manifest';          Ok = ($out -match 'native: manifest ok') },
+            @{ Name = 'supervisor 自动重启 echo';  Ok = ($out -match 'supervisor: restart echo -> pid \d+') },
+            @{ Name = 'restart 后服务可用';        Ok = ($out -match 'native: restart ok') },
             @{ Name = 'service 生命周期无泄漏';    Ok = ($out -match 'service: lifecycle ok \(200 cycles\)') },
             @{ Name = '沙箱拒绝 SYS_OPEN';        Ok = ($out -match 'sandbox: open denied') },
             @{ Name = '沙箱拒绝 native HANDLE_DUP'; Ok = ($out -match 'sandbox: native denied') },
@@ -375,6 +443,7 @@ if ($Test -or $Shot) {
             @{ Name = '信号处理函数可用';         Ok = (($out -match 'ushell: caught signal 15') -and ($out -match 'ushell: signal selftest done')) },
             @{ Name = 'FAT16 交换盘已挂载';       Ok = ($out -match 'fat16: ata1 mounted as fat:/') },
             @{ Name = 'FAT16 能读宿主文件';       Ok = ($out -match 'fat16: host\.txt = hello from host') },
+            @{ Name = 'VFS 后端一致性';           Ok = ($out -match 'fs: backend selftest ok') },
             @{ Name = 'PCI 枚举可用';             Ok = ($out -match 'pci: [1-9]\d* device') },
             @{ Name = 'ACPI 表可用';              Ok = ($out -match 'acpi: PM1a_CNT=0x') },
             @{ Name = 'APIC 已探测';              Ok = ($out -match 'apic: LAPIC present') },
@@ -387,6 +456,8 @@ if ($Test -or $Shot) {
             @{ Name = 'UDP echo 可用';            Ok = ($out -match 'net: UDP echo reply') },
             @{ Name = '用户态 UDP';               Ok = ($out -match 'sectest: udp ok') },
             @{ Name = 'socket fd UDP';            Ok = ($out -match 'sectest: socket udp ok') },
+            @{ Name = 'VFS chroot 越界拒绝';      Ok = ($out -match 'sectest: chroot ok') },
+            @{ Name = 'VFS 打开 10 文件';         Ok = ($out -match 'sectest: fd limit ok') },
             @{ Name = '权限模型可用';             Ok = ($out -match 'auth: permission model ok') },
             @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: 2 cpu') },
             @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*2 cpu\(s\) discovered.*AP startup pending') },
