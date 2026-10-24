@@ -105,3 +105,35 @@ M8 → 只依赖 include/abi.h
 | 8 | 拆 `syscall.c` / `native.c` 到各模块 `*_syscall.c` | 待做 |
 
 > 规则：**处于其它会话未提交状态（`git status` 显示 M/??）的文件，等归属会话提交后再搬**，避免路径冲突。
+
+## 6. 迁移进展（2026-10-24 16:50）
+
+| 项 | 迁移前 | 现在 |
+|---|---|---|
+| 内核目录 | core 45 文件混杂 | core 29 文件（其中 14 个是转发头，实际实现 6 个） |
+| 新模块目录 | — | `mm/ proc/ dev/{block,net,intc} svc/ security/` |
+| 跨模块 include 违规 | 137 | **114**（已排除 19 个转发头、以及 error/atomic/spinlock 原语） |
+| 回归 | 94/94 | **97/97 PASS** |
+
+已落地：
+
+- **M2 内存**：`heap.c/h`、`object.c/h`、`user_layout.h` → `mm/`（`docs/modules.md` 步骤 1）；
+- **M7 安全**：`trust`、`cpu`、`cap` → `security/`；
+- **M3 设备**：`device/pci/acpi/rtc` → `dev/`；`ata/block` → `dev/block/`；`apic/ioapic/madt` → `dev/intc/`；`e1000` → `dev/net/`；
+- **M6 服务**：`service`、`service_selftest`、`channel` → `svc/`；
+- **M1 进程**：`smp`、`percpu`、`gdt` → `proc/`；
+- **M0**：`demo` → `apps/`。
+
+暂缓（文件处于其它会话未提交状态，等提交后再搬）：
+
+- `core/net.c`（M5 网络）、`core/supervisor.c`（M6）、`core/program.c`（M8）；
+- `fs/fs.h`、`fs/vfs.c`、`fs/svcfs.c`、`fs/blkfs.c`（M4，其中后两个是新增未跟踪文件）；
+- `intr/syscall.c`、`intr/syscall.h`、`proc/proc.h`、`proc/process.c`、`ipc/port.h`、`user/user_mode.*`、`user/user_demo.asm`、`apps/svcwatch.c`、`kernel.c`、`version.h`。
+
+下一步（按风险）：
+
+1. `console.c`/`fb.c` → `dev/char/`（根目录深度变化，需要转发头 + 内部 include 调整）；
+2. `intr/{idt,fault,interrupt,uaccess*}` → `proc/trap/`（M1 陷阱入口）；
+3. `core/net.c` → `net/`（等 net 会话提交）；
+4. 拆 `syscall.c` 到各模块 `*_syscall.c`（最大收益，最后做）；
+5. 全部调用点切到新路径后，删除 19 个转发头与 `core/` 里的空壳。
