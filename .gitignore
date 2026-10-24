@@ -1,6 +1,10 @@
 # ---- 构建产物 ----
 /dist/
 /obj/
+# 并行会话的隔离产物（build.ps1 -ObjDir/-DistDir）
+/.obj-*/
+/.dist-*/
+/serial-*.log
 *.img
 *.o
 *.bin

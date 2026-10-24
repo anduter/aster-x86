@@ -27,7 +27,7 @@
 | 命令 | 作用 |
 |---|---|
 | `.\build.ps1` | 构建 `dist\floppy.img`（含内核签名、shell 签名、启动验证器） |
-| `.\build.ps1 -Test` | 全量回归（当前 **94 项**，需独占 `obj/`、`dist/`、QMP 4444） |
+| `.\build.ps1 -Test` | 全量回归（当前 **97 项**）。默认占用 `obj/`、`dist/`、QMP 4444、`serial.log`；并行会话用 `-ObjDir/-DistDir/-QmpPort/-SerialLog` 隔离（宿主 12345 回显端口仍只能单跑） |
 | `.\build.ps1 -Run` | 交互运行（挂 `dist\disk.img` + `dist\fat.img`） |
 | `.\tools\watch-changes.ps1` | 事件驱动变更监视（提交/版本/文件集合变化时触发） |
 

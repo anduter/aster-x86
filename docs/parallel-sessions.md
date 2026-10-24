@@ -28,13 +28,30 @@
 
 ## 3. 构建与测试必须串行
 
-- `build.ps1` 固定使用 `obj/`、`dist/`、QEMU QMP 端口 **4444** 和 `serial.log`；
-  两个会话同时跑会互相覆盖产物、抢端口。
-- 约定：**同一时刻只允许一个会话运行 `build.ps1`**。
-  运行前先确认：无 `qemu-system-i386` 进程、`serial.log` 不被占用。
-- 手工 QEMU 验证请用各自端口段：
-  - 本会话：monitor `4480+`、serial `5580+`
-  - 新会话：monitor `4490+`、serial `5590+`
+`build.ps1` 已参数化，**编译产物和 QEMU 不再共享**（2026-10-24 起）：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `-ObjDir` | `obj` | 目标文件目录（含 `nasm_paths.inc`、签名 C 文件） |
+| `-DistDir` | `dist` | `floppy.img`、`disk.img`、`fat.img`、`tcp_host.log` |
+| `-QmpPort` | `4444` | QEMU QMP（按键注入、截屏、正常退出） |
+| `-SerialLog` | `serial.log` | 串口日志路径 |
+
+各会话固定一套（建议写进自己的常用命令）：
+
+```powershell
+.\build.ps1 -Test -ObjDir .obj-a -DistDir .dist-a -QmpPort 4481 -SerialLog serial-a.log
+.\build.ps1 -Test -ObjDir .obj-b -DistDir .dist-b -QmpPort 4491 -SerialLog serial-b.log
+```
+
+- **仍必须串行的只有 `-Test` 的网络回显**：客户机把回显端口 12345 编进了内核
+  （`NET_UDP_LOCAL_PORT` / `NET_TCP_PORT` / `user_shell.c`），宿主监听也固定 12345，
+  两个 `-Test` 同时跑会互相吃包。
+  脚本现在会在启动 QEMU 前探测 12345 与 QMP 端口，被占用就**立刻报错退出**，
+  而不是跑出一堆假失败。看到“宿主 12345 端口已被占用”就等对方跑完。
+- **纯构建（不带 `-Test`/`-Shot`）可以完全并行**，已验证两路同时构建互不影响。
+- 手工 QEMU 验证仍用各自端口段：本会话 monitor `4480+`、serial `5580+`；
+  新会话 monitor `4490+`、serial `5590+`。
 
 ## 4. Git 约定
 
@@ -57,6 +74,7 @@
 | UDP 子代理 | 用户态 UDP 接收 | 2026-10-24 | 已完成（net.c/net.h/syscall.c） |
 | fs 会话 | 文件系统 / VFS 后端接口（`fs/*`） | 2026-10-24 | 进行中 |
 | 工程监理会话 | 进度汇报、完整度核查、文件整理（不改业务代码） | 2026-10-24 | 进行中 |
+| 构建会话 | `build.ps1` 产物 / QMP / 串口参数化（见第 3 节） | 2026-10-24 | 已完成（并行构建 + 97/97） |
 | 新会话 | （待登记） | | |
 
 ## 7. 已完成里程碑（本会话）
