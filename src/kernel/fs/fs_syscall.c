@@ -10,13 +10,9 @@
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/fs.h"
+#include "include/proc.h"
 #include "fs_syscall.h"
-#include "../proc/proc.h"
-#include "../proc/proc_internal.h"
-#include "../proc/trap/interrupt.h"
-#include "../proc/trap/syscall.h"
 #include "../proc/trap/syscall_internal.h"
-#include "../proc/trap/uaccess.h"
 
 /* ---- 文件类系统调用的用户参数处理 ---- */
 

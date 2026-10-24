@@ -6,7 +6,7 @@
 #include "svc/service.h"
 #include "svc/supervisor.h"
 #include "svc/channel.h"
-#include "ipc/port.h"
+#include "svc/port.h"
 
 /* selftests */
 void service_lifecycle_selftest(void);

@@ -8,15 +8,13 @@
 #include "native.h"
 #include "interrupt.h"
 #include "uaccess.h"
-#include "../../dev/char/console.h"
+#include "include/dev.h"
+#include "include/svc.h"
 #include "../../core/error.h"
 #include "../../lib/kprintf.h"
 #include "../../lib/string.h"
 #include "../proc.h"
 #include "../proc_internal.h"
-#include "../../svc/channel.h"
-#include "../../ipc/port.h"
-#include "../../svc/service.h"
 
 #define NATIVE_HANDLE_MAX 16
 /* v0 只声明真正实现的能力；sealed image / sandbox 尚未接入，不能提前置位。 */

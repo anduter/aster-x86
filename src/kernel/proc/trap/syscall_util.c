@@ -6,7 +6,7 @@
 #include "syscall_internal.h"
 #include "uaccess.h"
 #include "../../core/error.h"
-#include "../../fs/fs.h"
+#include "include/fs.h"
 #include "../proc.h"
 #include "../proc_internal.h"
 #include "../../lib/string.h"

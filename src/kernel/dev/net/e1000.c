@@ -11,8 +11,7 @@
  * ============================================================================= */
 #include "e1000.h"
 #include "../pci.h"
-#include "../../mm/vmm.h"
-#include "../../mm/pmm.h"
+#include "include/mm.h"
 #include "../../core/error.h"
 #include "../../lib/string.h"
 #include "../../lib/kprintf.h"

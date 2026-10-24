@@ -2,7 +2,7 @@
 #define MISC_SYSCALL_H
 
 #include "../types.h"
-#include "../proc/trap/interrupt.h"
+#include "include/proc.h"
 
 /* 杂项/调试组 legacy 系统调用（int 0x81）：
  * write / getchar / reboot / oops / panic / pci / poweroff / hang /

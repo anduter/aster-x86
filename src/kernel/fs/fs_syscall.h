@@ -2,7 +2,7 @@
 #define FS_SYSCALL_H
 
 #include "../types.h"
-#include "../proc/trap/interrupt.h"
+#include "include/proc.h"
 
 /* 文件系统组 legacy 系统调用（int 0x81）：open/read/write/close/list/drives/
  * mkdir/unlink/stat/chdir/chroot/getcwd/sync/time/fsck/chmod/chown */

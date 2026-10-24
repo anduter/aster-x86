@@ -2,12 +2,11 @@
  * net/net_syscall.c - 网络相关系统调用（UDP/Socket 组，M5）
  * ============================================================================= */
 #include "../types.h"
-#include "../proc/trap/interrupt.h"
-#include "../proc/trap/syscall_internal.h"
+#include "include/proc.h"
 #include "include/net.h"
 #include "include/kernel.h"
 #include "net_syscall.h"
-#include "../proc/trap/syscall.h"
+#include "../proc/trap/syscall_internal.h"
 
 static int udp_recv_yield(uint16_t local_port, uint8_t ip[4], uint16_t *port,
                           void *buf, uint32_t len, int allow_loopback)

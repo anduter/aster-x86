@@ -2,10 +2,9 @@
 #include "../../types.h"
 #include "include/kernel.h"
 #include "../proc.h"
-#include "../../user/user_mode.h"
-#include "../../core/ksym.h"
 #include "../smp.h"
-#include "../../mm/vmm.h"
+#include "include/userland.h"
+#include "include/mm.h"
 #include "../../lib/kprintf.h"
 
 /* ---- IDT 表项（x86 中断门，8 字节） ---- */

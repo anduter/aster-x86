@@ -6,12 +6,9 @@
 #include "../types.h"
 #include "include/kernel.h"
 #include "include/mm.h"
+#include "include/proc.h"
 #include "mm_syscall.h"
-#include "../proc/proc.h"
-#include "../proc/trap/interrupt.h"
-#include "../proc/trap/syscall.h"
 #include "../proc/trap/syscall_internal.h"
-#include "../proc/trap/uaccess.h"
 
 /* 用户堆：布局由 user_layout.h 统一提供（0x40200000 起，1MB 上限）。 */
 #define USER_HEAP_BASE USER_LAYOUT_HEAP_BASE

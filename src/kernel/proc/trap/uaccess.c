@@ -8,7 +8,7 @@
 #include "interrupt.h"
 #include "fault.h"
 #include "../../core/error.h"
-#include "../../security/cpu.h"
+#include "include/security.h"
 
 /* 汇编实现：返回 0 成功 / 1 缺页 */
 extern int uaccess_copy(void *dst, const void *src, uint32_t len);

@@ -13,4 +13,9 @@
 #include "proc/trap/syscall.h"
 #include "proc/trap/uaccess.h"
 
+/* VFS namespace side table: fs switches a process's root without touching
+ * proc_t layout. Declared here because fs_syscall.c (M4) is a legitimate
+ * cross-module caller; the implementation stays private to proc/process.c. */
+int proc_root_set(proc_t *p, const char *root);
+
 #endif

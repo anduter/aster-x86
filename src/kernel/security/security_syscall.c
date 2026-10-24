@@ -6,10 +6,8 @@
  * ============================================================================= */
 #include "../types.h"
 #include "include/kernel.h"
+#include "include/proc.h"
 #include "security_syscall.h"
-#include "../proc/proc.h"
-#include "../proc/trap/interrupt.h"
-#include "../proc/trap/syscall.h"
 
 bool security_syscall_owns(uint32_t nr)
 {

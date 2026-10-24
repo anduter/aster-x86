@@ -11,13 +11,9 @@
 #include "include/fs.h"
 #include "include/mm.h"
 #include "include/net.h"
-#include "../dev/block/block.h"
+#include "include/proc.h"
 #include "misc_syscall.h"
-#include "../proc/proc.h"
-#include "../proc/trap/interrupt.h"
-#include "../proc/trap/syscall.h"
 #include "../proc/trap/syscall_internal.h"
-#include "../proc/trap/uaccess.h"
 
 /* 分块把用户缓冲区拷进内核栈，再输出。
  * 用户指针未映射时 copy_from_user 会走 #PF 恢复路径返回错误，

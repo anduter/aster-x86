@@ -1,5 +1,5 @@
 /* =============================================================================
- * ipc/port.c - 最小服务监听端点
+ * svc/port.c - 最小服务监听端点
  *
  * Port 只保存 pending 的 server endpoint。connect 创建一对 channel，
  * 把 server 端挂到 port，client 端返回给调用者；accept 取出 server 端。
@@ -7,7 +7,6 @@
  * ============================================================================= */
 #include "port.h"
 #include "include/svc.h"
-#include "include/kernel.h"
 #include "include/kernel.h"
 #include "include/proc.h"
 

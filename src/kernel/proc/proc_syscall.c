@@ -12,7 +12,7 @@
 #include "trap/syscall.h"
 #include "trap/syscall_internal.h"
 #include "trap/uaccess.h"
-#include "../user/user_mode.h"
+#include "include/userland.h"
 
 static int sys_getpid(void)
 {

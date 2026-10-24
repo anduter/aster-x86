@@ -12,7 +12,7 @@
  * ============================================================================= */
 #include "ioapic.h"
 #include "madt.h"
-#include "../../mm/vmm.h"
+#include "include/mm.h"
 #include "../../core/spinlock.h"
 #include "../../core/error.h"
 #include "../../lib/kprintf.h"

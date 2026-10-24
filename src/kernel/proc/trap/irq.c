@@ -13,12 +13,9 @@
 #include "../../core/error.h"
 #include "../percpu.h"
 #include "../proc.h"
-#include "../../mm/pmm.h"
-#include "../../dev/char/fb.h"
-#include "../../dev/char/console.h"
+#include "include/dev.h"
+#include "include/mm.h"
 #include "../../lib/kprintf.h"
-#include "../../dev/intc/apic.h"
-#include "../../dev/intc/ioapic.h"
 
 /* 哪些 IRQ 已经改由 IOAPIC 投递（EOI 要发给 LAPIC 而不是 8259） */
 static uint32_t ioapic_routed;

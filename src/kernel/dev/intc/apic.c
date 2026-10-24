@@ -11,11 +11,8 @@
  * 因为 NMI 不受 IF 影响，即使内核把中断关掉卡死，也能被发现。
  * ============================================================================= */
 #include "apic.h"
-#include "../../proc/smp.h"
-#include "../../core/error.h"
-#include "../../mm/vmm.h"
 #include "include/proc.h"
-#include "include/proc.h"
+#include "include/mm.h"
 #include "include/kernel.h"
 #include "../../lib/kprintf.h"
 
