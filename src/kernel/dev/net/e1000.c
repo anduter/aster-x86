@@ -24,7 +24,7 @@
 #include "../intc/ioapic.h"
 #include "include/mm.h"
 #include "include/kernel.h"
-#include "../../proc/trap/interrupt.h"
+#include "include/proc.h"
 #include "../../core/error.h"
 #include "../../lib/string.h"
 #include "../../lib/kprintf.h"
