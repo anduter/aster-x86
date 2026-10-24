@@ -658,6 +658,24 @@ sectest: mprotect invalid ok
    `f->eax` 作为 `ret` 返回，dispatch 再写回同一个值。该 bug 影响所有
    “系统调用返回后被信号打断”的返回值（read/write/fork/wait 等），
    不只是自检。
+9. **内核 oops `eip=0x1b`（22:27:35 偶发）根因：idle CPU 停在待回收的
+   进程页目录上**。现场 `oops: eip=0x1b err=11 cr2=0x1b` +
+   `sched: pid 0 ((null))`。`proc_exit_finish()` 的 `next == 0` 分支
+   （fixpf 会话的“退出栈上 idle”）只把 current 清 0，**没有切 CR3**：
+   该 CPU 仍停在即将被回收的进程页目录上。父进程在另一颗 CPU 上
+   `proc_reap() → vmm_destroy_dir()` 会释放这个 PDPT/页表；PMM 毒化会把
+   释放页填成 0xAA，本 CPU 之后取指/中断压栈就 #PF，eip/cr2 落在
+   0x0/0x18/0x1b 附近。
+   修复：
+   - `vmm_init()` 保存内核自己的 PDPT（只含内核映射、用户区 PDPT[1]=0），
+     新增 `vmm_kernel_dir()`（vmm.c/vmm.h）；
+   - `proc_exit_finish()` 在 `next==0` 时先 `vmm_switch_dir(vmm_kernel_dir())`
+     再置 `idle_active`（先 CR3 后 idle，保持不变量）；
+   - `sched_tick()` idle 路径加断言：`idle_active` 的 CPU 必须在内核页目录上，
+     否则 `panic("idle cpu%u on foreign page dir (cr3=... kernel=...)")`，
+     把现场打出来，不静默继续。
+   注：与 SIGCHLD 无关，是“退出栈上 idle”路径对 CR3 的遗漏；等 e1000 回稳后
+   连跑 2 次 + 8h soak 验证。
 
 ## 6. 已知边界 / 待办
 

@@ -709,6 +709,16 @@ void proc_exit_finish(void)
             vmm_switch_dir((pde_t *)next->page_dir);
         }
     } else {
+        /* 没有下一个进程：必须先离开 p 的地址空间再发布 ZOMBIE。
+         * 否则父进程在另一颗 CPU 上 proc_reap() → vmm_destroy_dir() 会释放
+         * 本 CPU 仍在使用的 PDPT/页表；PMM 毒化后这些页变成 0xAA...
+         * 下一次取指就是 eip/cr2 在 0x0/0x18/0x1b 附近的内核 #PF。
+         * 切到内核自己的地址空间（只含内核映射）后再 idle。
+         * 先切 CR3 再置 idle_active，保证“idle CPU 一定在 kernel dir”这个
+         * 不变量；sched_tick 的 idle 路径会断言它。 */
+        if (vmm_kernel_dir() != 0) {
+            vmm_switch_dir(vmm_kernel_dir());
+        }
         this_cpu()->current = 0;
         this_cpu()->idle_active = true;
     }

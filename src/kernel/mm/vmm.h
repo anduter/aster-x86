@@ -30,6 +30,10 @@ typedef uint64_t pte_t;
 pde_t *vmm_current_dir(void);
 #define page_directory (vmm_current_dir())
 
+/* 内核自己的地址空间（只含内核映射，无用户区）。CPU 没有可运行进程时切回它
+ * 再 idle，避免停留在即将被 proc_reap 回收的进程页目录上。 */
+pde_t *vmm_kernel_dir(void);
+
 /* 当前是否启用了 PAE/NX（由 vmm_init 探测） */
 extern int vmm_nx_enabled;
 

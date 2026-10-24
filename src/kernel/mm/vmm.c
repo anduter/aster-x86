@@ -50,6 +50,13 @@ typedef struct {
 static uint8_t* vm_bitmap = 0;
 static size_t vm_total_pages;
 
+/* 内核自己的 PDPT（vmm_init 建立、只含内核映射，用户区 PDPT[1]=0）。
+ * CPU 没有可运行进程时切回它再 idle，避免继续用“即将被父进程回收”的进程
+ * 地址空间——否则另一颗 CPU 的 proc_reap → vmm_destroy_dir 会把本 CPU 仍在
+ * 用的 PDPT/页表释放掉（PMM 毒化后变成 0xAA...），表现为 eip/cr2 在
+ * 0x0/0x18/0x1b 附近的内核 #PF。 */
+static pde_t *kernel_pdpt;
+
 /* ==================== 内部辅助函数 ==================== */
 static inline uint32_t pdpt_index(uintptr_t addr) { return (uint32_t)(addr >> 30); }
 static inline uint32_t pd_index(uintptr_t addr)   { return (uint32_t)((addr >> 21) & 0x1FFU); }
@@ -390,6 +397,7 @@ void vmm_init(void)
 
     /* 先装 CR3；identity_map_2mb 通过 current dir 写页表。 */
     __asm__ volatile ("mov %0, %%cr3" : : "r"((uint32_t)(uintptr_t)dir) : "memory");
+    kernel_pdpt = dir;                  /* idle/无进程时切回的内核地址空间 */
 
     uint32_t phys_end = pmm.phys_base + (uint32_t)(pmm.total_pages << PAGE_SHIFT);
     identity_map_2mb(phys_end);
@@ -603,6 +611,13 @@ pde_t* vmm_current_dir(void)
     uint32_t cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
     return (pde_t *)(uintptr_t)(cr3 & 0xFFFFF000U);
+}
+
+/* 内核自己的地址空间（只含内核映射）。没有可运行进程的 CPU 切回它 idle，
+ * 不要停留在即将被回收的进程页目录上。 */
+pde_t* vmm_kernel_dir(void)
+{
+    return kernel_pdpt;
 }
 
 static void vmm_reload_cr3(void)

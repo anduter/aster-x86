@@ -22,6 +22,7 @@
 #include "proc_internal.h"
 #include "include/proc.h"
 #include "include/kernel.h"
+#include "include/mm.h"           /* vmm_kernel_dir/vmm_current_dir：idle CR3 断言 */
 #include "include/dev.h"          /* apic_send_ipi：跨 CPU 重新调度 IPI */
 
 /* 全局调度锁：BSP/AP 不能同时改同一份 runqueue / 进程状态。 */
@@ -400,6 +401,18 @@ void sched_tick(void)
      * 那时抢走 CPU 会把 kernel_main 卡死在半路（sched_start 还没切到第一个线程）。 */
     if (cur == 0) {
         if (!this_cpu()->idle_active) return;
+
+        /* 不变量：idle 的 CPU 必须停在内核自己的地址空间（vmm_kernel_dir）。
+         * 若仍在某个进程的页目录上 idle，父进程一旦 proc_reap → 
+         * vmm_destroy_dir 就会释放本 CPU 正在用的 PDPT/页表，之后取指
+         * 就是 eip/cr2 在 0x0/0x18/0x1b 附近的 oops。这里显式 panic 留现场，
+         * 不静默继续跑。 */
+        if (vmm_kernel_dir() != 0 && vmm_current_dir() != vmm_kernel_dir()) {
+            panic("idle cpu%u on foreign page dir (cr3=%p kernel=%p)",
+                  (unsigned int)smp_cpu_id(), (void *)vmm_current_dir(),
+                  (void *)vmm_kernel_dir());
+        }
+
         sched_age_runqueue(0);
         next = sched_next(0);
         if (next != 0) proc_switch_to(next);
