@@ -299,6 +299,13 @@ static void timer_handler(void *arg)
      * 全局 ticks 继续供 uptime/soak 使用，语义不受影响。 */
     this_cpu()->ticks++;
 
+    /* 启动 2 秒后打印一次两核的 tick，用于验证 AP 定时器已校准到 ~100Hz */
+    if (ticks == 200U && smp_cpu_count > 1U) {
+        kprintf("smp: tick check after 2s bsp=%u ap=%u\n",
+                per_cpu[0].ticks,
+                per_cpu[1].ticks);
+    }
+
     /* 浸泡测试：每 60 秒往串口打一行运行状态（只走串口，不刷屏幕）。
      * 观察 free_pages 是否持续下降、procs 是否泄漏。 */
     if ((ticks % (TIMER_HZ * 60U)) == 0U) {

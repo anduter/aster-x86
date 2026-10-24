@@ -13,6 +13,14 @@ void proc_switch_to(proc_t *next);
 /* 由 sched.c 实现：把进程挂到指定 CPU 的 runqueue（会先从其它 CPU 摘掉）。 */
 void sched_enqueue(proc_t *p, uint32_t cpu);
 
+/* 唤醒阻塞进程：加锁完成 READY + 入队 + （必要时）IPI 踢目标 CPU */
+void sched_wake(proc_t *p);
+
+/* VFS namespace 侧表：不改 proc_t 布局 */
+const char *proc_root_of(proc_t *p);
+int  proc_root_set(proc_t *p, const char *root);
+void proc_root_copy(proc_t *parent, proc_t *child);
+
 /* 从所有 runqueue 摘掉（进程退出/回收时调用）。 */
 void sched_dequeue(proc_t *p);
 

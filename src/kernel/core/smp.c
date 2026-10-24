@@ -1,8 +1,8 @@
 /* =============================================================================
  * core/smp.c - AP 启动（最小多核 bring-up）
  *
- * 当前只把 AP 拉进 32 位保护模式、登记 per-CPU 状态并跑 idle；
- * 调度器仍只在 BSP 上运行。这样多核状态是真实的，但不虚报 SMP 调度完成。
+ * 当前只把 AP 拉进 32 位保护模式、登记 per-CPU 状态，然后进入可被
+ * timer/IPI 唤醒的 idle；AP 上线后由 sched.c 按每 CPU runqueue 参与调度。
  * ============================================================================= */
 #include "smp.h"
 #include "apic.h"
@@ -63,20 +63,40 @@ void ap_entry(void)
     per_cpu[slot].ready = true;
     atomic_inc(&smp_ap_ready);
 
-    /* AP 自己的 LAPIC timer；最小汇编 handler 只 EOI + 计数。 */
+    /* AP 自己的 LAPIC timer：向量 0x30 由共享 IDT 分发给 smp_timer_tick。 */
     if (apic_prepare_ap()) {
         (void)apic_start_timer_ap(0x30U, 1000000U);
         __asm__ volatile ("sti");
     }
 
+    /* AP 的 idle 循环：中断已打开，LAPIC timer 和 IPI 都会把本核拉回调度器。
+     * 每轮 hlt 醒来后再显式查一次本 CPU 的 runqueue（sched_ap_tick 在
+     * current==0 时会 sched_next + proc_switch_to），不依赖中断路径的时序。 */
+    this_cpu()->idle_active = true;
     for (;;) {
         __asm__ volatile ("hlt");
+        sched_ap_tick();
     }
+}
+
+/* BSP 校准 LAPIC 频率后写入这里，AP 在自己的定时器中断里取用并重装计数 */
+static volatile uint32_t ap_timer_count;
+
+void smp_ap_timer_reload(uint32_t count)
+{
+    if (count >= 1000U) ap_timer_count = count;
 }
 
 void smp_timer_tick(void)
 {
     per_cpu_t *c = this_cpu();
+    uint32_t want = ap_timer_count;
+
+    /* 第一次拿到校准值时重装 AP 定时器，使 AP tick 与 BSP 100Hz 对齐 */
+    if (want != 0U) {
+        ap_timer_count = 0U;
+        (void)apic_start_timer_ap(0x30U, want);
+    }
 
     c->ticks++;
     apic_eoi();

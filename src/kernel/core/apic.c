@@ -11,6 +11,7 @@
  * 因为 NMI 不受 IF 影响，即使内核把中断关掉卡死，也能被发现。
  * ============================================================================= */
 #include "apic.h"
+#include "smp.h"
 #include "error.h"
 #include "../mm/vmm.h"
 #include "../intr/interrupt.h"
@@ -127,8 +128,7 @@ int apic_prepare_ap(void)
     return 1;
 }
 
-int apic_start_timer_ap(uint32_t vector, uint32_t count)
-{
+int apic_start_timer_ap(uint32_t vector, uint32_t count){
     if (lapic == 0) return -1;
 
     lapic_wr(0x3E0U, 0x3U);                                   /* divide by 16 */
@@ -250,5 +250,17 @@ void apic_tick(void)
 
         kprintf("apic: NMI watchdog armed (period=%u counts, ~250ms)\n",
                 (unsigned int)final_period);
+
+        /* AP 定时器用 divide-by-16：10ms 计数 = (250ms 计数)/25/16 ≈ period/400 */
+        if (period >= 4000U) {
+            smp_ap_timer_reload(period / 400U);
+        }
     }
+}
+
+uint32_t apic_timer_count_10ms(void)
+{
+    /* 未校准或数值离谱时返回 0，由调用方决定兜底 */
+    if (final_period < 4000U) return 0U;
+    return final_period / 400U;
 }

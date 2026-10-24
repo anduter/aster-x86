@@ -33,4 +33,7 @@ void apic_tick(void);        /* 由 PIT 中断每 tick 调用（校准阶段） 
 int  apic_send_ipi(uint32_t dest_apic_id, uint32_t low);
 uint32_t apic_id(void);      /* 当前 CPU 的 LAPIC ID */
 
+/* AP 定时器 10ms 对应的计数（divide-by-16）；未校准时返回 0 */
+uint32_t apic_timer_count_10ms(void);
+
 #endif

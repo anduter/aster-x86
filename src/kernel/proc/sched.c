@@ -1,8 +1,10 @@
 /* =============================================================================
  * sched.c - 轮转调度
  *
- * 策略：在进程表里做环形扫描，挑下一个 READY。
- *   - sched_tick()：时钟中断里递减时间片，到期切走（抢占）；
+ * 策略：每个 CPU 一个 runqueue 位图（per_cpu[cpu].runq_mask），从 cur
+ *       之后环形扫描本 CPU 的位图，挑下一个 READY。
+ *   - sched_tick()：BSP 的 PIT 中断里递减时间片，到期切走（抢占）；
+ *   - sched_ap_tick()：AP 的 LAPIC timer / 唤醒 IPI 里取活或轮转；
  *   - proc_yield() 走 sched_next()：主动让出；
  *   - sched_start()：切到第一个可运行进程，正常不返回。
  *
@@ -99,6 +101,38 @@ void sched_enqueue(proc_t *p, uint32_t cpu)
     spin_unlock_irqrestore(&sched_lock, flags);
 
     /* 目标 CPU 正在空转就踢一下，不用等它下一个 timer tick */
+    if (cpu != smp_cpu_id()) sched_kick(cpu);
+}
+
+/* 唤醒一个阻塞进程：状态迁移与入队在同一把锁里完成，
+ * 避免与另一 CPU 的 sched_next/sched_balance 竞争。 */
+void sched_wake(proc_t *p)
+{
+    uint32_t flags;
+    uint32_t cpu;
+    uint32_t bit;
+
+    if (p == 0) return;
+
+    /* 调度器还没启动（内核初始化阶段）：只迁移状态，不入队 */
+    if (!smp_sched_enabled) {
+        if (p->state == PROC_BLOCKED) p->state = PROC_READY;
+        return;
+    }
+
+    cpu = sched_place(p);                 /* 内部自己拿锁 */
+    bit = 1U << (uint32_t)(p - proc_table);
+
+    flags = spin_lock_irqsave(&sched_lock);
+    if (p->state != PROC_ZOMBIE && p->state != PROC_RUNNING) {
+        p->state = PROC_READY;
+        for (uint32_t i = 0; i < SMP_MAX_CPUS; i++) {
+            per_cpu[i].runq_mask &= ~bit;
+        }
+        per_cpu[cpu].runq_mask |= bit;
+    }
+    spin_unlock_irqrestore(&sched_lock, flags);
+
     if (cpu != smp_cpu_id()) sched_kick(cpu);
 }
 
