@@ -405,6 +405,12 @@ void kernel_main(void)
        shell 与 heartbeat 都是程序表里的程序，内核不解释任何命令。 */
     proc_init();
     supervisor_init();
+    if (proc_spawn("fsd") == 0) {
+        kprintln("proc: fsd spawn failed");
+    }
+    if (proc_spawn("blkd") == 0) {
+        kprintln("proc: blkd spawn failed");
+    }
     service_lifecycle_selftest();
     if (proc_spawn("shell") == 0) {
         panic("cannot spawn shell program");

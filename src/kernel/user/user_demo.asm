@@ -374,14 +374,24 @@ user_demo_start:
     cmp word [esp + 4], 0x6B6F   ; "ok"
     jne .restart_fail
 
-    ; 重启后重新按名字连接 echo，确认新服务可用
+    ; 重启后轮询等待 svcwatch 拉起 echo
+    mov dword [esp + 8], 0
+.echo_retry:
     mov ebx, ebp
     add ebx, svc_name - .here
     mov ecx, 4
     mov eax, 0x39               ; SERVICE_CONNECT echo
     int 0x80
     test eax, eax
-    js .restart_fail
+    jns .echo_ready
+    inc dword [esp + 8]
+    cmp dword [esp + 8], 200
+    jae .restart_fail
+    mov eax, 24                 ; SYS_SLEEP
+    mov ebx, 10
+    int 0x81
+    jmp .echo_retry
+.echo_ready:
     mov [esp], eax
 
     mov ebx, [esp]

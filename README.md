@@ -607,7 +607,11 @@ ushell: argc=2 argv0=foo
 71. `net: TCP echo reply`（TCP client：SYN/SYN-ACK/ACK/data、多连接重试、data 重传）；
 72. `sectest: fs service ok`（ring3 fsd 内存文件服务，经 Port/Channel 读取）；
 73. `sectest: fs write ok`（fsd 写路径：'w'+data，随后 VFS svc 读回新内容）；
-74. `sectest: svc vfs ok`（VFS `svc:` 后端把 open/read 路由到 ring3 fsd）。
+74. `sectest: svc vfs ok`（VFS `svc:` 后端把 open/read 路由到 ring3 fsd）；
+75. `sectest: svc vfs write ok`（VFS write 缓冲，close 时发送给 ring3 fsd）；
+76. `sectest: blk service ok`（ring3 blkd 虚拟块服务，经 VFS `blk:` 读取）；
+77. `sectest: tcp ok`（用户态触发 TCP echo，boot 不再做 TCP 探测）；
+78. `sectest: blk write ok`（VFS `blk:` write 缓冲，close 发送给 ring3 blkd）。
 
 失败时返回非 0，可直接接到 CI。
 

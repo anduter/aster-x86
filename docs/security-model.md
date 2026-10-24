@@ -133,7 +133,7 @@ ring3 用户程序
 
 - 内核与用户态编译启用 `-Wall -Wextra -Werror`；
 - `build.ps1 -Test` 自动启动 QEMU、注入命令、断言串口日志；
-- 当前回归 94 项全绿（2026-10-24 14:18 实测 `=== TEST PASS (94/94)`）；
+- 当前回归 97 项全绿（2026-10-24 15:30 实测 `=== TEST PASS (97/97)`）；
 - 新增 W^X 加载断言；
 - P3.1 将用户地址布局收敛到 `user_layout.h`，栈、堆、蹦床页互不重叠。
 
@@ -203,7 +203,7 @@ ring3 用户程序
 - demo 尝试打开 `system:/bin/shell`（legacy）和 `HANDLE_DUP`（native）：
   - `sandbox: open denied`
   - `sandbox: native denied`
-- 当前回归 94 项，两项都是硬断言。
+- 当前回归 97 项，两项都是硬断言。
 - 局限：策略仍按程序名硬编码；尚未升级为基于句柄权限的 capability 沙箱。
 
 ### 4.12 RSA 签名包 / 执行时验签
@@ -313,6 +313,10 @@ data/stack/heap RW+NX。`err=15` 的栈/rodata 取指回归证明 NX 真正生�
 | ring3 FS 服务 | `sectest: fs service ok`；fsd 在 ring3 持有内存文件，经 Port/Channel 提供 read |
 | ring3 FS 写 | `sectest: fs write ok`；'w'+data 写入用户态文件，VFS svc 读回新内容 |
 | VFS svc 后端 | `sectest: svc vfs ok`；VFS `svc:` 路由到 ring3 fsd，open/read 走服务 |
+| VFS svc 写 | `sectest: svc vfs write ok`；write 缓冲，close 发送 `'w'+data` 给 fsd |
+| VFS blk 服务 | `sectest: blk service ok`；ring3 blkd 虚拟块服务，VFS `blk:` 经 Channel 读取 |
+| VFS blk 写 | `sectest: blk write ok`；write 缓冲，close 发送 `'w'+data` 给 blkd |
+| 用户触发 TCP | `sectest: tcp ok`；SYS_TCP_TEST，在 shell 就绪后运行，避免 boot 探测拖死 |
 | Service manifest | `native: manifest ok`；supervisor 检查 supervisor + echo 服务清单 |
 | 网络 RX/UDP | `net: ARP reply`、`net: ICMP echo reply`、`net: UDP echo reply`；e1000 RX + ARP/ICMP/UDP |
 | TCP | `net: TCP echo reply`；SYN/SYN-ACK/ACK/data、多连接重试 + data 重传，计入硬回归 |

@@ -4,6 +4,8 @@
 /* 把内核内建的示例映像放进用户页并以 ring3 执行（不返回） */
 int user_mode_run(void);
 int user_probe_run(void);
+int user_fsd_run(void);
+int user_blkd_run(void);
 
 /* 从文件系统加载一个程序映像，放进用户页并以 ring3 执行（不返回）。
  * path 形如 "/bin/shell"；映像是裸二进制（链接地址 0x40000000）。 */

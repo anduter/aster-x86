@@ -22,6 +22,7 @@
 #include "../mm/vmm.h"
 #include "../heap.h"
 #include "../core/device.h"
+#include "../block/block.h"
 #include "../ipc/pipe.h"
 #include "../panic.h"
 #include "../core/rtc.h"
@@ -644,6 +645,21 @@ void syscall_dispatch(interrupt_frame_t *f)
         }
         if (proc_root_set(p, path) != 0) { ret = -1; break; }
         strcpy(p->cwd, path);
+        ret = 0;
+        break;
+    }
+    case SYS_TCP_TEST:
+        ret = net_tcp_echo_test();
+        break;
+    case SYS_BLK_READ: {
+        block_device_t *dev = blk_lookup("ata0");
+        uint8_t sec[BLK_SECTOR];
+
+        if (dev == 0 || blk_read(dev, f->ebx, sec) != 0 ||
+            copy_to_user((void *)(uintptr_t)f->ecx, sec, sizeof(sec)) != E_OK) {
+            ret = -1;
+            break;
+        }
         ret = 0;
         break;
     }

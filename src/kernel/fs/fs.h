@@ -122,6 +122,8 @@ unsigned int fs_node_count(void);
  * ============================================================================= */
 #define FS_BE_RAMFS 0U
 #define FS_BE_FAT16 1U
+#define FS_BE_SVC   2U
+#define FS_BE_BLK   3U
 
 /* 打开：成功返回后端句柄（>=0），失败返回 -1；*be 写回后端 id */
 int fs_open_ex(const char *path, uint32_t flags, uint32_t uid, uint32_t gid, uint8_t *be);
@@ -165,5 +167,7 @@ typedef struct fs_backend {
 /* 各后端实例 */
 extern const fs_backend_t ramfs_backend;
 extern const fs_backend_t fat16_backend;
+extern const fs_backend_t svc_backend;
+extern const fs_backend_t blk_backend;
 
 #endif

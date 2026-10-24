@@ -155,7 +155,7 @@ Invoke-Step 'sign kernel' 'powershell' @(
     '-Prefix', 'kernel'
 )
 Write-Host '=== boot verifier ===' -ForegroundColor Cyan
-& i686-elf-gcc @CFLAGS '-DBOOT_VERIFY' -c src/kernel/core/trust.c -o obj/boot_trust.o
+& i686-elf-gcc @CFLAGS '-DBOOT_VERIFY' -c src/kernel/security/trust.c -o obj/boot_trust.o
 if ($LASTEXITCODE -ne 0) { throw 'boot trust compile failed' }
 & i686-elf-gcc @CFLAGS -c src/boot/verify_support.c -o obj/boot_verify_support.o
 if ($LASTEXITCODE -ne 0) { throw 'boot verify support compile failed' }

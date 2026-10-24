@@ -59,6 +59,8 @@
 #define SYS_SENDTO     53 /* ebx=fd, ecx=&udp_req          -> 0 / -1 */
 #define SYS_RECVFROM   54 /* ebx=fd, ecx=&udp_req          -> len / -1 */
 #define SYS_CHROOT     55 /* ebx=path                      -> 0 / -1 */
+#define SYS_TCP_TEST   56 /* 运行一次 TCP echo 自检           -> 0 / -1 */
+#define SYS_BLK_READ   57 /* ebx=lba, ecx=user buf           -> 0 / -1 */
 
 /* 用户/内核代码统一用这个宏发起系统调用 */
 static inline int sys_call(int num, int a, int b, int c)

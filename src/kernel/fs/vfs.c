@@ -17,17 +17,25 @@
 /* 顺序有意义：特殊后端在前，ramfs 的 probe 永远返回 1，作为兜底放最后 */
 static const fs_backend_t *const backends[] = {
     &fat16_backend,
+    &svc_backend,
+    &blk_backend,
     &ramfs_backend
 };
 
 static uint8_t be_id(const fs_backend_t *b)
 {
-    return (b == &fat16_backend) ? FS_BE_FAT16 : FS_BE_RAMFS;
+    if (b == &fat16_backend) return FS_BE_FAT16;
+    if (b == &svc_backend) return FS_BE_SVC;
+    if (b == &blk_backend) return FS_BE_BLK;
+    return FS_BE_RAMFS;
 }
 
 static const fs_backend_t *be_from_id(uint8_t id)
 {
-    return (id == FS_BE_FAT16) ? &fat16_backend : &ramfs_backend;
+    if (id == FS_BE_FAT16) return &fat16_backend;
+    if (id == FS_BE_SVC) return &svc_backend;
+    if (id == FS_BE_BLK) return &blk_backend;
+    return &ramfs_backend;
 }
 
 static const fs_backend_t *route(const char *path, const char **rel)

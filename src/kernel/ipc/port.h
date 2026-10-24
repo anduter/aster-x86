@@ -3,7 +3,7 @@
 
 #include "../types.h"
 
-#define PORT_MAX          4U
+#define PORT_MAX          16U
 #define PORT_PENDING_MAX  4U
 #define PORT_E_AGAIN      (-6)
 

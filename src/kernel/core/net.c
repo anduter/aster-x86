@@ -438,8 +438,8 @@ static uint16_t tcp_checksum(const uint8_t *ip, const uint8_t *tcp, uint32_t tcp
     return (uint16_t)~sum;
 }
 
-static int net_tcp_send(uint32_t seq, uint32_t ack, uint8_t flags,
-                        const void *data, uint32_t len)
+static int net_tcp_send(uint16_t src_port, uint32_t seq, uint32_t ack,
+                        uint8_t flags, const void *data, uint32_t len)
 {
     uint8_t f[160];
     uint8_t *ip = f + 14;
@@ -460,7 +460,7 @@ static int net_tcp_send(uint32_t seq, uint32_t ack, uint8_t flags,
     memcpy(ip + 16, gw_ip, 4);
     wr16(ip + 10, checksum(ip, 20));
 
-    wr16(tcp + 0, NET_TCP_PORT);
+    wr16(tcp + 0, src_port);
     wr16(tcp + 2, NET_TCP_PORT);
     wr16(tcp + 4, (uint16_t)(seq >> 16)); wr16(tcp + 6, (uint16_t)seq);
     wr16(tcp + 8, (uint16_t)(ack >> 16)); wr16(tcp + 10, (uint16_t)ack);
@@ -474,8 +474,8 @@ static int net_tcp_send(uint32_t seq, uint32_t ack, uint8_t flags,
     return e1000_send_frame(f, 14U + 20U + 20U + len);
 }
 
-static int net_tcp_recv(uint32_t spins, uint8_t *flags, uint32_t *seq,
-                        uint32_t *ack, void *data, uint32_t max_len)
+static int net_tcp_recv(uint16_t src_port, uint32_t spins, uint8_t *flags,
+                        uint32_t *seq, uint32_t *ack, void *data, uint32_t max_len)
 {
     uint8_t f[NET_RX_MAX];
 
@@ -494,7 +494,7 @@ static int net_tcp_recv(uint32_t spins, uint8_t *flags, uint32_t *seq,
         ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
         if (14U + ihl + 20U > (uint32_t)len) continue;
         tcp = ip + ihl;
-        if (rd16(tcp + 0) != NET_TCP_PORT || rd16(tcp + 2) != NET_TCP_PORT) continue;
+        if (rd16(tcp + 0) != NET_TCP_PORT || rd16(tcp + 2) != src_port) continue;
         *flags = tcp[13];
         *seq = ((uint32_t)rd16(tcp + 4) << 16) | rd16(tcp + 6);
         *ack = ((uint32_t)rd16(tcp + 8) << 16) | rd16(tcp + 10);
@@ -514,46 +514,43 @@ static int net_tcp_recv(uint32_t spins, uint8_t *flags, uint32_t *seq,
 
 int net_tcp_echo_test(void)
 {
-    uint32_t seq = 0x1000U;
-    uint32_t peer = 0;
     uint32_t ack = 0;
     uint8_t flags = 0;
     uint8_t buf[64];
     int n;
 
-    if (net_tcp_send(seq, 0, TCP_SYN, 0, 0) != 0) return -1;
-    kprintln("net: TCP SYN sent");
+    /* 每次尝试用新源端口/新连接，避免 host echo 丢失后卡在旧连接。 */
+    for (uint32_t attempt = 0; attempt < 3U; attempt++) {
+        uint16_t src = (uint16_t)(15000U + attempt);
+        uint32_t seq = 0x1000U + attempt * 0x100U;
+        uint32_t peer = 0;
+        int syn_ok = 0;
 
-    for (int tries = 0; tries < 3; tries++) {
-        n = net_tcp_recv(50000U, &flags, &peer, &ack, 0, 0);
-        if (n >= 0) {
-            kprintf("net: TCP rx flags=%x seq=%x ack=%x\n",
-                    flags, (unsigned int)peer, (unsigned int)ack);
+        if (net_tcp_send(src, seq, 0, TCP_SYN, 0, 0) != 0) continue;
+
+        for (int tries = 0; tries < 3; tries++) {
+            n = net_tcp_recv(src, 100000U, &flags, &peer, &ack, 0, 0);
+            if (n >= 0 && (flags & TCP_SYN) && (flags & TCP_ACK)) { syn_ok = 1; break; }
+            (void)net_tcp_send(src, seq, 0, TCP_SYN, 0, 0);
         }
-        if (n >= 0 && (flags & TCP_SYN) && (flags & TCP_ACK)) break;
-        if (tries == 2) {
-            kprintln("net: TCP SYN-ACK timeout");
-            return -1;
-        }
-        (void)net_tcp_send(seq, 0, TCP_SYN, 0, 0);
-    }
+        if (!syn_ok) continue;
 
-    (void)net_tcp_send(seq + 1U, peer + 1U, TCP_ACK, 0, 0);
-    (void)net_tcp_send(seq + 1U, peer + 1U, TCP_PSH | TCP_ACK, "tcp", 3);
+        (void)net_tcp_send(src, seq + 1U, peer + 1U, TCP_ACK, 0, 0);
+        for (volatile uint32_t d = 0; d < 200000U; d++) __asm__ volatile ("pause");
+        (void)net_tcp_send(src, seq + 1U, peer + 1U, TCP_PSH | TCP_ACK, "tcp", 3);
 
-    for (uint32_t n2 = 0; n2 < 2000000U; n2++) {
-        n = net_tcp_recv(1U, &flags, &peer, &ack, buf, sizeof(buf));
-        if (n > 0) {
-            static int logged;
-            if (!logged) {
-                logged = 1;
-                kprintf("net: TCP data flags=%x seq=%x ack=%x len=%d\n",
-                        flags, (unsigned int)peer, (unsigned int)ack, n);
+        for (uint32_t n2 = 0; n2 < 2000000U; n2++) {
+            if ((n2 % 300000U) == 0U && n2 != 0U) {
+                (void)net_tcp_send(src, seq + 1U, peer + 1U,
+                                   TCP_PSH | TCP_ACK, "tcp", 3);
             }
-            (void)net_tcp_send(seq + 4U, peer + (uint32_t)n + 1U, TCP_ACK, 0, 0);
-            if (n == 3 && memcmp(buf, "tcp", 3) == 0) {
-                kprintln("net: TCP echo reply");
-                return 0;
+            n = net_tcp_recv(src, 1U, &flags, &peer, &ack, buf, sizeof(buf));
+            if (n > 0) {
+                (void)net_tcp_send(src, seq + 4U, peer + (uint32_t)n + 1U, TCP_ACK, 0, 0);
+                if (n == 3 && memcmp(buf, "tcp", 3) == 0) {
+                    kprintln("net: TCP echo reply");
+                    return 0;
+                }
             }
         }
     }
@@ -621,9 +618,6 @@ void net_init(void)
         }
         if (!udp_ok) {
             kprintln("net: UDP echo timeout (no host echo port)");
-        } else {
-            /* 有 host echo 才做 TCP，避免无宿主时拖慢 boot。 */
-            (void)net_tcp_echo_test();
         }
     }
 }

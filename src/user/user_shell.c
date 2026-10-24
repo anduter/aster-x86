@@ -31,6 +31,7 @@ struct udp_req {
 #define SYS_SENDTO   53
 #define SYS_RECVFROM 54
 #define SYS_CHROOT   55
+#define SYS_TCP_TEST 56
 #define SYS_GETCHAR  10
 #define SYS_LIST     11
 #define SYS_DRIVES   12
@@ -77,6 +78,16 @@ static inline int sc(int n, int a, int b, int c)
 {
     int r;
     __asm__ volatile ("int $0x81"
+                      : "=a"(r)
+                      : "a"(n), "b"(a), "c"(b), "d"(c)
+                      : "memory");
+    return r;
+}
+
+static inline int nc(int n, int a, int b, int c)
+{
+    int r;
+    __asm__ volatile ("int $0x80"
                       : "=a"(r)
                       : "a"(n), "b"(a), "c"(b), "d"(c)
                       : "memory");
@@ -719,6 +730,131 @@ static void cmd_sectest(void)
         if (ok) putstr("sectest: fd limit ok\n");
         else    putstr("sectest: fd limit FAIL\n");
     }
+
+    /* ring3 文件服务：通过 native service/channel 读取用户态 fsd 的文件。 */
+    {
+        int fsd = -1;
+        char buf[64];
+
+        for (int i = 0; i < 200; i++) {
+            fsd = nc(0x39, (int)(unsigned int)"fsd", 3, 0);
+            if (fsd >= 0) break;
+            sc(SYS_SLEEP, 10, 0, 0);
+        }
+        if (fsd >= 0 && nc(0x31, fsd, (int)(unsigned int)"read", 4) == 4) {
+            int n = nc(0x36, fsd, (int)(unsigned int)buf, sizeof(buf));
+            if (n > 0 && buf[0] == 'h') {
+                putstr("sectest: fs service ok\n");
+            } else {
+                putstr("sectest: fs service recv FAIL\n");
+            }
+        } else {
+            putstr("sectest: fs service connect FAIL\n");
+        }
+    }
+
+    /* ring3 fsd 写路径：直接经 native channel 写入内存文件。 */
+    {
+        int fsd = nc(0x39, (int)(unsigned int)"fsd", 3, 0);
+        char wbuf[32];
+        const char *payload = "written by ring3";
+        int len = 15;   /* 'w' + 14 bytes */
+
+        wbuf[0] = 'w';
+        for (int i = 0; i < 14; i++) wbuf[i + 1] = payload[i];
+        if (fsd >= 0 && nc(0x31, fsd, (int)(unsigned int)wbuf, len) == len) {
+            char ok[8];
+            int n = nc(0x36, fsd, (int)(unsigned int)ok, sizeof(ok));
+            if (n > 0) putstr("sectest: fs write ok\n");
+            else putstr("sectest: fs write recv FAIL\n");
+        } else {
+            putstr("sectest: fs write FAIL\n");
+        }
+    }
+
+    /* VFS svc: 后端：open/read 走 ring3 fsd。 */
+    {
+        int f = sc(SYS_OPEN, (int)(unsigned int)"svc:/hello", FS_READ, 0);
+        if (f >= 0) {
+            char b[64];
+            int n = sc(SYS_FREAD, f, (int)(unsigned int)b, sizeof(b) - 1);
+            sc(SYS_CLOSE, f, 0, 0);
+            if (n > 0 && b[0] == 'w') putstr("sectest: svc vfs ok\n");
+            else putstr("sectest: svc vfs read FAIL\n");
+        } else {
+            putstr("sectest: svc vfs open FAIL\n");
+        }
+    }
+
+    /* VFS svc: 写路径：write 缓冲，close 时把 'w'+data 发给 ring3 fsd。 */
+    {
+        int f = sc(SYS_OPEN, (int)(unsigned int)"svc:/hello", FS_WRITE, 0);
+        if (f >= 0) {
+            const char *w = "vfs write";
+            int n = sc(SYS_FWRITE, f, (int)(unsigned int)w, 9);
+            sc(SYS_CLOSE, f, 0, 0);
+            if (n == 9) {
+                f = sc(SYS_OPEN, (int)(unsigned int)"svc:/hello", FS_READ, 0);
+                if (f >= 0) {
+                    char b[64];
+                    int r = sc(SYS_FREAD, f, (int)(unsigned int)b, sizeof(b) - 1);
+                    sc(SYS_CLOSE, f, 0, 0);
+                    if (r > 0 && b[0] == 'v') putstr("sectest: svc vfs write ok\n");
+                    else putstr("sectest: svc vfs write read FAIL\n");
+                } else {
+                    putstr("sectest: svc vfs write reopen FAIL\n");
+                }
+            } else {
+                putstr("sectest: svc vfs write FAIL\n");
+            }
+        } else {
+            putstr("sectest: svc vfs write open FAIL\n");
+        }
+    }
+
+    /* VFS blk: 后端：open/read 走 ring3 blkd。 */
+    {
+        int f = sc(SYS_OPEN, (int)(unsigned int)"blk:/sector0", FS_READ, 0);
+        if (f >= 0) {
+            char b[64];
+            int n = sc(SYS_FREAD, f, (int)(unsigned int)b, sizeof(b) - 1);
+            sc(SYS_CLOSE, f, 0, 0);
+            if (n > 0 && b[0] == 'r') putstr("sectest: blk service ok\n");
+            else putstr("sectest: blk service read FAIL\n");
+        } else {
+            putstr("sectest: blk service open FAIL\n");
+        }
+    }
+
+    /* VFS blk: 写路径：write 缓冲，close 发送给 ring3 blkd。 */
+    {
+        int f = sc(SYS_OPEN, (int)(unsigned int)"blk:/sector0", FS_WRITE, 0);
+        if (f >= 0) {
+            const char *w = "block write";
+            int n = sc(SYS_FWRITE, f, (int)(unsigned int)w, 11);
+            sc(SYS_CLOSE, f, 0, 0);
+            if (n == 11) {
+                f = sc(SYS_OPEN, (int)(unsigned int)"blk:/sector0", FS_READ, 0);
+                if (f >= 0) {
+                    char b[64];
+                    int r = sc(SYS_FREAD, f, (int)(unsigned int)b, sizeof(b) - 1);
+                    sc(SYS_CLOSE, f, 0, 0);
+                    if (r > 0 && b[0] == 'b') putstr("sectest: blk write ok\n");
+                    else putstr("sectest: blk write read FAIL\n");
+                } else {
+                    putstr("sectest: blk write reopen FAIL\n");
+                }
+            } else {
+                putstr("sectest: blk write FAIL\n");
+            }
+        } else {
+            putstr("sectest: blk write open FAIL\n");
+        }
+    }
+
+    /* 用户触发 TCP echo：boot 不再做 TCP，避免 host listener 未就绪拖死启动。 */
+    if (sc(SYS_TCP_TEST, 0, 0, 0) == 0) putstr("sectest: tcp ok\n");
+    else putstr("sectest: tcp FAIL\n");
 }
 
 /* ---------------- 历史记录 ---------------- */

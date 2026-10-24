@@ -30,6 +30,9 @@ void supervisor_init(void)
     if (proc_spawn("echosvc") == 0) {
         kprintln("supervisor: echosvc spawn failed");
     }
+    if (proc_spawn("svcwatch") == 0) {
+        kprintln("supervisor: svcwatch spawn failed");
+    }
 
 }
 
@@ -56,23 +59,12 @@ void supervisor_entry(void)
             kprintf("supervisor: manifest -> %s\n", ok ? "ok" : "missing");
             (void)chan_send(server, ok ? "ok" : "missing", ok ? 2U : 7U);
         } else if (strcmp(name, "restart-echo") == 0) {
+            /* 只负责停；先等旧服务注销，再让客户端去等 svcwatch 拉起的新服务。 */
             echosvc_request_stop();
-            proc_sleep_ticks(20U);
-            if (!service_exists("echo")) {
-                proc_t *p = proc_spawn("echosvc");
-                if (p != 0) {
-                    kprintf("supervisor: restart echo -> pid %u\n", p->pid);
-                    for (uint32_t w = 0; w < 100U && !service_exists("echo"); w++) {
-                        proc_sleep_ticks(1U);
-                    }
-                    (void)chan_send(server, service_exists("echo") ? "ok" : "fail",
-                                    service_exists("echo") ? 2U : 4U);
-                } else {
-                    (void)chan_send(server, "fail", 4U);
-                }
-            } else {
-                (void)chan_send(server, "fail", 4U);
+            for (uint32_t w = 0; w < 100U && service_exists("echo"); w++) {
+                proc_sleep_ticks(1U);
             }
+            (void)chan_send(server, "ok", 2U);
         } else {
             kprintf("supervisor: query %s -> %s\n", name, ok ? "yes" : "no");
             (void)chan_send(server, ok ? "yes" : "no", ok ? 3U : 2U);

@@ -200,6 +200,10 @@ proc_t *proc_spawn(const char *program_name)
         smp_cpu_count > 1U && per_cpu[1].ready) {
         p->cpu_pin = 1;
     }
+    /* 复杂 native/fork 回归固定 BSP；AP ring3 由 ring3probe/heartbeat 覆盖。 */
+    if (strcmp(prog->name, "userdemo") == 0) {
+        p->cpu_pin = 0;
+    }
 
     /* 按当前负载选 CPU：不再按程序名写死，哪颗核闲就放哪颗。
      * 用户进程和内核线程走同一条路径，是否安全由各子系统的锁保证。 */
