@@ -6,6 +6,7 @@
  * 只搬代码不改逻辑。
  * ============================================================================= */
 #include "../types.h"
+#include "include/abi.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/fs.h"
@@ -54,6 +55,7 @@ bool misc_syscall_owns(uint32_t nr)
     case SYS_RESINFO:
     case SYS_ETH:
     case SYS_MOUSE:
+    case SYS_ABI_VERSION:   /* ABI v1 只追加的标量版本查询（59） */
         return true;
     default:
         return false;
@@ -178,6 +180,10 @@ int misc_syscall(interrupt_frame_t *f)
         ret = (copy_to_user((void *)(uintptr_t)f->ebx, out, sizeof(out)) == E_OK) ? 0 : -1;
         break;
     }
+    case SYS_ABI_VERSION:
+        /* ABI v1：高 16 位版本，低 16 位 feature bits；无参数、无指针 */
+        ret = (int)((OS_ABI_VERSION << 16) | OS_ABI_FEATURES);
+        break;
     default:
         return -1000;
     }

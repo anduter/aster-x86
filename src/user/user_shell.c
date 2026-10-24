@@ -8,67 +8,8 @@
 
 #include "ulib.h"
 
-/* 与内核 syscall.c 的 SYS_UDP_* 请求布局一致 */
-struct udp_req {
-    unsigned char  ip[4];
-    unsigned short port;
-    unsigned short len;
-    unsigned char  data[64];
-};
-#define SYS_WRITE    1
-#define SYS_EXIT     5
-#define SYS_OPEN     6
-#define SYS_FREAD    7
-#define SYS_FWRITE   8
-#define SYS_CLOSE    9
-#define SYS_CAP_DROP 46
-#define SYS_CAP_SEND 47
-#define SYS_MMAP     48
-#define SYS_MUNMAP   49
-#define SYS_UDP_SEND 50
-#define SYS_UDP_RECV 51
-#define SYS_SOCKET   52
-#define SYS_SENDTO   53
-#define SYS_RECVFROM 54
-#define SYS_CHROOT   55
-#define SYS_TCP_TEST 56
-#define SYS_RENAME   58
-#define SYS_GETCHAR  10
-#define SYS_LIST     11
-#define SYS_DRIVES   12
-#define SYS_MKDIR    13
-#define SYS_UNLINK   14
-#define SYS_STAT     15
-#define SYS_CHDIR    16
-#define SYS_GETCWD   17
-#define SYS_FORK     18
-#define SYS_EXEC     19
-#define SYS_WAIT     20
-#define SYS_INPUT_SET 21
-#define SYS_KILL     23
-#define SYS_SLEEP    24
-#define SYS_PIPE     25
-#define SYS_DUP2     26
-#define SYS_REBOOT   27
-#define SYS_PANIC    28
-#define SYS_OOPS     29
-#define SYS_SIGACTION 30
-#define SYS_SIGRETURN 31
-#define SYS_SYNC      32
-#define SYS_TIME      33
-#define SYS_FSCK      34
-#define SYS_PCI       35
-#define SYS_POWEROFF  36
-#define SYS_MOUSE     37
-#define SYS_HANG      38
-#define SYS_ETH       39
-#define SYS_RESINFO   40
-#define SYS_GETUID    41
-#define SYS_GETGID    42
-#define SYS_CHMOD     43
-#define SYS_CHOWN     44
-#define SYS_SETUID    45
-#define SYS_GETPID    2
+/* 系统调用编号（SYS_*）、struct udp_req 与公共结构体统一来自
+ * include/abi.h（经 ulib.h 引入），这里不再手写编号。 */
 
 /* 打开标志（与内核 fs/fs.h 一致） */
 #define FS_READ   1

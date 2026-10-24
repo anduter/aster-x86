@@ -23,6 +23,9 @@
 #define E820_TABLE_ADDR  0x5002U
 #define E820_MAX_ENTRIES 21U
 
+/* ABI/API 版本自检（实现在 core/abi_selftest.c，只打印不新增回归项） */
+extern void abi_selftest(void);
+
 /* 已安装的用户程序大小（持久化自检用来比对） */
 static uint32_t installed_shell_size;
 
@@ -338,6 +341,9 @@ static void step_selftests(void)
 {
     console_set_status("ready - uptime 0 s");
     kprintln("kernel: ready");
+
+    /* 用户态 ABI v1 + 三类驱动/服务 API 版本自检 */
+    abi_selftest();
 
     /* 启动自检：只跑一次，验证对象模型（程序/文件/设备互不冒充） */
     demo_run();

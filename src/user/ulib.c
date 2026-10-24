@@ -17,6 +17,12 @@ int syscall3(int n, int a, int b, int c)
     return r;
 }
 
+/* 内核返回 (OS_ABI_VERSION << 16) | OS_ABI_FEATURES；负数表示门不可用 */
+int abi_version(void)
+{
+    return syscall3(SYS_ABI_VERSION, 0, 0, 0);
+}
+
 static usize utoa(unsigned int v, char *buf, unsigned int base)
 {
     char tmp[16];

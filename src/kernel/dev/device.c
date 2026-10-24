@@ -47,6 +47,7 @@ int dev_register(const char *name, dev_class_t cls,
     d->cls = cls;
     d->putc = putc;
     d->getc = getc;
+    d->api_version = DEV_API_VERSION;
     count++;
     return E_OK;
 }

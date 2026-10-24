@@ -160,6 +160,13 @@ int fs_is_fat(const char *path);
  * 不再出现 "if (fat) ... else ..."。新增后端 = 实现一张表 + 在 vfs.c 的
  * 表数组里加一项，syscall / proc 一行不用改。
  * ============================================================================= */
+#define FS_BACKEND_API_VERSION 1u
+
+/* 版本号写在 vfs.c 的注册表（fs_backend_reg_t）里，而不是结构体字段：
+ * 现有后端使用位置初始化器，给结构体尾部加字段会触发
+ * -Wmissing-field-initializers（-Wextra -Werror 下直接失败）。
+ * 注册时由 vfs.c 校验；0 表示旧格式，按 v1 解释。 */
+
 typedef struct fs_backend {
     const char *name;
     /* 该后端是否接管此路径；接管时 *rel 返回后端自己的相对路径 */
@@ -179,6 +186,13 @@ typedef struct fs_backend {
      * 元数据判断：ramfs 有 Unix 权限位，FAT16 没有（视为不限）。 */
     int (*rename)(const char *oldrel, const char *newrel, uint32_t uid, uint32_t gid);
 } fs_backend_t;
+
+/* 纯判定：declared 是后端声明/注册的 API 版本；0 表示旧格式（按 v1 解释）。
+ * 返回 E_OK 或 E_INVAL，不打印。 */
+int fs_backend_version_ok(uint32_t declared);
+
+/* 注册校验：版本不匹配时打印一行并返回 E_INVAL（b 可为 0，只用于日志名）。 */
+int fs_backend_api_check(const fs_backend_t *b, uint32_t declared);
 
 /* 各后端实例 */
 extern const fs_backend_t ramfs_backend;

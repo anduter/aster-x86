@@ -15,12 +15,53 @@
 #include "include/kernel.h"
 
 /* 顺序有意义：特殊后端在前，ramfs 的 probe 永远返回 1，作为兜底放最后 */
-static const fs_backend_t *const backends[] = {
-    &fat16_backend,
-    &svc_backend,
-    &blk_backend,
-    &ramfs_backend
+typedef struct {
+    const fs_backend_t *backend;
+    uint32_t            api_version;  /* 后端编写时对应的 FS_BACKEND_API_VERSION */
+} fs_backend_reg_t;
+
+static const fs_backend_reg_t backends[] = {
+    { &fat16_backend, FS_BACKEND_API_VERSION },
+    { &svc_backend,   FS_BACKEND_API_VERSION },
+    { &blk_backend,   FS_BACKEND_API_VERSION },
+    { &ramfs_backend, FS_BACKEND_API_VERSION }
 };
+
+/* 0 = 尚未校验, 1 = 通过, -1 = 拒绝（只打印一次） */
+static int backends_checked;
+
+int fs_backend_version_ok(uint32_t declared)
+{
+    if (declared == 0U) return E_OK;    /* 旧格式：缺省视为 v1 */
+    return (declared == FS_BACKEND_API_VERSION) ? E_OK : E_INVAL;
+}
+
+int fs_backend_api_check(const fs_backend_t *b, uint32_t declared)
+{
+    const char *name = (b != 0 && b->name != 0) ? b->name : "?";
+
+    if (fs_backend_version_ok(declared) == E_OK) return E_OK;
+    kprintf("vfs: backend %s api_version=%u, expected %u: rejected\n",
+            name, (unsigned int)declared,
+            (unsigned int)FS_BACKEND_API_VERSION);
+    return E_INVAL;
+}
+
+/* 注册表校验：新增/升级后端时版本不匹配会让所有 fs_*_ex 返回 -1，
+ * 而不是用错布局的 ops 表继续跑。 */
+static int backends_validate(void)
+{
+    if (backends_checked != 0) return (backends_checked > 0) ? 0 : -1;
+    for (uint32_t i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
+        if (fs_backend_api_check(backends[i].backend,
+                                 backends[i].api_version) != E_OK) {
+            backends_checked = -1;
+            return -1;
+        }
+    }
+    backends_checked = 1;
+    return 0;
+}
 
 static uint8_t be_id(const fs_backend_t *b)
 {
@@ -41,9 +82,10 @@ static const fs_backend_t *be_from_id(uint8_t id)
 static const fs_backend_t *route(const char *path, const char **rel)
 {
     if (path == 0) return 0;
+    if (backends_validate() != 0) return 0;   /* api_version 不匹配 -> E_INVAL */
 
     for (uint32_t i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
-        if (backends[i]->probe(path, rel)) return backends[i];
+        if (backends[i].backend->probe(path, rel)) return backends[i].backend;
     }
     return 0;
 }
