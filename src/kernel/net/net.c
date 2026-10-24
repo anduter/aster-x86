@@ -456,7 +456,7 @@ int net_udp_recv(uint8_t src_ip[4], uint16_t *src_port,
 }
 
 /* ---- 最小 TCP client：只做一次 echo，验证握手/数据/ACK ---- */
-#define NET_TCP_PORT 12345U
+#define NET_TCP_PORT NET_ECHO_PORT
 #define TCP_FIN 0x01U
 #define TCP_SYN 0x02U
 #define TCP_RST 0x04U

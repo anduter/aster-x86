@@ -6,8 +6,11 @@
 /* 启动 ARP/ICMP/UDP 自检。 */
 void net_init(void);
 
-/* 旧 SYS_UDP_SEND/RECV 与内核启动自检使用的固定本地端口。 */
-#define NET_UDP_LOCAL_PORT 12345U
+/* 旧 SYS_UDP_SEND/RECV 与内核启动自检使用的固定本地端口（可由 -EchoPort 覆盖）。 */
+#ifndef NET_ECHO_PORT
+#define NET_ECHO_PORT 12345U
+#endif
+#define NET_UDP_LOCAL_PORT NET_ECHO_PORT
 
 /* 用户态 UDP：目的 IP 4 字节、目的端口、payload；返回 0 / -1。 */
 int net_udp_send_to(const uint8_t dst_ip[4], uint16_t dst_port,
