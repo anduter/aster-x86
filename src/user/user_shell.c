@@ -1795,7 +1795,9 @@ void _start(int argc, char **argv)
     }
     putstr("\n");
 
-    /* 启动自检：getcwd + mkdir/stat/unlink，证明文件系统系统调用都通 */
+    /* 启动自检：getcwd + mkdir/stat/unlink，证明文件系统系统调用都通。
+     * 写卷根需要 root：普通用户登录时跳过（否则会打一条 DENY 审计 + FAIL，
+     * 看起来像故障）。测试模式自动登录 root，行为与引入账号系统前一致。 */
     {
         char cwd[64];
         unsigned int st[2];
@@ -1807,10 +1809,14 @@ void _start(int argc, char **argv)
             putstr("\n");
         }
 
-        ok = (sc(SYS_MKDIR, (int)"system:/uselfs", 0, 0) == 0);
-        ok = ok && (sc(SYS_STAT, (int)"system:/uselfs", (int)st, 0) == 0);
-        ok = ok && (sc(SYS_UNLINK, (int)"system:/uselfs", 0, 0) == 0);
-        putstr(ok ? "ushell: fs syscalls ok\n" : "ushell: fs syscalls FAIL\n");
+        if (sc(SYS_GETEUID, 0, 0, 0) != 0) {
+            putstr("ushell: fs syscalls skipped (non-root)\n");
+        } else {
+            ok = (sc(SYS_MKDIR, (int)"system:/uselfs", 0, 0) == 0);
+            ok = ok && (sc(SYS_STAT, (int)"system:/uselfs", (int)st, 0) == 0);
+            ok = ok && (sc(SYS_UNLINK, (int)"system:/uselfs", 0, 0) == 0);
+            putstr(ok ? "ushell: fs syscalls ok\n" : "ushell: fs syscalls FAIL\n");
+        }
     }
 
     /* libc 自检：malloc 走 SYS_BRK，printf 走 SYS_WRITE */

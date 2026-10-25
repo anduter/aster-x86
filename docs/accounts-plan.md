@@ -107,6 +107,8 @@ FAT 加上宿主 mode 透传时悄悄引入提权面。
 | 检查项 | 完成（+9 条，122 -> 131） | `build.ps1` |
 | -Test 连续 2 次 131/131 | 通过 | 两轮隔离目录 `build.ps1 -Test` |
 
+
+**生产路径实测（2026-10-26）**：不带 -Test 的镜像启动后打印 getty: tty0 ... login required，osteachos login: 需要口令；root 登录后 cwd=/root、groups=10(wheel)；`alice` 登录后 `uid=1000 euid=1000 groups=100`、cat /etc/shadow 被拒（audit: DENY）、sudo 被拒（audit: SUDO_DENY）。普通用户登录时 shell 跳过只在 root 下才有意义的卷根自检（打印 fs syscalls skipped）。
 **顺带修复（P3 期间发现）**：`FS_FILE_MAX` 从 32KB 提到 40KB 后内核 `.bss`
 越过了 `HEAP_BASE`（8MB），堆的第一批块头落在内核数据上——表现为随机 oops +
 内核栈 canary 被踩。`mm/heap.c` 现在在 `heap_init()` 里把 arena 起点抬到

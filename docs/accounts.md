@@ -117,5 +117,10 @@ euid == 0                   -> 直接放行（root）
 2. 只有一份用户态 ELF（`/bin/shell`），`getty`/`login` 前端因此合并在 shell 里；
 3. `getty` 只服务控制台 tty0，没有多 tty/串口会话；
 4. 口令 hash 是单次 sha256（无 salt/迭代），教学用途，抗离线爆破能力弱；
-5. 用户态写 `/etc/passwd|group`（`useradd`）依赖 root，格式由用户态拼；
-6. `who` 的会话表在内核内存里，重启丢失（`last` 从审计环读）。
+5. `useradd` 在核内拼 `/etc` 行（用户态只传用户名），格式仍由 `accounts.c` 单点维护；
+6. `who` 的会话表在内核内存里，重启丢失（`last` 从审计环读）；
+7. shell 里 `exit` 之后没有 init 重新拉起 getty（系统转 idle），需要重启；
+8. `sudo <cmd>` 是在当前 shell 进程里提权执行一条内置命令，不 fork 也不写 sudoers；
+9. 普通用户 `ls` 一个无权限目录时静默无输出（内核侧只回 -1，没有 errno 文案）；
+10. 审计环 24 行、`/var/log/audit.log` 整文件重写（只在 `sync` 时刷盘），不是追加式
+    日志；高频事件的环形覆盖会丢老记录。
