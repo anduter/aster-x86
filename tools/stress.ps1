@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # tools/stress.ps1 - long-running stress run (file-backed serial, robust)
 #
 # Why not tools/soak.ps1: its serial is a TCP socket, and in this QEMU build the

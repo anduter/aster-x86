@@ -1,4 +1,4 @@
-# converge-includes.ps1 - route cross-module includes through src/kernel/include/<mod>.h
+﻿# converge-includes.ps1 - route cross-module includes through src/kernel/include/<mod>.h
 #
 # Resolves each include (following migration forwarders) to the header that
 # actually implements it, maps that module to its interface header, and

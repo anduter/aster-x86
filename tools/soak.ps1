@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # soak.ps1 - long-running stability run / crash watchdog
 #
 # QEMU runs headless; the serial line is a TCP socket that this script drains

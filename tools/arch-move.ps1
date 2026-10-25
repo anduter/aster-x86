@@ -1,4 +1,4 @@
-# arch-move.ps1 - move platform primitives into arch/x86 (option B, no types.h move)
+﻿# arch-move.ps1 - move platform primitives into arch/x86 (option B, no types.h move)
 #
 #   src/kernel/head.asm   -> src/kernel/arch/x86/head.asm
 #   src/kernel/io.c|h     -> src/kernel/arch/x86/io.c|h

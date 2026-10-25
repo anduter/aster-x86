@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # tools/e1000-probe.ps1 - assert the e1000 driver lines from the serial log
 #
 # Default: run tools/session-run.ps1 -Name e1000 -Test, then analyse

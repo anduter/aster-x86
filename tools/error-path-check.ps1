@@ -1,4 +1,4 @@
-# error-path-check.ps1 - independent verification of the fs error-path selftest
+﻿# error-path-check.ps1 - independent verification of the fs error-path selftest
 #
 # Why: build.ps1 is owned by another session, so the "failure must fail as a
 # whole and must not corrupt existing state" assertions live in

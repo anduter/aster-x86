@@ -1,4 +1,4 @@
-# session-run.ps1 - run build.ps1 with per-session isolation and a test lock
+﻿# session-run.ps1 - run build.ps1 with per-session isolation and a test lock
 #
 # Isolation: -ObjDir/-DistDir/-QmpPort/-SerialLog are derived from -Name, so two
 # sessions do not overwrite each other's artifacts.

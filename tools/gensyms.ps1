@@ -1,4 +1,4 @@
-# gensyms.ps1 - generate a kernel symbol table (C source) from the ELF
+﻿# gensyms.ps1 - generate a kernel symbol table (C source) from the ELF
 # usage: gensyms.ps1 -Elf obj/kernel-pass1.elf -Out obj/symbols.c
 param(
     [Parameter(Mandatory = $true)][string]$Elf,

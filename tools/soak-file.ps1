@@ -1,4 +1,4 @@
-# soak-file.ps1 - soak harness using a file-backed serial port.
+﻿# soak-file.ps1 - soak harness using a file-backed serial port.
 #
 # The TCP serial backend used by tools/soak.ps1 can stop draining (harness
 # side), which looks like a guest hang. This variant writes the serial stream

@@ -1,4 +1,4 @@
-# auto-accept-soak.ps1 - run the remaining items in order, unattended
+﻿# auto-accept-soak.ps1 - run the remaining items in order, unattended
 #
 # 1) wait until the source tree is clean (agents committed their fixes)
 # 2) check-deps must report 0 violations

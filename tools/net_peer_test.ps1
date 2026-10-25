@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # tools/net_peer_test.ps1 - act as the network peer (QEMU socket backend)
 #
 # Why not -nic user: slirp answers ARP/ICMP for the gateway but does NOT deliver

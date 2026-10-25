@@ -1,4 +1,4 @@
-# mkfat16.ps1 - create/populate/verify a FAT16 image without external tools
+﻿# mkfat16.ps1 - create/populate/verify a FAT16 image without external tools
 #
 #   .\tools\mkfat16.ps1 -Path dist\fat.img -SizeMB 8
 #   .\tools\mkfat16.ps1 -Path dist\fat.img -File HOST.TXT -Content "hello from host"

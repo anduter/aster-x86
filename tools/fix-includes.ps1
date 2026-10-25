@@ -1,4 +1,4 @@
-# fix-includes.ps1 - repair relative #include paths after moving files
+﻿# fix-includes.ps1 - repair relative #include paths after moving files
 #
 # For every .c/.h under src/kernel, each #include at the start of a line that
 # does not resolve relative to the including file is matched by basename

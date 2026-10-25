@@ -1,4 +1,4 @@
-# session-status.ps1 - one-screen view of parallel development sessions
+﻿# session-status.ps1 - one-screen view of parallel development sessions
 #
 # Shows: running build.ps1 processes, QEMU instances, busy echo/QMP ports,
 # per-session obj dirs with their kernel.bin, newest serial logs and their last

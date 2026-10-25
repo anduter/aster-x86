@@ -1,4 +1,4 @@
-# watch-changes.ps1 - repo change watcher (event-driven progress reporting)
+﻿# watch-changes.ps1 - repo change watcher (event-driven progress reporting)
 #
 # v4: reports only milestones, with debounce:
 #   - HEAD changed (new commit)          <- main signal
