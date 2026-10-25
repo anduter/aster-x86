@@ -76,6 +76,26 @@ elapsed: 0.9s
 
 构建/回归日志在 `.session/ci/build.log`、`.session/ci/test-1.log`、`test-2.log`（`/session*/` 之外，`.session/` 已被忽略）。
 
+实测（`8f95dbf`，Windows 10 + PowerShell 5.1）：`-Quick` **0.9s**；
+`-Full` **47.7s**（构建 12.7s + `-Test` 19.7s/14.4s，各 **98/98**），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
+
+参数一览：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `-Quick` | （不给模式时默认） | 只跑静态检查 |
+| `-Full` | — | 静态 + `build.ps1` + `-Test` ×N |
+| `-TestRepeat N` | 2 | `-Full` 里 `-Test` 的次数 |
+| `-ExpectChecks N` | 0（自动取第一次的项数） | 要求每次 `-Test` 都是 N/N |
+| `-MinChecks N` | 90 | 低于这个项数视为没跑全 |
+| `-FlakeRuns N` | 0 | 追加 `tools/flake-hunt.ps1 -Runs N`（**只报告，不作门禁**） |
+| `-AllowDirty` | — | 工作区不干净时降级为警告（CI/多会话） |
+| `-StrictBom` | — | 不再豁免历史无 BOM 文件 |
+| `-FixBom` | — | 给所有被跟踪的无 BOM 脚本补 BOM（改文件，需单独提交） |
+| `-KeepArtifacts` | — | `-Full` 结束不删 `.obj-ci`/`.dist-ci`/`serial-ci.log` |
+| `-ObjDir`/`-DistDir`/`-QmpPort`/`-SerialLog` | `.obj-ci`/`.dist-ci`/`4691`/`serial-ci.log` | 隔离产物 |
+| `-PowerShellExe` | `powershell` | 跑 `build.ps1` 用的解释器（保持 5.1 与本地一致） |
+
 `-Full` 前置检查（任一不满足直接失败，不会跑出"假失败"）：
 
 - 平台是 Windows（Linux/macOS 上没有 QEMU `qemu-system-i386`，且 `tools/i686-elf` 是 Windows 版）；
@@ -124,6 +144,10 @@ powershell -NoProfile -File tools/install-hooks.ps1
 ```
 
 卸载：`tools/install-hooks.ps1 -Uninstall`。
+
+> `.gitignore` 里 `/tools/*` 会把 `tools/` 下非 `*.ps1` 的东西整体忽略，
+> 所以 `tools/githooks/` 需要显式放行（`.gitignore` 里已有 `!/tools/githooks/`）。
+> 否则 hook 文件 `git add` 不进去，`install-hooks.ps1` 装了也没有东西可跑。
 
 装好之后 `git commit` 会自动跑 `tools/githooks/pre-commit`
 → `powershell -NoProfile -ExecutionPolicy Bypass -File <repo>/tools/pre-commit.ps1`。
@@ -224,6 +248,28 @@ git restore --staged -- serial-x.log; Remove-Item serial-x.log
 git add -- <some-other-file>
 tools/session-commit.ps1 -Name ci -Message "must abort" -Paths tools/ci.ps1   # 期望 exit 1 并列出对方文件
 git restore --staged -- <some-other-file>
+
+# 4) src/kernel 里的跨模块 include 必须被拒（用 .h 建临时探针，不会被编译）
+'#include "fs/fs.h"' | Set-Content src/kernel/core/zz_neg.h
+git add -- src/kernel/core/zz_neg.h
+tools/pre-commit.ps1                    # 期望 exit 1，并打印 module include violations: 1
+git restore --staged -- src/kernel/core/zz_neg.h; Remove-Item src/kernel/core/zz_neg.h
+```
+
+第 4 条的真实输出：
+
+```
+pre-commit: blocked: 1 issue(s)
+  - src/kernel/** 有改动，但 tools/check-deps.ps1 报违规（exit=1）
+
+    checked: 165 files, 499 quoted includes
+    module include violations: 1
+
+    --- violations (first 20) ---
+
+    From To Header  File                              Line
+    ---- -- ------  ----                              ----
+    core fs fs/fs.h src/kernel/core/zz_neg_ci_probe.h    3
 ```
 
 ---
@@ -263,6 +309,6 @@ git add -- <列出的文件>
 | `QMP 端口 4691 已被占用` | 有残留 QEMU：`Get-Process qemu-system-i386 \| Stop-Process -Force` |
 | `-Full` 报 `i686-elf toolchain` FAIL | `tools/i686-elf` 不存在（gitignored，需按 README 自备） |
 | commit 没被拦住 | `git config --get core.hooksPath` 是否等于 `tools/githooks`；`git commit --no-verify` 会跳过 hook |
-| hook 在 Git Bash 里报 `bad interpreter` | `tools/githooks/pre-commit` 被改成了 CRLF；保持 LF（`.gitignore` 已放行 `!/tools/githooks/`） |
+| hook 报 `bad interpreter: /bin/sh^M` | `tools/githooks/pre-commit` 被改成了 CRLF，且该环境是直接 exec（不是用 sh 跑）。改回 LF 即可；Git for Windows 用自己的 sh 执行 hook，实测 CRLF 也能跑（本仓库 `core.autocrlf=true`，checkout 出来会是 CRLF），但建议保持 LF |
 | `ci.ps1 -Quick` 报某个 `.ps1` 无 BOM | `tools/ci.ps1 -FixBom`（或被改过的文件，见上节） |
 | 想只查暂存区 | `powershell -NoProfile -File tools/pre-commit.ps1` |

@@ -44,6 +44,7 @@ if ($staged.Count -eq 0) {
 
 $problems = New-Object System.Collections.Generic.List[string]
 $hints = New-Object System.Collections.Generic.List[string]
+$blocks = New-Object System.Collections.Generic.List[string]   # 诊断原文（不带 "- " 前缀）
 
 # ---- 规则 1：禁用路径 ----
 $forbidden = @(
@@ -163,11 +164,25 @@ if ($kernelTouched.Count -gt 0) {
     if ($depCode -ne 0) {
         $problems.Add(("src/kernel/** 有改动，但 tools/check-deps.ps1 报违规（exit={0}）" -f $depCode))
         if (Test-Path -LiteralPath $log) {
-            $lines = @(Get-Content $log | Where-Object { $_.Trim() })
-            foreach ($l in ($lines | Select-Object -Last 20)) { $problems.Add(("    {0}" -f $l)) }
+            # check-deps 输出里 90% 是白名单表格，只摘"计数 + 违规表"，否则真正的问题会被刷掉
+            $lines = @(Get-Content $log)
+            $sect = @()
+            foreach ($l in $lines) {
+                if ($l -match '^(checked|module include violations|interface layer violations):') { $sect += $l }
+            }
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match '^--- (violations|interface header violations)') {
+                    $end = [Math]::Min($i + 9, $lines.Count - 1)
+                    $sect += ''
+                    $sect += $lines[$i..$end]
+                    break
+                }
+            }
+            if ($sect.Count -eq 0) { $sect = @($lines | Select-Object -Last 10) }
+            foreach ($l in $sect) { $blocks.Add($l) }
         }
         $hints.Add('powershell -NoProfile -File tools/check-deps.ps1    # 看完整违规列表')
-        $hints.Add('跨模块调用请走接口头 include/<mod>.h；规则见 docs/modules.md')
+        $hints.Add('跨模块调用请走接口头 include/<mod>.h；规则见 docs/modules.md sec. 8')
     }
 }
 
@@ -178,6 +193,10 @@ if ($problems.Count -gt 0) {
     Write-Host ''
     Write-Host ("pre-commit: blocked: {0} issue(s)" -f $problems.Count) -ForegroundColor Red
     foreach ($p in $problems) { Write-Host ("  - {0}" -f $p) -ForegroundColor Red }
+    if ($blocks.Count -gt 0) {
+        Write-Host ''
+        foreach ($b in $blocks) { Write-Host ("    {0}" -f $b) -ForegroundColor DarkGray }
+    }
     if ($hints.Count -gt 0) {
         Write-Host ''
         Write-Host 'fix:' -ForegroundColor Yellow
