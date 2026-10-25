@@ -435,9 +435,17 @@ try {
         }
 
         # ---- 收尾：Full 跑完工作区仍应干净（防止产物漏进被跟踪路径） ----
+        # -AllowDirty 下工作区本来就有别的会话改动，此时只警告（仍会列出，便于发现新产物）。
         $dirtyAfter = @(& git -c core.quotepath=false status --porcelain)
-        Report 'worktree still clean after -Full' ($dirtyAfter.Count -eq 0) ("{0} 项" -f $dirtyAfter.Count)
-        if ($dirtyAfter.Count -gt 0) { foreach ($d in $dirtyAfter) { Sub $d } }
+        if ($AllowDirty) {
+            if ($dirtyAfter.Count -gt 0) {
+                Note ("-AllowDirty：-Full 结束后工作区有 {0} 项改动（跳过干净断言）" -f $dirtyAfter.Count)
+                foreach ($d in ($dirtyAfter | Select-Object -First 10)) { Sub $d }
+            }
+        } else {
+            Report 'worktree still clean after -Full' ($dirtyAfter.Count -eq 0) ("{0} 项" -f $dirtyAfter.Count)
+            if ($dirtyAfter.Count -gt 0) { foreach ($d in $dirtyAfter) { Sub $d } }
+        }
     }
 
     $exitCode = if ($failures.Count -eq 0) { 0 } else { 1 }
