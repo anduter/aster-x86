@@ -8,6 +8,20 @@
 | `keys/shell_public.pem` | 提交 | 对应公钥（SubjectPublicKeyInfo），供审计/发布校验；公钥不是秘密 |
 | `keys/README.md` | 提交 | 本文件 |
 
+> **历史提醒（重要）**：旧测试私钥存在于初始提交 `8cb1413`；`44cb980` 才把它从版本库删除。
+> 当前 HEAD 及之后不再包含私钥，且已轮换新密钥——**旧密钥与旧签名全部作废**，
+> 新内核只信任新模数。但历史里仍能翻到旧私钥：
+> `git log --all -- keys/shell_private.pem`。
+> 开源前如果要连历史一起清掉（推荐，避免密钥扫描器报警），在执行首次 `git push` 前：
+>
+> ```powershell
+> pip install git-filter-repo    # 或 winget/choco 安装
+> git filter-repo --path keys/shell_private.pem --invert-paths
+> # 历史哈希会全部改写：重新核对 tag、通知协作者重新 clone
+> ```
+>
+> 不重写历史也可以接受（旧密钥已作废），但不要声称"从未泄露"。
+
 签名格式是 OpenSSL `dgst -sha256 -sign`，即 **RSA-2048 + SHA-256 + PKCS#1 v1.5**。
 `sign_image.ps1` 在每次构建时从私钥推导 256 字节模数，写进 `obj/shell_signature.c`；
 内核 `security/trust.c` 只内嵌这个模数（`shell_modulus[256]`）并用它验签。
