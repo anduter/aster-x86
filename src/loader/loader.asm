@@ -148,7 +148,7 @@ msg_cpu_ok      db "  [1/5] CPU check: 386+ OK, unreal mode available", LF, 0
 msg_sysinfo     db "  [2/5] collecting system info (memory/CPU/SMBIOS/VBE/disk)", LF, 0
 msg_load_kernel db "  [3/5] loading kernel to 0x00100000", LF, 0
 msg_kernel_ok   db "        kernel header OK, image copied", LF, 0
-msg_set_vbe     db "  [4/5] setting VBE mode 0x118 (1024x768x24)", LF, 0
+msg_set_vbe     db "  [4/5] setting VBE mode 0x11B (1280x1024x24)", LF, 0
 msg_vbe_ok      db "        VBE mode set OK", LF, 0
 msg_enter_pm    db "  [5/5] entering protected mode", LF, 0
 msg_verify      db "  [5/5] verifying kernel signature", LF, 0
@@ -159,7 +159,7 @@ msg_bad_kernel  db "  invalid kernel header (bad magic or zero size)", LF, 0
 msg_too_big     db "  kernel image too large (over 1.4MB floppy payload)", LF, 0
 msg_disk_err    db "  disk read failed, int13 status="
 msg_lf          db LF, 0
-msg_vbe_err     db "ERROR: VBE mode 0x118 not available", LF, 0
+msg_vbe_err     db "ERROR: VBE mode 0x11B not available", LF, 0
 cpu_ok          db 0
 
 ; 补齐到 0x1800，再把 32 位内核签名验证器嵌到 0x9800。

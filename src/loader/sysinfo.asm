@@ -48,7 +48,7 @@ DISK_USED    equ SYSINFO_BASE+0x818 ; dq 已用字节数
 DISK_FREE    equ SYSINFO_BASE+0x820 ; dq 剩余字节数
 
 ; VBE 目标模式：0x118 = 1024x768 24bpp（QEMU std VGA 支持）
-VBE_TARGET_MODE equ 0x118
+VBE_TARGET_MODE equ 0x11B
 
 ; =============================================================================
 ; collect_sysinfo - 入口，依次采集各项信息
