@@ -52,7 +52,7 @@ KERNEL_CSRCS := $(wildcard $(KERNEL_DIR)/*.c) \
                 $(wildcard $(KERNEL_DIR)/*/*.c) \
                 $(wildcard $(KERNEL_DIR)/*/*/*.c)
 KERNEL_ASMS  := $(wildcard $(KERNEL_DIR)/*.asm) \
-                $(wildcard $(KERNEL_DIR)/*/*.asm)
+                $(wildcard $(KERNEL_DIR)/*/*.asm) \
                 $(wildcard $(KERNEL_DIR)/*/*/*.asm)
 KERNEL_OBJS  := $(patsubst $(KERNEL_DIR)/%.c,$(OBJ_DIR)/%.o,$(KERNEL_CSRCS)) \
                 $(patsubst $(KERNEL_DIR)/%.asm,$(OBJ_DIR)/%.o,$(KERNEL_ASMS))
@@ -108,7 +108,7 @@ $(KERNEL_SIG_C): $(KERNEL_BIN) $(SIGN_KEY) sign_image.ps1 | $(OBJ_DIR)
 $(KERNEL_SIG_O): $(KERNEL_SIG_C)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BOOT_TRUST_O): $(KERNEL_DIR)/core/trust.c | $(OBJ_DIR)
+$(BOOT_TRUST_O): $(KERNEL_DIR)/security/trust.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -DBOOT_VERIFY -c $< -o $@
 
 $(BOOT_SUP_O): $(BOOT_DIR)/verify_support.c | $(OBJ_DIR)

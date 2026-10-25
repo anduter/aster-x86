@@ -42,7 +42,9 @@ if (-not ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)) { throw 'buil
 $mp = 'Makefile'
 $m = [IO.File]::ReadAllText($mp)
 $m = $m.Replace('-T $(KERNEL_DIR)/linker.ld', '-T $(KERNEL_DIR)/arch/x86/linker.ld')
-$m = $m.Replace('                $(wildcard $(KERNEL_DIR)/*/*.asm)', "                $(wildcard $(KERNEL_DIR)/*/*.asm) `r`n                $(wildcard $(KERNEL_DIR)/*/*/*.asm)")
+$asmOld = '                $(wildcard $(KERNEL_DIR)/*/*.asm)'
+$asmNew = $asmOld + ' \' + "`r`n" + '                $(wildcard $(KERNEL_DIR)/*/*/*.asm)'
+$m = $m.Replace($asmOld, $asmNew)
 [IO.File]::WriteAllText($mp, $m, $encPlain)
 Write-Host '[arch-move] build scripts updated'
 
