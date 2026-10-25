@@ -134,4 +134,11 @@ void acct_fail_reset(const char *user);
 /* 按账户把 uid/gid/附加组落到进程上（login/su 成功后由 acct_login 调用） */
 void acct_apply_cred(acct_user_t *u);
 
+/* ---- P2 文件边界 ---- */
+/* exec 时应用 setuid/setgid 位：04000 -> euid/suid = 文件属主，
+ * 02000 -> egid/sgid = 文件属组。FAT16 挂载点按 nosuid 处理（不信任宿主
+ * 镜像里的 mode/uid）。由 user/user_mode.c 在进入新映像前调用。 */
+struct process;
+void acct_exec_cred(struct process *p, const char *path);
+
 #endif

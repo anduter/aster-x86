@@ -921,6 +921,205 @@ void acct_init(void)
     kprintf("acct: /etc/passwd|shadow|group ready (root uid=0, alice=1000, bob=1001)\n");
 }
 
+/* ==================== P2：exec 时的 setuid/setgid ==================== */
+
+/* exec 一个映像时按文件 mode 决定 euid/egid：
+ *   04000 -> euid/suid = 文件属主
+ *   02000 -> egid/sgid = 文件属组
+ * 挂载点 nosuid：FAT16 的 mode/uid 来自宿主镜像、不可信，整卷按 nosuid 处理。
+ * 传入 p 而不是用 proc_current()，自检可以直接喂一个栈上的假 proc_t。 */
+void acct_exec_cred(struct process *pp, const char *path)
+{
+    proc_t *p = (proc_t *)pp;
+    fs_stat_t st;
+
+    if (p == 0 || path == 0) return;
+
+    if (fs_is_fat(path)) {
+        kprintf("acct: nosuid mount, setuid bits ignored for %s\n", path);
+        return;
+    }
+    if (fs_stat(path, &st) != E_OK) return;
+
+    if ((st.mode & FS_MODE_SETUID) != 0U) {
+        p->euid = st.uid;
+        p->suid = st.uid;
+        kprintf("acct: setuid exec %s -> euid=%u\n", path, (unsigned int)st.uid);
+    }
+    if ((st.mode & FS_MODE_SETGID) != 0U) {
+        p->egid = st.gid;
+        p->sgid = st.gid;
+        kprintf("acct: setgid exec %s -> egid=%u\n", path, (unsigned int)st.gid);
+    }
+}
+
+/* 造一个测试用文件：路径、权限、属主；内容 1 字节 */
+static int mk_test_file(const char *path, uint32_t mode, uint32_t uid, uint32_t gid)
+{
+    uint32_t h;
+
+    (void)fs_unlink(path);
+    h = fs_open(path, FS_OPEN_WRITE | FS_OPEN_CREAT);
+    if (h == 0U) return -1;
+    (void)fs_write(h, "x", 1);
+    fs_close(h);
+    (void)fs_chown(path, uid, gid);             /* chown 会清 setuid/setgid */
+    return (fs_chmod(path, mode, 0U) == E_OK) ? 0 : -1;   /* 所以 chmod 放最后 */
+}
+
+/* 多用户文件矩阵（P2）：0600 / sticky / 目录 x / setuid / nosuid / umask */
+static void file_matrix_selftest(void)
+{
+    int ok = 1;
+    fs_cred_t alice, bob;
+    fs_stat_t st;
+    proc_t dummy;
+
+    fs_cred_from_ids(&alice, 1000U, 1000U);
+    fs_cred_from_ids(&bob, 1001U, 1001U);
+
+    /* 1) 0600：属主可读，其他用户 E_ACCES（/tmp 是 1777，沿途 x 不拦） */
+    {
+        int own;
+        int other;
+
+        (void)mk_test_file("system:/tmp/secret", 0600U, 1000U, 1000U);
+        own = (fs_access_cred("system:/tmp/secret", FS_ACCESS_READ, &alice) == E_OK);
+        other = (fs_access_cred("system:/tmp/secret", FS_ACCESS_READ, &bob) == E_ACCES);
+
+        kprintf("acct: file 0600 denies other uid %s\n", (own && other) ? "ok" : "FAIL");
+        ok = ok && own && other;
+    }
+
+    /* 2) sticky：/tmp 里别人的文件不能删；属主可以 */
+    {
+        int other;
+        int own;
+
+        (void)mk_test_file("system:/tmp/sticky.txt", 0644U, 1000U, 1000U);
+        other = (fs_unlink_cred("system:/tmp/sticky.txt", &bob, 0) == E_ACCES);
+        own = (fs_unlink_cred("system:/tmp/sticky.txt", &alice, 0) == E_OK);
+
+        kprintf("acct: /tmp sticky blocks other unlink %s\n", (other && own) ? "ok" : "FAIL");
+        ok = ok && other && own;
+    }
+
+    /* 3) 目录 x 沿途检查：0700 家目录里的文件，其他用户连 stat 都被拒 */
+    {
+        int denied;
+
+        (void)mk_test_file("system:/home/alice/note", 0644U, 1000U, 1000U);
+        denied = (fs_stat_cred("system:/home/alice/note", &st, &bob, 0) == E_ACCES);
+
+        kprintf("acct: path traversal through 0700 denied %s\n", denied ? "ok" : "FAIL");
+        ok = ok && denied;
+    }
+
+    /* 4) 目录没有 x（0444）时同样进不去 */
+    {
+        int denied;
+
+        (void)fs_mkdir("system:/noexec");
+        (void)fs_chmod("system:/noexec", 0444U, 0U);
+        (void)mk_test_file("system:/noexec/inside", 0644U, 0U, 0U);
+        denied = (fs_stat_cred("system:/noexec/inside", &st, &bob, 0) == E_ACCES);
+        (void)fs_chmod("system:/noexec", 0755U, 0U);   /* 恢复权限才能删 */
+        (void)fs_unlink("system:/noexec/inside");
+        (void)fs_unlink("system:/noexec");
+
+        kprintf("acct: dir without x blocks descent %s\n", denied ? "ok" : "FAIL");
+        ok = ok && denied;
+    }
+
+    /* 5) setuid exec：文件属主 root + 04755 -> euid 提为 0 */
+    {
+        int elevated = 0;
+
+        (void)mk_test_file("system:/tmp/su-test", 04755U, 0U, 0U);
+        memset(&dummy, 0, sizeof(dummy));
+        dummy.uid = 1000U; dummy.euid = 1000U; dummy.suid = 1000U;
+        dummy.gid = 1000U; dummy.egid = 1000U; dummy.sgid = 1000U;
+        acct_exec_cred((struct process *)&dummy, "system:/tmp/su-test");
+        elevated = (dummy.euid == 0U && dummy.suid == 0U);
+        kprintf("acct: setuid exec elevates euid %s\n", elevated ? "ok" : "FAIL");
+        ok = ok && elevated;
+    }
+
+    /* 6) setgid exec：属组 wheel(10) + 02755 -> egid 提为 10 */
+    {
+        int elevated = 0;
+
+        (void)mk_test_file("system:/tmp/sg-test", 02755U, 0U, 10U);
+        memset(&dummy, 0, sizeof(dummy));
+        dummy.uid = 1000U; dummy.euid = 1000U; dummy.suid = 1000U;
+        dummy.gid = 1000U; dummy.egid = 1000U; dummy.sgid = 1000U;
+        acct_exec_cred((struct process *)&dummy, "system:/tmp/sg-test");
+        elevated = (dummy.egid == 10U);
+        kprintf("acct: setgid exec elevates egid %s\n", elevated ? "ok" : "FAIL");
+        ok = ok && elevated;
+    }
+
+    /* 7) nosuid：fat: 卷上的文件不提权（FAT 没有可信的 mode/uid） */
+    {
+        int unchanged = 0;
+
+        memset(&dummy, 0, sizeof(dummy));
+        dummy.uid = 1000U; dummy.euid = 1000U; dummy.suid = 1000U;
+        dummy.gid = 1000U; dummy.egid = 1000U;
+        acct_exec_cred((struct process *)&dummy, "fat:/host.txt");
+        unchanged = (dummy.euid == 1000U);
+        kprintf("acct: fat: mount is nosuid %s\n", unchanged ? "ok" : "FAIL");
+        ok = ok && unchanged;
+    }
+
+    /* 8) chown 清 setuid/setgid 位 */
+    {
+        int cleared = 0;
+
+        (void)mk_test_file("system:/tmp/chown-test", 06755U, 0U, 0U);
+        (void)fs_chown("system:/tmp/chown-test", 1000U, 1000U);
+        if (fs_stat("system:/tmp/chown-test", &st) == E_OK) {
+            cleared = ((st.mode & 06000U) == 0U && st.uid == 1000U);
+        }
+        kprintf("acct: chown clears setuid bits %s\n", cleared ? "ok" : "FAIL");
+        ok = ok && cleared;
+    }
+
+    /* 9) umask：cred.umask=077 时新文件是 0600（不是 0644） */
+    {
+        int masked = 0;
+        fs_cred_t u;
+
+        fs_cred_from_ids(&u, 1001U, 1001U);
+        u.umask = 077U;
+        (void)fs_unlink("system:/tmp/umask-test");
+        {
+            int h = fs_open_cred("system:/tmp/umask-test",
+                                 FS_OPEN_WRITE | FS_OPEN_CREAT, &u, 0);
+
+            if (h >= 0) {
+                fs_close_ex(FS_BE_RAMFS, h);
+                if (fs_stat("system:/tmp/umask-test", &st) == E_OK) {
+                    masked = ((st.mode & 0777U) == 0600U && st.uid == 1001U);
+                }
+            }
+        }
+        kprintf("acct: umask 077 creates 0600 %s\n", masked ? "ok" : "FAIL");
+        ok = ok && masked;
+    }
+
+    /* 清理（不留在镜像里） */
+    (void)fs_unlink("system:/tmp/secret");
+    (void)fs_unlink("system:/tmp/sticky.txt");
+    (void)fs_unlink("system:/home/alice/note");
+    (void)fs_unlink("system:/tmp/su-test");
+    (void)fs_unlink("system:/tmp/sg-test");
+    (void)fs_unlink("system:/tmp/chown-test");
+    (void)fs_unlink("system:/tmp/umask-test");
+
+    kprintf("acct: file matrix %s\n", ok ? "PASS" : "FAIL");
+}
+
 /* ==================== 启动自检 ==================== */
 
 /* 用合成凭据判权，不依赖当前进程：证明 0600/0700/组权限/root 绕过都对 */
@@ -1108,6 +1307,9 @@ void acct_selftest(void)
             ok = ok && same;
         }
     }
+
+    /* P2：多用户文件矩阵（0600/sticky/目录 x/setuid/nosuid/umask） */
+    file_matrix_selftest();
 
     kprintf("acct: selftest %s\n", ok ? "PASS" : "FAIL");
 }

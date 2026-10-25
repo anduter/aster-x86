@@ -65,6 +65,25 @@ P2 只补 exec 时的 setuid/setgid、FAT16 nosuid 与多用户矩阵的检查�
 - umask 生效、创建时权限正确。
 
 **验收**：多用户矩阵 + -Test 连续 2 次全 PASS；非法路径穿越被拒。
+### P2 实施状态（2026-10-26）
+
+判权基础设施（目录 x 沿途检查、sticky、`fs_cred_t.umask`、chown 清 setuid）随 P1
+的 `fs_cred_t` 改造一起落地（见上文）；P2 补完 exec 侧语义与可断言的检查项：
+
+| 项 | 状态 | 落地 |
+| --- | --- | --- |
+| 目录 x 沿途检查（每层都要 x，缺 x -> E_ACCES） | 完成 | `fs/ramfs.c::walk_rel_ex` |
+| setuid/setgid 位在 chmod 中保留、chown 清除 | 完成 | `fs/ramfs.c::fs_chmod_impl/fs_chown_impl` |
+| sticky 目录删除规则（/tmp 01777） | 完成 | `fs/ramfs.c::may_unlink_in` |
+| exec 时应用 setuid/setgid（04000/02000） | 完成 | `security/accounts.c::acct_exec_cred` + `user/user_mode.c` |
+| FAT16 挂载 nosuid（不信任宿主 mode/uid） | 完成 | `acct_exec_cred` 里的 `fs_is_fat()` 分支 |
+| umask 生效（`mode & ~umask`，setuid 位不受 umask 影响） | 完成 | `fs/ramfs.c::new_mode_umasked` |
+| 多用户矩阵（0600 / sticky / 穿越 / setuid / nosuid / umask） | 完成（+10 条，112 -> 122） | `build.ps1`、`acct_selftest` 的 `file_matrix_selftest` |
+| -Test 连续 2 次 122/122 | 通过 | 两轮 `build.ps1 -Test`（隔离目录），见提交信息 |
+
+**FAT16 的 nosuid 边界**：FAT 后端的 `stat` 返回 `mode=0444 / uid=0`，本身没有
+setuid 位；`acct_exec_cred()` 仍显式按挂载点判一次（`fs_is_fat()`），避免以后给
+FAT 加上宿主 mode 透传时悄悄引入提权面。
 
 ## P3 提权与审计（1 周）
 
@@ -78,13 +97,13 @@ P2 只补 exec 时的 setuid/setgid、FAT16 nosuid 与多用户矩阵的检查�
 ## 每阶段门禁
 
 1. tools/ci.ps1 -Quick（静态）；
-2. -Test 连续 2 次 **全 PASS**（项数见 build.ps1：P1 起 112）；
+2. -Test 连续 2 次 **全 PASS**（项数见 build.ps1：P1 112、P2 122、P3 见文末）；
 3. check-deps 0 违规；
 4. 路径限定提交，前缀 [accounts]；
 5. 更新本文件与 docs/accounts.md。
 
 ## 兼容与回退
 
-- 测试模式自动登录 root，保证现有 98 项不被登录流程打断；
+- 测试模式自动登录 root，保证原有 98 项不被登录流程打断（P1 起共 112/122/… 项）；
 - 新增 syscall 只追加编号（当前 SYS_NR_MAX=63，从 64 起），bump ABI minor；
 - 若 P2/P3 影响既有检查，先加测试模式旁路，不放宽生产策略。

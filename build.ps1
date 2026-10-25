@@ -650,7 +650,19 @@ if ($Test -or $Shot) {
             @{ Name = '账号自检通过';              Ok = ($out -match 'acct: selftest PASS') },
             @{ Name = '测试模式自动登录 root';     Ok = ($out -match 'acct: autologin=root \(test build\) -> shell without login') },
             @{ Name = 'shell 报告 euid/gid';       Ok = ([regex]::Matches($out, 'ushell: euid=0 uid=0 gid=0 egid=0 groups=0').Count -ge 2) },
-            @{ Name = 'fork 继承凭据';             Ok = (($out -match 'acct: fork child euid=0 uid=0') -and ($out -match 'acct: fork creds inherited')) }
+            @{ Name = 'fork 继承凭据';             Ok = (($out -match 'acct: fork child euid=0 uid=0') -and ($out -match 'acct: fork creds inherited')) },
+
+            # ---- 账号系统 P2（文件边界） ----
+            @{ Name = '0600 文件对其他用户拒绝';   Ok = ($out -match 'acct: file 0600 denies other uid ok') },
+            @{ Name = '/tmp sticky 阻止他人删除';  Ok = ($out -match 'acct: /tmp sticky blocks other unlink ok') },
+            @{ Name = '0700 目录阻断路径穿越';     Ok = ($out -match 'acct: path traversal through 0700 denied ok') },
+            @{ Name = '无 x 目录阻断下钻';         Ok = ($out -match 'acct: dir without x blocks descent ok') },
+            @{ Name = 'setuid exec 提权';          Ok = (($out -match 'acct: setuid exec elevates euid ok') -and ($out -match 'acct: setuid exec system:/tmp/su-test -> euid=0')) },
+            @{ Name = 'setgid exec 提权';          Ok = (($out -match 'acct: setgid exec elevates egid ok') -and ($out -match 'acct: setgid exec system:/tmp/sg-test -> egid=10')) },
+            @{ Name = 'FAT16 挂载 nosuid';         Ok = ($out -match 'acct: nosuid mount, setuid bits ignored for fat:/host\.txt') },
+            @{ Name = 'chown 清 setuid 位';        Ok = ($out -match 'acct: chown clears setuid bits ok') },
+            @{ Name = 'umask 生效';                Ok = ($out -match 'acct: umask 077 creates 0600 ok') },
+            @{ Name = '多用户文件矩阵通过';        Ok = ($out -match 'acct: file matrix PASS') }
         )
 
         T 'checks begin'

@@ -495,6 +495,9 @@ int user_exec_replace(const char *path, const char *args, struct interrupt_frame
     /* 新空间已就绪，回收旧用户区。 */
     vmm_destroy_dir(old_dir);
 
+    /* P2：setuid/setgid 位（FAT16 卷按 nosuid 处理，不信任宿主 mode） */
+    acct_exec_cred((struct process *)p, path);
+
     f->eip = entry;
     f->useresp = stack_va + off;
     f->eax = 0;

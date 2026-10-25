@@ -59,7 +59,9 @@ euid == 0                   -> 直接放行（root）
 - `mkdir/unlink/rename` 要求父目录 `w+x`；`sticky` 目录（`/tmp` 01777）里
   只有文件属主、目录属主或 root 能删除/改名；
 - `chmod` 保留 04000/02000/01000（只有 root 能设 setuid/setgid 位）；
-- `chown` 清 setuid/setgid 位。
+- `chown` 清 setuid/setgid 位；
+- `exec` 时按文件的 04000/02000 把 euid/egid 提为属主/属组（`acct_exec_cred`）；FAT16 是
+  宿主提供的卷，按 **nosuid** 挂载处理，整卷忽略 setuid 位。
 
 ## 4. /etc 文件与默认账户（教学镜像）
 
