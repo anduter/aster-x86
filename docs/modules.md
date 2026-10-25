@@ -248,3 +248,9 @@ M8 → 只依赖用户态 ABI（src/user/ulib.h）
 - types.h stays at src/kernel/types.h (option C not done: wide churn, low value)
 - all includes repointed to "arch/x86/io.h" (17 files)
 - build.ps1 linker path and Makefile asm wildcard updated
+
+### include/types.h split (2026-10-25)
+
+- include/types.h: fixed-width types, size_t/uintptr_t, address types, NULL
+- include/macros.h: KiB/MiB/GiB, ARRAY_SIZE, ALIGN_*, MIN/MAX, UNUSED
+- src/kernel/types.h is now a compatibility shim including both (66 existing includes unchanged)
