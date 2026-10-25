@@ -31,6 +31,10 @@ void console_set_color(uint32_t fg, uint32_t bg);
 /* 输入区：在底部输入框里画一行（提示符 + 正在输入的内容），不换行不滚动 */
 void console_input_set(const char *text);
 
+/* 输入框下划线光标：visible!=0 时在当前输入行尾画一条粗下划线，0 时擦掉。
+ * 只操作 framebuffer 输入框，不写串口、不动输出区；行尾/行满时自动裁剪。 */
+void console_cursor_set(int visible);
+
 /* 是否把输出同时写到串口（默认开启） */
 void console_set_mirror(bool enabled);
 

@@ -110,33 +110,57 @@ static int split(char *s, char **argv, int max)
     return argc;
 }
 
-/* 把“提示符 + 当前输入”画到底部输入框（SYS_INPUT_SET） */
+/* 把“提示符 + 当前输入”画到底部输入框（SYS_INPUT_SET）。
+ * 内核 SYS_INPUT_SET 的缓冲是 128 字节（len 必须 < 128），整行超长会被
+ * 直接拒绝、输入框就不刷新了；这里先截断到 127，保证长行也能显示。
+ * 光标不放进这个缓冲区：它由 SYS_CONSOLE_CURSOR 在 framebuffer 上画。
+ *
+ * 注意：输入/光标这段代码正好压在 0x40004000 边界上——-O0 下 .text 多出
+ * 几十字节就会把 .rodata 挤到下一页，user_shell.elf 因此多 4KB（ramfs 单
+ * 文件上限 32KB）。和 sectest 一样，这一段单独用 -Os 编译，语义不变。
+ */
+#pragma GCC push_options
+#pragma GCC optimize ("Os")
+
+#define INPUT_LINE_MAX 127
+
 static void show_input(const char *buf, int len)
 {
-    static char line[192];
+    static char line[INPUT_LINE_MAX + 1];
     int n = 0;
     const char *p = "ushell> ";
 
-    while (*p != '\0' && n < (int)sizeof(line) - 1) line[n++] = *p++;
-    for (int i = 0; i < len && n < (int)sizeof(line) - 1; i++) {
+    while (*p != '\0' && n < INPUT_LINE_MAX) line[n++] = *p++;
+    for (int i = 0; i < len && n < INPUT_LINE_MAX; i++) {
         line[n++] = buf[i];
     }
     line[n] = '\0';
 
     sc(SYS_INPUT_SET, (int)line, n, 0);
+    /* console 端会在 input_set 之后自动把光标重画到新行尾 */
 }
 
-/* 读一行：字符来自 SYS_GETCHAR（阻塞），显示走输入框，回车后写进输出区 */
+/* 读一行：字符来自 SYS_GETCHAR（阻塞），显示走输入框，回车后写进输出区。
+ *
+ * 光标：开始输入前 console_cursor(1)，console 在每次 SYS_INPUT_SET 重画
+ * 输入行后自动把 3px 下划线画到行尾；退格/字符输入都走 show_input，所以
+ * 光标自动跟随。回车先 console_cursor(0) 再清输入框，光标不会进入输出区。
+ *
+ * 为什么不闪烁：SYS_GETCHAR 在内核里是 proc_block(PROC_WAIT_KBD) 的阻塞读，
+ * ABI 没有非阻塞读键调用，也没有定时信号；SYS_SLEEP 只能在两次读之间睡，
+ * 没法在等键时切换光标。忙等会占满 CPU 并拖慢输入响应，因此保持常亮。 */
 static void readline(char *buf, int max)
 {
     int len = 0;
 
     show_input(buf, 0);
+    console_cursor(1);
 
     for (;;) {
         int c = sc(SYS_GETCHAR, 0, 0, 0);
 
         if (c == '\r' || c == '\n') {
+            console_cursor(0);                  /* 先擦光标，别留在历史行里 */
             buf[len] = '\0';
             sc(SYS_INPUT_SET, (int)"", 0, 0);   /* 清空输入框 */
             putstr("ushell> ");                 /* 命令历史写进输出区 */
@@ -147,7 +171,7 @@ static void readline(char *buf, int max)
         if (c == '\b') {
             if (len > 0) {
                 len--;
-                show_input(buf, len);
+                show_input(buf, len);           /* 光标随行尾左移 */
             }
             continue;
         }
@@ -155,10 +179,12 @@ static void readline(char *buf, int max)
 
         if (len + 1 < max) {
             buf[len++] = (char)c;
-            show_input(buf, len);
+            show_input(buf, len);               /* 光标随行尾右移 */
         }
     }
 }
+
+#pragma GCC pop_options
 
 /* ls [-l] [path]：-l 显示类型、大小、mtime */
 static bool ls_long;

@@ -55,6 +55,7 @@ bool misc_syscall_owns(uint32_t nr)
     case SYS_RESINFO:
     case SYS_ETH:
     case SYS_MOUSE:
+    case SYS_CONSOLE_CURSOR: /* v1.2：输入框下划线光标（只画 framebuffer） */
     case SYS_ABI_VERSION:   /* ABI v1 只追加的标量版本查询（59） */
         return true;
     default:
@@ -76,6 +77,12 @@ int misc_syscall(interrupt_frame_t *f)
         break;
     case SYS_GETCHAR:
         ret = sys_getchar_block();
+        break;
+    case SYS_CONSOLE_CURSOR:
+        /* ebx=0 隐藏；非 0 显示。只动 framebuffer 输入框，不写串口，
+         * 所以不影响任何日志断言。 */
+        console_cursor_set((f->ebx != 0U) ? 1 : 0);
+        ret = 0;
         break;
     case SYS_TCP_TEST:
         ret = net_tcp_echo_test();

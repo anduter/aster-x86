@@ -32,6 +32,8 @@
 #define TAB_WIDTH   4U
 #define INPUT_H     (16U * FONT_SCALE)   /* 输入框高度 */
 #define BOX_GAP     6U    /* 输出框与输入框间距 */
+/* 输入框下划线光标的粗细：默认字体缩放下 3px，比普通 '_' 更醒目 */
+#define CURSOR_H    (3U * FONT_SCALE)
 
 /* 配色（0x00RRGGBB） */
 #define COL_BG        0x102030U
@@ -53,6 +55,13 @@ static char status_right[STATUS_TEXT_MAX];
 static uint32_t con_x0, con_y0, con_x1, con_y1;
 static uint32_t out_x0, out_y0, out_x1, out_y1;
 static uint32_t in_x0, in_y0, in_x1;
+/* 输入框状态：最后一次画出的字符数 + 下划线光标是否显示/已画在哪儿。
+ * 光标不保存任何字符，只保存绘制坐标，隐藏时按同一坐标擦除。 */
+static uint32_t input_len;
+static bool     input_cursor_on;
+static bool     input_cursor_drawn;
+static uint32_t input_cursor_x;
+static uint32_t input_cursor_y;
 
 static uint32_t cols, rows;
 static uint32_t cur_col, cur_row;
@@ -177,6 +186,10 @@ void console_clear(void)
     fb_fill_rect(in_x0, con_y1 - INPUT_H + 4U, in_x1, con_y1 - 4U, cur_bg);
     cur_col = 0;
     cur_row = 0;
+    /* 整屏清空后输入框是空的：光标收起来，等下一次 SYS_CONSOLE_CURSOR */
+    input_len = 0U;
+    input_cursor_on = false;
+    input_cursor_drawn = false;
 }
 
 void console_set_color(uint32_t fg, uint32_t bg)
@@ -284,11 +297,41 @@ void console_serial_line(const char *s)
     }
     spin_unlock_irqrestore(&console_lock, flags);
 }
+/* 输入框一行最多能放多少字符（不含提示符概念，纯几何宽度） */
+static uint32_t input_limit(void)
+{
+    return (in_x1 > in_x0) ? ((in_x1 - in_x0) / CELL_W) : 0U;
+}
+
+/* 把下划线画在“最后一个字符的下一个格子”底部；行满时钉在最后一格，
+ * 绝不越过输入框右边界。坐标记下来，隐藏时原位填背景色擦掉。 */
+static void input_cursor_draw(void)
+{
+    uint32_t limit = input_limit();
+    uint32_t n = input_len;
+
+    if (limit == 0U) return;
+    if (n >= limit) n = limit - 1U;
+    input_cursor_x = in_x0 + n * CELL_W;
+    input_cursor_y = in_y0 + 8U * FONT_SCALE - CURSOR_H;
+    fb_fill_rect(input_cursor_x, input_cursor_y,
+                 input_cursor_x + CELL_W, input_cursor_y + CURSOR_H, COL_FG);
+    input_cursor_drawn = true;
+}
+
+static void input_cursor_erase(void)
+{
+    if (!input_cursor_drawn) return;
+    fb_fill_rect(input_cursor_x, input_cursor_y,
+                 input_cursor_x + CELL_W, input_cursor_y + CURSOR_H, COL_BG);
+    input_cursor_drawn = false;
+}
+
 /* 输入区：清空整行后画一行文本（不换行、不滚动、不进串口） */
 void console_input_set(const char *text)
 {
     char buf[160];
-    uint32_t limit = (in_x1 - in_x0) / CELL_W;
+    uint32_t limit = input_limit();
     uint32_t n = 0;
 
     if (text == NULL) text = "";
@@ -300,8 +343,25 @@ void console_input_set(const char *text)
     }
     buf[n] = '\0';
 
+    /* 整块重画：旧光标像素也在这一块里，被背景色一起清掉 */
     fb_fill_rect(in_x0, con_y1 - INPUT_H + 4U, in_x1, con_y1 - 4U, COL_BG);
+    input_cursor_drawn = false;
     text_at(in_x0, in_y0, buf, COL_FG, COL_BG);
+
+    input_len = n;
+    if (input_cursor_on) input_cursor_draw();       /* 光标自动跟到新的行尾 */
+}
+
+/* SYS_CONSOLE_CURSOR：显示/隐藏输入框下划线光标。幂等，可重复调用。 */
+void console_cursor_set(int visible)
+{
+    if (visible) {
+        input_cursor_on = true;
+        input_cursor_draw();
+    } else {
+        input_cursor_erase();
+        input_cursor_on = false;
+    }
 }
 
 void console_set_title(const char *text)

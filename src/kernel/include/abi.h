@@ -27,7 +27,7 @@
 #define OS_ABI_MAGIC          0x4F534142u   /* "OSAB"（小端字节序 'O','S','A','B'） */
 #define OS_ABI_VERSION        1u            /* 头文件/编号空间的 major 版本 */
 #define OS_ABI_VERSION_MAJOR  1
-#define OS_ABI_VERSION_MINOR  1
+#define OS_ABI_VERSION_MINOR  2
 
 /* SYS_ABI_VERSION 返回值的低 16 位（feature bits）：只增不减。
  *
@@ -121,6 +121,11 @@
 #define SYS_GETPPID    61 /*                                    -> 父 pid（0=无） */
 #define SYS_MPROTECT   62 /* ebx=addr, ecx=len, edx=prot         -> 0 / -1 */
 
+/* v1.2 新增（只追加）：输入框光标显示/隐藏。
+ * 只在 framebuffer 的输入框里画一条下划线，不写串口、不动输出区；
+ * 位置跟随最后一次 SYS_INPUT_SET 画出的行尾。 */
+#define SYS_CONSOLE_CURSOR 63 /* ebx=0 隐藏 / 1 显示              -> 0 / -1 */
+
 /* SYS_WAITPID 的 options 位 */
 #define WNOHANG 1
 
@@ -136,7 +141,7 @@
 #define SIG_IGN 1u
 
 /* 已分配的最大编号；新增调用必须从 SYS_NR_MAX + 1 开始 */
-#define SYS_NR_MAX 62
+#define SYS_NR_MAX 63
 
 /* =============================================================================
  * 3. 用户可见共享结构体（布局冻结，见文件末尾断言）

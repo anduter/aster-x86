@@ -35,6 +35,11 @@ int mprotect(void *addr, unsigned int len, int prot);
 /* 设置信号处理函数（SIG_DFL/SIG_IGN/用户地址）；返回旧 handler，失败 -1 */
 int signal(int sig, unsigned int handler);
 
+/* ---- 控制台（ABI v1.2） ---- */
+/* 输入框下划线光标：visible!=0 显示，0 隐藏。只在 framebuffer 输入框上画，
+ * 不写串口；位置自动跟随最后一次 SYS_INPUT_SET 画出的行尾。 */
+int console_cursor(int visible);
+
 int putchar(int c);
 int puts(const char *s);
 int printf(const char *fmt, ...);

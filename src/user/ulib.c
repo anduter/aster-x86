@@ -73,6 +73,12 @@ int signal(int sig, unsigned int handler)
     return syscall3(SYS_SIGACTION, sig, (int)handler, 0);
 }
 
+/* ---- 控制台（ABI v1.2）：输入框下划线光标显示/隐藏 ---- */
+int console_cursor(int visible)
+{
+    return syscall3(SYS_CONSOLE_CURSOR, visible, 0, 0);
+}
+
 int putchar(int c)
 {
     char ch = (char)c;
