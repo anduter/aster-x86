@@ -1,57 +1,135 @@
 /* =============================================================================
  * core/splash.c - framebuffer 启动画面
  *
- * 在 fb_init() 之后、console_init() 之前绘制，随后等待约 0.8 秒再交给
- * 控制台初始化。这样用户能看到完整的 ASTER 启动画面，而正常内核日志
- * 仍然从 console 开始输出。
+ * 在 fb_init() 之后、console_init() 之前绘制：深色竖向渐变 + 点阵网格 +
+ * 居中徽标 + 字标 + 动画进度条。约 0.8 秒后交给控制台，正常内核日志仍从
+ * console 开始输出。
  * ============================================================================= */
 #include "splash.h"
 #include "include/dev.h"
-#include "arch/x86/io.h"
-#include "include/kernel.h"
 #include "include/kernel.h"
 
-#define SPLASH_BG       0x081018U
-#define SPLASH_PANEL    0x0E1B2CU
-#define SPLASH_ACCENT   0x1F6FEBU
-#define SPLASH_TITLE    0x7FDBFFU
-#define SPLASH_SUB      0xA9B7C6U
-#define SPLASH_BAR_BG   0x1B2A3AU
-#define SPLASH_BAR_FG   0x3FB950U
+/* ---- 调色板 ---- */
+#define SPLASH_BG_TOP    0x0A0E14U
+#define SPLASH_BG_BOT    0x131C28U
+#define SPLASH_DOT       0x16202CU
+#define SPLASH_ACCENT    0x4C8DFFU
+#define SPLASH_ACCENT2   0x22D3EEU
+#define SPLASH_TEXT      0xE6EDF3U
+#define SPLASH_SUB       0x8B949EU
+#define SPLASH_BAR_BG    0x1C2430U
+#define SPLASH_LINE      0x243040U
 
-static void splash_text(uint32_t y, const char *s, uint32_t scale, uint32_t fg)
+static void fill(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, uint32_t c)
+{
+    fb_fill_rect(x0, y0, x1, y1, c);
+}
+
+static uint32_t lerp_color(uint32_t a, uint32_t b, uint32_t t, uint32_t tmax)
+{
+    uint32_t r = (((a >> 16) & 0xFFU) * (tmax - t) + ((b >> 16) & 0xFFU) * t) / tmax;
+    uint32_t g = (((a >> 8) & 0xFFU) * (tmax - t) + ((b >> 8) & 0xFFU) * t) / tmax;
+    uint32_t bl = ((a & 0xFFU) * (tmax - t) + (b & 0xFFU) * t) / tmax;
+    return (r << 16) | (g << 8) | bl;
+}
+
+static uint32_t text_width(const char *s, uint32_t scale, uint32_t gap)
 {
     uint32_t n = (uint32_t)strlen(s);
-    uint32_t cw = 8U * scale;
-    uint32_t width = n * cw;
-    uint32_t x = (fb_w > width) ? (fb_w - width) / 2U : 0U;
+    if (n == 0U) return 0U;
+    return n * 8U * scale + (n - 1U) * gap;
+}
 
-    for (uint32_t i = 0; i < n; i++) {
-        fb_char_scaled(x + i * cw, y, s[i], fg, SPLASH_BG, scale);
+/* 居中文本：scale 放大，gap 为字符间距（像素） */
+static void text_center(uint32_t y, const char *s, uint32_t scale, uint32_t gap, uint32_t fg)
+{
+    uint32_t w = text_width(s, scale, gap);
+    uint32_t x = (fb_w > w) ? (fb_w - w) / 2U : 0U;
+    uint32_t cw = 8U * scale;
+
+    for (uint32_t i = 0; s[i] != '\0'; i++) {
+        fb_char_scaled(x + i * (cw + gap), y, s[i], fg, SPLASH_BG_BOT, scale);
     }
 }
 
-static void splash_wait(void)
+/* 徽标：细边框方块 + 大号 "A" + 四角装饰 */
+static void badge(uint32_t cx, uint32_t cy, uint32_t size)
 {
-    uint32_t lo, hi, start_lo, start_hi;
+    uint32_t half = size / 2U;
+    uint32_t x0 = cx - half, y0 = cy - half;
+    uint32_t x1 = cx + half, y1 = cy + half;
+    uint32_t t = 2U;
+    uint32_t gs = (size >= 120U) ? 12U : 8U;
+
+    fill(x0, y0, x1, y0 + t, SPLASH_ACCENT);
+    fill(x0, y1 - t, x1, y1, SPLASH_ACCENT);
+    fill(x0, y0, x0 + t, y1, SPLASH_ACCENT);
+    fill(x1 - t, y0, x1, y1, SPLASH_ACCENT);
+
+    fill(x0 - 8U, y0 - 8U, x0, y0, SPLASH_ACCENT2);
+    fill(x1, y0 - 8U, x1 + 8U, y0, SPLASH_ACCENT2);
+    fill(x0 - 8U, y1, x0, y1 + 8U, SPLASH_ACCENT2);
+    fill(x1, y1, x1 + 8U, y1 + 8U, SPLASH_ACCENT2);
+
+    {
+        uint32_t gw = 8U * gs;
+        uint32_t gh = 8U * gs;
+        uint32_t gx = cx - gw / 2U;
+        uint32_t gy = cy - gh / 2U;
+        fb_char_scaled(gx, gy, 'A', SPLASH_ACCENT, SPLASH_BG_BOT, gs);
+    }
+}
+
+static void progress_bar(uint32_t pct)
+{
+    uint32_t bar_w = (fb_w > 640U) ? 560U : (fb_w - 80U);
+    uint32_t bar_h = 6U;
+    uint32_t x = (fb_w - bar_w) / 2U;
+    uint32_t y = (fb_h * 3U) / 4U + 24U;
+    char pbuf[8];
+
+    fill(x, y, x + bar_w, y + bar_h, SPLASH_BAR_BG);
+    if (pct > 0U) {
+        fill(x, y, x + (bar_w * pct) / 100U, y + bar_h, SPLASH_ACCENT2);
+    }
+
+    if (pct >= 100U) {
+        pbuf[0] = '1'; pbuf[1] = '0'; pbuf[2] = '0'; pbuf[3] = '%'; pbuf[4] = '\0';
+    } else if (pct >= 10U) {
+        pbuf[0] = (char)('0' + (pct / 10U) % 10U);
+        pbuf[1] = (char)('0' + pct % 10U);
+        pbuf[2] = '%'; pbuf[3] = '\0';
+    } else {
+        pbuf[0] = (char)('0' + pct);
+        pbuf[1] = '%'; pbuf[2] = '\0';
+    }
+
+    {
+        uint32_t tw = 3U * 8U + 2U * 2U;
+        uint32_t tx = (fb_w - tw) / 2U;
+        uint32_t ty = y + 16U;
+        fill(tx - 4U, ty, tx + tw + 4U, ty + 8U, SPLASH_BG_BOT);
+        text_center(ty, pbuf, 1U, 2U, SPLASH_SUB);
+    }
+}
+
+static void delay_ticks(uint64_t cycles)
+{
+    uint32_t lo, hi;
+    uint64_t start, now;
 
     __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-    start_lo = lo;
-    start_hi = hi;
-
-    /* 约 0.8 秒；上限循环数防止某些平台 TSC 不前进时卡死。 */
-    for (uint32_t guard = 0; guard < 400000000U; guard++) {
+    start = ((uint64_t)hi << 32) | lo;
+    for (uint32_t guard = 0; guard < 200000000U; guard++) {
         __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-        uint64_t now = ((uint64_t)hi << 32) | lo;
-        uint64_t start = ((uint64_t)start_hi << 32) | start_lo;
-        if (now - start >= 2000000000ULL) break;
+        now = ((uint64_t)hi << 32) | lo;
+        if (now - start >= cycles) break;
         __asm__ volatile ("pause");
     }
 }
 
 static void splash_serial(const char *s)
 {
-    /* 与 console 输出共用同一把锁，整行原子（早启动单核也无副作用）。 */
     console_serial_line(s);
 }
 
@@ -59,34 +137,51 @@ void boot_splash(void)
 {
     uint32_t w = fb_w != 0U ? fb_w : 1024U;
     uint32_t h = fb_h != 0U ? fb_h : 768U;
-    uint32_t title_scale = (w >= 800U) ? 8U : 5U;
-    uint32_t bar_w = (w > 520U) ? 420U : (w > 120U ? w - 100U : w);
-    uint32_t bar_x = (w - bar_w) / 2U;
-    uint32_t bar_y = h / 2U + 110U;
+    uint32_t cx = w / 2U;
+    uint32_t cy = h / 2U;
+    uint32_t bands = 32U;
 
-    /* 背景与上下强调条 */
-    fb_fill_rect(0, 0, w, h, SPLASH_BG);
-    fb_fill_rect(0, 0, w, 4U, SPLASH_ACCENT);
-    fb_fill_rect(0, h - 4U, w, h, SPLASH_ACCENT);
-
-    /* 中间的暗色 panel，给标题一个视觉层次 */
-    {
-        uint32_t px0 = (w > 720U) ? (w / 2U - 360U) : 20U;
-        uint32_t px1 = (w > 720U) ? (w / 2U + 360U) : (w - 20U);
-        fb_fill_rect(px0, h / 2U - 190U, px1, h / 2U + 190U, SPLASH_PANEL);
+    /* 1) 竖向渐变背景 */
+    for (uint32_t i = 0; i < bands; i++) {
+        uint32_t y0 = (h * i) / bands;
+        uint32_t y1 = (h * (i + 1U)) / bands;
+        fill(0U, y0, w, y1, lerp_color(SPLASH_BG_TOP, SPLASH_BG_BOT, i, bands - 1U));
     }
 
-    splash_text((h / 2U) - 150U, "ASTER", title_scale, SPLASH_TITLE);
-    splash_text((h / 2U) + 20U, "a small native operating system", 2U, SPLASH_SUB);
-    splash_text((h / 2U) + 52U, OS_NAME "  " OS_VERSION, 2U, SPLASH_SUB);
+    /* 2) 点阵网格（低对比，增加质感） */
+    for (uint32_t y = 24U; y < h; y += 48U) {
+        for (uint32_t x = 24U; x < w; x += 48U) {
+            fill(x, y, x + 2U, y + 2U, SPLASH_DOT);
+        }
+    }
 
-    /* 进度条：静态 72%，表示“正在进入内核” */
-    fb_fill_rect(bar_x, bar_y, bar_x + bar_w, bar_y + 8U, SPLASH_BAR_BG);
-    fb_fill_rect(bar_x, bar_y, bar_x + (bar_w * 72U) / 100U, bar_y + 8U, SPLASH_BAR_FG);
+    /* 3) 顶部品牌条与底部细线 */
+    fill(0U, 0U, w, 2U, SPLASH_ACCENT);
+    fill(0U, h - 2U, w, h, SPLASH_LINE);
 
-    splash_text(bar_y + 26U, "booting kernel ...", 1U, SPLASH_SUB);
+    /* 4) 徽标 + 字标 */
+    badge(cx, cy - 150U, 132U);
+    text_center(cy - 44U, "ASTER", 6U, 6U, SPLASH_TEXT);
+    text_center(cy + 24U, OS_NAME "  v" OS_VERSION, 2U, 3U, SPLASH_SUB);
+    text_center(cy + 52U, "a small native operating system", 1U, 2U, SPLASH_SUB);
 
+    /* 底部信息 */
+    fb_text(24U, h - 22U, "32-bit protected mode", SPLASH_SUB, SPLASH_BG_BOT);
+    {
+        const char *r = "ASTER  x86 OS";
+        uint32_t rw = text_width(r, 1U, 1U);
+        fb_text(w - rw - 24U, h - 22U, r, SPLASH_SUB, SPLASH_BG_BOT);
+    }
+
+    /* 5) 分隔线 */
+    fill(cx - 280U, (h * 3U) / 4U, cx + 280U, (h * 3U) / 4U + 1U, SPLASH_LINE);
+
+    /* 6) 进度条动画 0 -> 100 */
     splash_serial("boot: splash drawn\n");
-    splash_wait();
+    for (uint32_t pct = 0U; pct <= 100U; pct += 10U) {
+        progress_bar(pct);
+        delay_ticks(9000000ULL);
+    }
+
     splash_serial("boot: splash end\n");
 }
