@@ -109,10 +109,16 @@ powershell -NoProfile -File tools/bench.ps1 -SkipTest      # 只测构建（有�
 | `boot_ready_s` | QEMU 启动 → `ushell: ready`（`[t before qemu]` 到 `[t boot ready]` 的差值） |
 | `note` | `clean`/`dirty`（工作区状态）、`no-test` 等 |
 
-实测样例（2026-10-26，Windows 10 + PS 5.1，**工作区含其他会话未提交改动**所以是 `dirty`）：
+实测样例（2026-10-26，Windows 10 + PS 5.1；完整模式，工作区 `clean`）：
 
 ```
 time,git,version,kernel_bytes,image_bytes,full_build_s,incremental_build_s,test_s,checks,boot_ready_s,note
+2026-10-26T03:03:53,ab59c48,0.71.0,260308,1474560,12.83,2.14,28.67,131,8.60,clean
+```
+
+只测构建（`-SkipTest`，例如浸泡/回归正在跑）：
+
+```
 2026-10-26T02:30:00,fef1a32,0.71.0,260308,1474560,13.03,2.14,,,,no-test,dirty
 ```
 
@@ -130,3 +136,15 @@ time,git,version,kernel_bytes,image_bytes,full_build_s,incremental_build_s,test_
 - 推送后：`static.yml` 会在 push/PR 自动跑；`full.yml` 需要自托管 Windows runner 且手动触发。
   以 Actions 页面结果为准，不要用本地结果替代 CI 结论。
 - 私钥：CI 用仓库 secret `SIGNING_KEY_PEM` 注入，或在 job 内生成一次性密钥；仓库永不提交私钥。
+
+### 本地验证记录（2026-10-26 工程收尾）
+
+| 命令 | 结果 |
+|---|---|
+| `tools/unit.ps1` | **7/7** 用例 PASS（abi 30 / string 51 / trust 17 / pipe 46 / service 36 / fuzz-trust 2 / fuzz-pipe 5 checks） |
+| `tools/ci.ps1 -Quick -StrictBom` | PASS（2.1s；28 个脚本 BOM/解析、264 个被跟踪文件无产物、check-deps 0 违规） |
+| `tools/ci.ps1 -Full -StrictBom`（`5bcad98`） | **PASS**：构建 13.0s，`-Test` **131/131 ×2**（30.2s / 19.1s），结束后 worktree 干净 |
+| `tools/bench.ps1 -Runs 1` | 全量 12.83s、增量 2.14s、`-Test` 28.67s、启动→ready 8.60s、131 项 |
+| `tools/release.ps1 -Version 0.71.0 -NoCommit -NoTag` | 构建/签名/SHA256SUMS/RELEASE.md 生成成功；模数指纹 `sha256:eaff7f61…`（与 `keys/shell_public.pem` 一致） |
+
+**未执行**（如实记录，不算通过）：GitHub Actions（无远端/无 runner）、`cppcheck`、`clang-tidy`（未安装）。

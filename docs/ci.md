@@ -87,8 +87,8 @@ elapsed: 2.1s
 构建/回归日志在 `obj/ci/build.log`、`obj/ci/test-1.log`、`test-2.log`（`obj/` 已忽略；
 CI 失败时直接把 `obj/ci/**` 上传成 artifact）。
 
-实测（`8f95dbf`，Windows 10 + PowerShell 5.1）：`-Quick` **0.9s**；
-`-Full` **47.7s**（构建 12.7s + `-Test` 19.7s/14.4s，各 **98/98**），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
+实测（2026-10-26，`5bcad98`，Windows 10 + PowerShell 5.1）：`-Quick` **2.1s**（含 7 组 host 单元测试）；
+`-Full` **65.8s**（构建 13.0s + `-Test` 30.2s/19.1s，各 **131/131**），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
 
 参数一览：
 
