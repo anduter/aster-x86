@@ -46,3 +46,6 @@ desktop.ini
 
 # session coordination artifacts
 /.session/
+
+# 旧项目副本（误入仓库，已清理）
+/OS/
