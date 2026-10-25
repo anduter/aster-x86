@@ -1,7 +1,7 @@
 #ifndef IPC_PIPE_H
 #define IPC_PIPE_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 无名管道：固定大小的环形缓冲，读写端通过 fd 共享。
  * 写端有引用计数（fork/dup2 会增加），全部关闭后读端看到 EOF。 */

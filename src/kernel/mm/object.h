@@ -1,7 +1,7 @@
 #ifndef CORE_OBJECT_H
 #define CORE_OBJECT_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 对象类型：句柄的高 8 位就是它，所以“拿程序句柄当文件用”会在入口被拒绝。
  * 这是本设计区别于 Linux“一切皆文件”的关键：五类对象并列，互不冒充。 */

@@ -1,7 +1,7 @@
 /* =============================================================================
  * proc/trap/syscall_util.c - syscall 层共享辅助（用户指针/路径/fd 分配）
  * ============================================================================= */
-#include "../../types.h"
+#include "../../include/types.h"
 #include "interrupt.h"
 #include "syscall_internal.h"
 #include "uaccess.h"

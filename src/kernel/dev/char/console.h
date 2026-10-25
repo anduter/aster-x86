@@ -8,7 +8,7 @@
 #ifndef CONSOLE_H
 #define CONSOLE_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* 初始化：按当前分辨率计算网格并画出标题栏/状态栏/边框 */
 void console_init(void);

@@ -1,7 +1,7 @@
 #ifndef CORE_PROGRAM_H
 #define CORE_PROGRAM_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 #define PROG_NAME_MAX 24
 #define PROG_MAX      16

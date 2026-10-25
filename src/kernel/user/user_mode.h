@@ -18,7 +18,7 @@ struct interrupt_frame;
 int user_exec_replace(const char *path, const char *args, struct interrupt_frame *f);
 
 /* 用户栈按需增长：如果缺页地址在栈下方允许范围内，映射新页并返回 true */
-#include "../types.h"
+#include "../include/types.h"
 bool user_try_grow_stack(uint32_t fault_addr);
 
 #endif

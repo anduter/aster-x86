@@ -1,7 +1,7 @@
 #ifndef CORE_SMP_H
 #define CORE_SMP_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 启动 MADT 中列出的 AP：进入 32 位保护模式、登记 per-CPU、
  * 装好自己的 GDT/TSS 和共享 IDT，然后进入可被 timer/IPI 唤醒的 idle。 */

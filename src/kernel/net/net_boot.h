@@ -11,7 +11,7 @@
 #ifndef CORE_NET_BOOT_H
 #define CORE_NET_BOOT_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 启动期自检入口；只在第一次调用时执行，重复调用直接返回。 */
 void net_boot_selftest(void);

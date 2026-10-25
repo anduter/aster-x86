@@ -1,7 +1,7 @@
 #ifndef CORE_DEVICE_H
 #define CORE_DEVICE_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* =============================================================================
  * dev/device.h - 设备 API v1

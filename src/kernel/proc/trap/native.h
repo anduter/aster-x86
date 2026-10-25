@@ -1,7 +1,7 @@
 #ifndef INTR_NATIVE_H
 #define INTR_NATIVE_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* Native ABI v0：原生程序入口是 int 0x80。
  * 旧原型的 POSIX 风格调用表在迁移期走 int 0x81，不作为长期 ABI。 */

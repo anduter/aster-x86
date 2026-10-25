@@ -1,7 +1,7 @@
 #ifndef PROC_PROC_H
 #define PROC_PROC_H
 
-#include "../types.h"
+#include "../include/types.h"
 #include "include/abi.h"      /* SIG_DFL/SIG_IGN/SIGCHLD：与用户态 ABI 单一来源 */
 #include "include/security.h"
 

@@ -1,7 +1,7 @@
 #ifndef IPC_CHANNEL_H
 #define IPC_CHANNEL_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 #define CHAN_MAX       32U
 #define CHAN_MSG_MAX   4U

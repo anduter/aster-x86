@@ -6,7 +6,7 @@
  * 只搬代码不改逻辑；共享辅助（copy_user_string / make_abs_path / fd_*）仍由
  * proc/trap/syscall_util.c 提供。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/fs.h"

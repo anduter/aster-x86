@@ -25,7 +25,7 @@
 #include "vmm.h"
 #include "include/mm.h"
 #include "include/kernel.h"
-#include "../types.h"
+#include "../include/types.h"
 
 /* 本轮的失败项数 */
 static int failures;

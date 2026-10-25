@@ -1,7 +1,7 @@
 #ifndef PROC_CAP_H
 #define PROC_CAP_H
 
-#include "../types.h"
+#include "../include/types.h"
 #include "include/mm.h"
 
 #define CAP_TABLE_MAX 16U

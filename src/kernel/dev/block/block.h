@@ -1,7 +1,7 @@
 #ifndef BLOCK_H
 #define BLOCK_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* 块设备：按扇区读写。设备表里用 DEV_BLOCK 类别注册，
  * 但读写接口是强类型的（不走字符设备的 putc/getc）。 */

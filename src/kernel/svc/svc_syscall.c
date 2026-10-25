@@ -4,7 +4,7 @@
  * 从 proc/trap/syscall.c 拆出的 svc 组：pipe / dup2 / cap_drop / cap_send /
  * input_set。只搬代码不改逻辑。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/fs.h"

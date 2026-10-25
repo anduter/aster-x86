@@ -12,7 +12,7 @@
  * 只把 kprintf/dev 调用换系统调用。
  * ============================================================================= */
 #include "shell.h"
-#include "../types.h"
+#include "../include/types.h"
 #include "include/kernel.h"
 #include "include/mm.h"
 #include "include/userland.h"

@@ -4,7 +4,7 @@
 #ifndef PANIC_H
 #define PANIC_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 打印原因并停机（不返回）。后续接入中断后，这里会顺带 dump 寄存器现场。 */
 __attribute__((noreturn, format(printf, 1, 2)))

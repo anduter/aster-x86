@@ -5,7 +5,7 @@
  * oops / panic / pci / poweroff / hang / resinfo / eth / mouse。
  * 只搬代码不改逻辑。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/abi.h"
 #include "include/kernel.h"
 #include "include/dev.h"

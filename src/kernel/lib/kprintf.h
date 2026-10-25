@@ -7,7 +7,7 @@
 #ifndef LIB_KPRINTF_H
 #define LIB_KPRINTF_H
 
-#include "../types.h"
+#include "../include/types.h"
 #include <stdarg.h>
 
 int kvsnprintf(char *buf, size_t size, const char *fmt, va_list ap);

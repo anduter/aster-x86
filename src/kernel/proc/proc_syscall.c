@@ -4,7 +4,7 @@
  * 从 proc/trap/syscall.c 拆出的 proc 组：getpid/uptime/yield/exit/kill/sleep/
  * fork/exec/wait/sigaction/sigreturn。只搬代码不改逻辑。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/kernel.h"
 #include "proc_syscall.h"
 #include "proc.h"

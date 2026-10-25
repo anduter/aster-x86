@@ -1,7 +1,7 @@
 #ifndef SECURITY_SYSCALL_H
 #define SECURITY_SYSCALL_H
 
-#include "../types.h"
+#include "../include/types.h"
 #include "include/proc.h"
 
 /* 身份/权限组 legacy 系统调用（int 0x81）：getuid / getgid / setuid */

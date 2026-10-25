@@ -1,7 +1,7 @@
 #ifndef CORE_ACPI_H
 #define CORE_ACPI_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 扫描 ACPI 表，找到 FADT 的 PM1a 控制寄存器；成功返回 1 */
 int acpi_init(void);

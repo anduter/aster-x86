@@ -18,7 +18,7 @@
 #ifndef OS_INCLUDE_ABI_H
 #define OS_INCLUDE_ABI_H
 
-#include "../types.h"
+#include "types.h"
 #include "../core/error.h"   /* E_*：legacy 门/文件系统可能原样返回的错误码 */
 
 /* =============================================================================

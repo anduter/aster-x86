@@ -1,7 +1,7 @@
 #ifndef CORE_PCI_H
 #define CORE_PCI_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 typedef struct {
     uint8_t  bus;

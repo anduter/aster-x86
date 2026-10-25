@@ -1,7 +1,7 @@
 #ifndef CORE_ATOMIC_H
 #define CORE_ATOMIC_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 原子操作与内存屏障（x86 上 lock 前缀 + pause/屏障指令） */
 

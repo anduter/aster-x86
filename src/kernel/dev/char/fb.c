@@ -5,7 +5,7 @@
  * 对外提供画点、填充矩形、8x8 点阵字符输出等基础绘图功能。
  * ============================================================================= */
 #include "include/dev.h"
-#include "../../types.h"
+#include "../../include/types.h"
 #include "../../lib/kprintf.h"
 
 uint32_t fb_addr;                /* 显存物理地址 */

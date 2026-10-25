@@ -1,6 +1,6 @@
 #include "include/mm.h"
 #include "arch/x86/io.h"
-#include "../types.h"
+#include "../include/types.h"
 #include "include/kernel.h"
 
 /* 堆锁：块链表是全局共享状态（SMP 下必须串行化） */

@@ -1,7 +1,7 @@
 #ifndef IPC_PORT_H
 #define IPC_PORT_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 #define PORT_MAX          16U
 #define PORT_PENDING_MAX  4U

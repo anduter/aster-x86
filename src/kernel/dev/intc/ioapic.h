@@ -1,7 +1,7 @@
 #ifndef CORE_IOAPIC_H
 #define CORE_IOAPIC_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* IOAPIC：把 GSI 路由到某个 CPU 的 LAPIC 向量。
  * 目前只做初始化、寄存器读写和“掩码状态下的路由自检”，

@@ -1,6 +1,6 @@
 #include "pmm.h"
 #include "arch/x86/io.h"
-#include "../types.h"
+#include "../include/types.h"
 #include "include/mm.h"
 #include "include/kernel.h"
 

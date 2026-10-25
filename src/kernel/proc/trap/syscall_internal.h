@@ -4,7 +4,7 @@
 /* syscall 层内部共享辅助（实现在 syscall_util.c）。
  * 这些函数只供 trap/syscall*.c 与后续按模块拆分的 *_syscall.c 使用。 */
 
-#include "../../types.h"
+#include "../../include/types.h"
 #include "interrupt.h"
 #include "../proc.h"
 

@@ -1,7 +1,7 @@
 #ifndef INTR_UACCESS_H
 #define INTR_UACCESS_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* 安全的内核 <-> 用户内存拷贝。
  * 遇到未映射/越界地址时不 panic，而是回到调用点返回错误码。 */

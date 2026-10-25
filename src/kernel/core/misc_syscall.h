@@ -1,7 +1,7 @@
 #ifndef MISC_SYSCALL_H
 #define MISC_SYSCALL_H
 
-#include "../types.h"
+#include "../include/types.h"
 #include "include/proc.h"
 
 /* 杂项/调试组 legacy 系统调用（int 0x81）：

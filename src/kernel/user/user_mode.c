@@ -15,7 +15,7 @@
 #include "user_mode.h"
 #include "include/mm.h"
 #include "include/proc.h"
-#include "../types.h"
+#include "../include/types.h"
 #include "include/mm.h"
 #include "include/mm.h"
 #include "include/fs.h"

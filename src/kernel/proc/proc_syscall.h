@@ -1,7 +1,7 @@
 #ifndef PROC_SYSCALL_H
 #define PROC_SYSCALL_H
 
-#include "../types.h"
+#include "../include/types.h"
 #include "../proc/trap/interrupt.h"
 
 /* 进程组 legacy 系统调用（int 0x81）：getpid/uptime/yield/exit/kill/sleep/

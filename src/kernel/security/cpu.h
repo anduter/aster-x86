@@ -1,7 +1,7 @@
 #ifndef CORE_CPU_H
 #define CORE_CPU_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 检测并启用可选的 CPU 安全特性（SMEP/SMAP）。
  * 必须在分页开启之后调用；不支持的 CPU 只打印状态，不置 CR4 位。 */

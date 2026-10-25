@@ -1,7 +1,7 @@
 #ifndef CORE_RTC_H
 #define CORE_RTC_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* CMOS 实时时钟：返回从 1970-01-01 起的秒数（UTC） */
 uint32_t rtc_now(void);

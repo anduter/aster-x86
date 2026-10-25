@@ -1,7 +1,7 @@
 #ifndef CORE_APIC_H
 #define CORE_APIC_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* 探测本地 APIC（CPUID.1:EDX[9]）并读取 IA32_APIC_BASE（MSR 0x1B）。
  * 只做探测和日志：中断仍然走 8259 PIC，不切换 APIC 模式。 */

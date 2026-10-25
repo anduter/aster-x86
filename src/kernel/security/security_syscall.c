@@ -4,7 +4,7 @@
  * 从 proc/trap/syscall.c 拆出的 security 组：getuid / getgid / setuid。
  * 只搬代码不改逻辑（capability 的 cap_drop/cap_send 按拆分计划留在 svc 组）。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/kernel.h"
 #include "include/proc.h"
 #include "security_syscall.h"

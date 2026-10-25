@@ -1,7 +1,7 @@
 #ifndef CORE_NET_H
 #define CORE_NET_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 启动 ARP/ICMP/UDP 自检。 */
 void net_init(void);

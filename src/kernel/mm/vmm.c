@@ -11,7 +11,7 @@
  * 说明：PAE 是 NX 的前置条件。没有 PAE 的 32 位分页无法表达 NX 位。
  * ============================================================================= */
 #include "vmm.h"
-#include "../types.h"
+#include "../include/types.h"
 #include "include/mm.h"
 #include "include/kernel.h"
 #include "include/kernel.h"

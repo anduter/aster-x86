@@ -3,7 +3,7 @@
  *
  * 从 proc/trap/syscall.c 拆出的 mm 组：brk / mmap / munmap。只搬代码不改逻辑。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/kernel.h"
 #include "include/mm.h"
 #include "include/proc.h"

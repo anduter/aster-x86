@@ -1,7 +1,7 @@
 #ifndef USER_GDT_H
 #define USER_GDT_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 段选择子 */
 #define KERNEL_CS 0x08

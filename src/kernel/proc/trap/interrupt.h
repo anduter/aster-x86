@@ -1,7 +1,7 @@
 #ifndef INTERRUPT_H
 #define INTERRUPT_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* 时钟中断频率（Hz） */
 #define TIMER_HZ 100

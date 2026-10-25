@@ -1,7 +1,7 @@
 #ifndef CORE_E1000_H
 #define CORE_E1000_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* Intel 82540EM（QEMU 默认网卡）驱动：
  * 探测 -> 映射 BAR0 -> 读 MAC -> 查链路 -> 初始化 TX/RX 环 ->

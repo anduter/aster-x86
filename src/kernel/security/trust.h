@@ -1,7 +1,7 @@
 #ifndef CORE_TRUST_H
 #define CORE_TRUST_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 验证 RSA-2048 / SHA-256 PKCS#1 v1.5 签名。
  * signature / modulus 都是 256 字节大端。成功返回 1。 */

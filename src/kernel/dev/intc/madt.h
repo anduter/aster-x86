@@ -1,7 +1,7 @@
 #ifndef CORE_MADT_H
 #define CORE_MADT_H
 
-#include "../../types.h"
+#include "../../include/types.h"
 
 /* ACPI MADT（"APIC" 表）：CPU 列表与 IOAPIC 信息 */
 int      madt_init(void);

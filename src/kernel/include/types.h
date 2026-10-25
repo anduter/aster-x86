@@ -9,7 +9,7 @@
 #define TYPES_H
 
 #include <stdbool.h>
-#include <stdint.h>
+#include "stdint.h"
 
 /* size_t/ssize_t：32 位平坦模型下与 unsigned int 同宽同类型 */
 typedef unsigned int        size_t;

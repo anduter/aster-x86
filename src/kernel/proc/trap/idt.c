@@ -1,5 +1,5 @@
 #include "interrupt.h"
-#include "../../types.h"
+#include "../../include/types.h"
 #include "include/kernel.h"
 #include "../proc.h"
 #include "../smp.h"

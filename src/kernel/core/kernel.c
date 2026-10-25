@@ -5,7 +5,7 @@
  * bootseq.c 的步骤注册表；最后启动调度器进入用户态。
  * 具体子系统的初始化顺序见 core/bootseq.c 的 boot_steps[]。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/dev.h"

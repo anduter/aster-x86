@@ -62,7 +62,7 @@ $CFLAGS = @(
     '-fno-asynchronous-unwind-tables', '-fno-stack-protector', '-fno-builtin',
     "-DFONT_SCALE=$FontScale",
     "-DNET_ECHO_PORT=$EchoPort",
-    '-Wall', '-Wextra', '-Werror', '-g', '-O0', '-Isrc/kernel'
+    '-Wall', '-Wextra', '-Werror', '-g', '-O0', '-Isrc/kernel/include', '-Isrc/kernel'
 )
 
 # ---- 增量构建：参数未变且对象比源文件新时跳过编译（头文件变化则全量重编） ----

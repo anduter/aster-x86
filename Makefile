@@ -38,7 +38,7 @@ CFLAGS  := -ffreestanding -fno-pic -fno-pie -m32 -nostdlib \
            -fno-asynchronous-unwind-tables -fno-stack-protector -fno-builtin \
            -MMD -MP \
            -DFONT_SCALE=$(FONT_SCALE) \
-           -Wall -Wextra -Werror -g -O0 -I$(KERNEL_DIR)
+           -Wall -Wextra -Werror -g -O0 -I$(KERNEL_DIR)/include -I$(KERNEL_DIR)
 LDFLAGS := -m elf_i386 --no-warn-rwx-segments -T $(KERNEL_DIR)/arch/x86/linker.ld
 
 FLOPPY_IMG := $(DIST_DIR)/floppy.img

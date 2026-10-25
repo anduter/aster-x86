@@ -1,7 +1,7 @@
 /* =============================================================================
  * net/net_syscall.c - 网络相关系统调用（UDP/Socket 组，M5）
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/proc.h"
 #include "include/net.h"
 #include "include/kernel.h"

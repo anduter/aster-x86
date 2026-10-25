@@ -1,7 +1,7 @@
 #ifndef MM_VMM_H
 #define MM_VMM_H
 
-#include "../types.h"
+#include "../include/types.h"
 #include "arch/x86/io.h"
 #include "pmm.h"
 

@@ -1,7 +1,7 @@
 #ifndef FS_FS_H
 #define FS_FS_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 /* 文件系统模块（当前后端是内存卷；接口按“卷”设计，日后可换块设备后端） */
 #define FS_NAME_MAX     65    /* 文件名/目录名最长 64 字符（含结尾 0） */

@@ -10,7 +10,7 @@
  * 不做副作用注册；失败只打印一行 FAILED，由既有回归项覆盖的功能路径
  * 不变（本自检不新增 build.ps1 检查项）。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "include/abi.h"
 #include "include/dev.h"
 #include "include/fs.h"

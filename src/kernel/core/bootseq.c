@@ -5,7 +5,7 @@
  * kernel_boot()；具体子系统按 boot_steps[] 的顺序执行，每一步是一个
  * 有名字的函数，方便日志、调试与后续改成动态注册。
  * ============================================================================= */
-#include "../types.h"
+#include "../include/types.h"
 #include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/dev.h"

@@ -1,7 +1,7 @@
 #ifndef CORE_SERVICE_H
 #define CORE_SERVICE_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 #define SERVICE_MAX   8U
 #define SERVICE_NAME  32U

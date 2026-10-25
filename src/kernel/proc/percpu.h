@@ -1,7 +1,7 @@
 #ifndef CORE_PERCPU_H
 #define CORE_PERCPU_H
 
-#include "../types.h"
+#include "../include/types.h"
 
 #define SMP_MAX_CPUS 4U
 

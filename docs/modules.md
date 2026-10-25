@@ -261,3 +261,10 @@ M8 → 只依赖用户态 ABI（src/user/ulib.h）
 - -Isrc/kernel makes angle includes resolve to it instead of the toolchain header
 - include/types.h adds size_t/ssize_t/phys_addr_t/virt_addr_t/NULL and pulls include/macros.h
 - root types.h stays as a compatibility shim for the 66 existing includes
+
+### include/ consolidation (2026-10-25)
+
+- src/kernel/stdint.h moved to src/kernel/include/stdint.h
+- src/kernel/types.h shim removed; include/types.h is the single definition
+- 64 source includes repointed to ../include/types.h (or same-dir "types.h")
+- -Isrc/kernel/include added to build.ps1 and Makefile so <stdint.h> resolves to the kernel shim
