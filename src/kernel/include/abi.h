@@ -27,7 +27,7 @@
 #define OS_ABI_MAGIC          0x4F534142u   /* "OSAB"（小端字节序 'O','S','A','B'） */
 #define OS_ABI_VERSION        1u            /* 头文件/编号空间的 major 版本 */
 #define OS_ABI_VERSION_MAJOR  1
-#define OS_ABI_VERSION_MINOR  2
+#define OS_ABI_VERSION_MINOR  3
 
 /* SYS_ABI_VERSION 返回值的低 16 位（feature bits）：只增不减。
  *
@@ -126,6 +126,41 @@
  * 位置跟随最后一次 SYS_INPUT_SET 画出的行尾。 */
 #define SYS_CONSOLE_CURSOR 63 /* ebx=0 隐藏 / 1 显示              -> 0 / -1 */
 
+/* v1.3 新增（只追加）：Linux 式账号系统（P1 身份）。
+ *
+ * 凭据模型与 POSIX 一致：ruid/euid/suid + rgid/egid/sgid + 附加组。
+ * 已有的 SYS_GETUID/SYS_GETGID 返回真实 uid/gid，SYS_GETEUID/SYS_GETEGID
+ * 返回生效身份；权限检查一律用生效身份（euid），root（euid==0）保留
+ * CAP_DAC_OVERRIDE 语义。
+ *
+ * SYS_LOGIN 是"PAM-lite"内核钩子：口令在核内校验（sha256 + 恒定时间比较），
+ * 用户态 login/getty 只负责提示、会话前端与 delay。cmd 见下面的 LOGIN_CMD_*。 */
+#define SYS_SETEUID    64 /* ebx=euid                              -> 0 / -1 */
+#define SYS_SETEGID    65 /* ebx=egid                              -> 0 / -1 */
+#define SYS_SETGID     66 /* ebx=gid                               -> 0 / -1（root） */
+#define SYS_GETEUID    67 /*                                       -> euid */
+#define SYS_GETEGID    68 /*                                       -> egid */
+#define SYS_GETGROUPS  69 /* ebx=buf, ecx=max                      -> 组数 / -1 */
+#define SYS_SETGROUPS  70 /* ebx=buf, ecx=n                        -> 0 / -1（root） */
+#define SYS_SETUMASK   71 /* ebx=mask                              -> 旧 mask */
+#define SYS_LOGIN      72 /* ebx=cmd, ecx=a, edx=b                 -> 见下 */
+
+/* SYS_LOGIN 的 cmd（ecx/edx 的含义随 cmd 变化） */
+#define LOGIN_CHECK    0  /* -> 1 = 本 tty 需要登录；0 = 已登录/自动登录 */
+#define LOGIN_AUTH     1  /* ecx=用户名, edx=口令 -> 0 成功 / -1 失败 / -2 锁定 */
+#define LOGIN_WHO      2  /* ecx=buf, edx=max -> 会话数（写 "user tty pid" 行） */
+#define LOGIN_PASSWD   3  /* ecx=旧口令, edx=新口令 -> 0 / -1 */
+#define LOGIN_LOGOUT   4  /* -> 0（结束当前会话） */
+#define LOGIN_LAST     5  /* ecx=buf, edx=max -> 审计行数 */
+#define LOGIN_SU       6  /* ecx=用户名, edx=口令 -> 0 / -1 / -2 */
+#define LOGIN_SUDO     7  /* ecx=口令 -> 0 / -1（wheel 组） */
+#define LOGIN_SUDO_END 8  /* -> 0（euid 回到 ruid） */
+#define LOGIN_INFO     9  /* ecx=buf, edx=max -> "uid=.. euid=.. gid=.. name=.." */
+#define LOGIN_PASSWD_USER 10 /* ecx=用户名, edx=新口令 -> 0 / -1（root 给他人改） */
+
+/* 附加组上限（proc_t.groups[]、SYS_GETGROUPS/SETGROUPS 缓冲） */
+#define ABI_NGROUPS_MAX 16
+
 /* SYS_WAITPID 的 options 位 */
 #define WNOHANG 1
 
@@ -141,7 +176,7 @@
 #define SIG_IGN 1u
 
 /* 已分配的最大编号；新增调用必须从 SYS_NR_MAX + 1 开始 */
-#define SYS_NR_MAX 63
+#define SYS_NR_MAX 72
 
 /* =============================================================================
  * 3. 用户可见共享结构体（布局冻结，见文件末尾断言）

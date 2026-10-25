@@ -9,5 +9,6 @@
 #include "apps/heartbeat.h"
 #include "apps/spin.h"
 #include "apps/svcwatch.h"
+#include "apps/getty.h"
 
 #endif

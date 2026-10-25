@@ -6,5 +6,6 @@
 #include "security/trust.h"
 #include "security/cap.h"
 #include "security/cpu.h"
+#include "security/accounts.h"
 
 #endif

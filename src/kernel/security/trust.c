@@ -149,6 +149,20 @@ static void sha256(const uint8_t *data, uint32_t len, uint8_t out[32])
     sha256_final(&c, out);
 }
 
+/* 对外暴露的 SHA-256（账号系统用它算 /etc/shadow 里的口令摘要）。
+ * 与签名验证共用同一份实现，避免出现两套哈希代码。 */
+void sha256_bytes(const void *data, uint32_t len, uint8_t out[32])
+{
+    if (out == 0) return;
+    if (data == 0 || len == 0U) {
+        memset(out, 0, 32U);
+        /* 空输入也走一遍压缩，保持与标准 SHA-256 一致 */
+        sha256((const uint8_t *)"", 0U, out);
+        return;
+    }
+    sha256((const uint8_t *)data, len, out);
+}
+
 /* -------------------------------------------------------------------------
  * RSA-2048 公钥运算：s^65537 mod n
  * ------------------------------------------------------------------------- */

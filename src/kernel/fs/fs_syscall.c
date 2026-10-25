@@ -5,14 +5,42 @@
  * mkdir/unlink/stat/chdir/chroot/getcwd/sync/time/fsck/chmod/chown。
  * 只搬代码不改逻辑；共享辅助（copy_user_string / make_abs_path / fd_*）仍由
  * proc/trap/syscall_util.c 提供。
+ *
+ * ABI v1.3（P1 身份）：所有判权都用"生效身份"——proc_t 的 euid/egid + 附加组
+ * （proc_fill_cred），而不是 ruid/rgid。root 的 CAP_DAC_OVERRIDE 由 fs 层按
+ * euid == 0 处理；拒绝访问会写一条审计（audit: DENY ...）。
  * ============================================================================= */
 #include "../include/types.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/fs.h"
 #include "include/proc.h"
+#include "include/security.h"
 #include "fs_syscall.h"
 #include "../proc/trap/syscall_internal.h"
+
+/* 当前进程的生效凭据；p == 0（内核线程）按 root */
+static void cur_cred(fs_cred_t *c)
+{
+    proc_t *p = proc_current();
+
+    proc_fill_cred(p, c);
+    c->umask = (p != 0) ? p->umask : 0U;
+}
+
+/* 拒绝访问的审计：只在确实"有权限位但不够"时打印，避免路径不存在也报 DENY */
+static void audit_deny(const char *what, const char *path)
+{
+    char detail[120];
+    acct_user_t me;
+    const char *name = "?";
+
+    if (proc_current() != 0 && acct_find_uid(proc_current()->euid, &me) == 0) {
+        name = me.name;
+    }
+    ksnprintf(detail, sizeof(detail), "%s %s by %s", what, path, name);
+    acct_audit("DENY", detail);
+}
 
 /* ---- 文件类系统调用的用户参数处理 ---- */
 
@@ -26,6 +54,7 @@ static int sys_open_user(uint32_t path_ptr, uint32_t flags)
     char rel[256];
     char path[256];
     proc_t *p = proc_current();
+    fs_cred_t cred;
     uint8_t be = FS_BE_RAMFS;
     int h;
     int fd;
@@ -37,9 +66,18 @@ static int sys_open_user(uint32_t path_ptr, uint32_t flags)
      * 具体路由（ramfs / FAT16）交给 fs 层，syscall 层不再判断文件系统类型。 */
     make_abs_path(path, sizeof(path), rel);
 
-    h = fs_open_ex(path, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT),
-                   (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, &be);
-    if (h < 0) return -1;
+    cur_cred(&cred);
+    h = fs_open_cred(path, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT),
+                     &cred, &be);
+    if (h < 0) {
+        /* 打开失败：区分"没权限"和"不存在"，前者进审计 */
+        fs_stat_t probe;
+
+        if (fs_stat_cred(path, &probe, &cred, 0) == E_OK) {
+            audit_deny("open", path);
+        }
+        return -1;
+    }
 
     fd = fd_alloc(p, (uint32_t)h, open_rights(flags));
     if (fd < 0) {
@@ -147,6 +185,7 @@ static int sys_list_user(uint32_t path_ptr, uint32_t index, uint32_t ubuf)
     char path[256];
     char name[FS_NAME_MAX];
     fs_stat_t st;
+    fs_cred_t cred;
     uint32_t n;
 
     if (path_ptr == 0U) {
@@ -159,7 +198,10 @@ static int sys_list_user(uint32_t path_ptr, uint32_t index, uint32_t ubuf)
         make_abs_path(path, sizeof(path), rel);
     }
 
-    if (fs_listdir_ex(path, index, name, sizeof(name), &st, 0) != 0) return -1;
+    cur_cred(&cred);
+    if (fs_listdir_cred(path, index, name, sizeof(name), &st, &cred, 0) != E_OK) {
+        return -1;
+    }
 
     n = (uint32_t)strlen(name) + 1U;
     if (copy_to_user((void *)(uintptr_t)ubuf, name, n) != E_OK) return -1;
@@ -171,24 +213,34 @@ static int sys_mkdir_user(uint32_t path_ptr)
 {
     char rel[256];
     char path[256];
-    proc_t *p = proc_current();
+    fs_cred_t cred;
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
     make_abs_path(path, sizeof(path), rel);
-    return (fs_mkdir_ex(path, (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, 0) == 0) ? 0 : -1;
+    cur_cred(&cred);
+    if (fs_mkdir_cred(path, &cred, 0) != E_OK) {
+        audit_deny("mkdir", path);
+        return -1;
+    }
+    return 0;
 }
 
 static int sys_unlink_user(uint32_t path_ptr)
 {
     char rel[256];
     char path[256];
-    proc_t *p = proc_current();
+    fs_cred_t cred;
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
     make_abs_path(path, sizeof(path), rel);
-    return (fs_unlink_ex(path, (p != 0) ? p->uid : 0U, (p != 0) ? p->gid : 0U, 0) == 0) ? 0 : -1;
+    cur_cred(&cred);
+    if (fs_unlink_cred(path, &cred, 0) != E_OK) {
+        audit_deny("unlink", path);
+        return -1;
+    }
+    return 0;
 }
 
 /* 同卷 rename/move：ebx=旧路径, ecx=新路径。
@@ -199,7 +251,7 @@ static int sys_rename_user(uint32_t old_ptr, uint32_t new_ptr)
     char newrel[256];
     char oldpath[256];
     char newpath[256];
-    proc_t *p = proc_current();
+    fs_cred_t cred;
 
     if (copy_user_string(oldrel, sizeof(oldrel), old_ptr) != E_OK) return -1;
     if (copy_user_string(newrel, sizeof(newrel), new_ptr) != E_OK) return -1;
@@ -207,9 +259,12 @@ static int sys_rename_user(uint32_t old_ptr, uint32_t new_ptr)
     make_abs_path(oldpath, sizeof(oldpath), oldrel);
     make_abs_path(newpath, sizeof(newpath), newrel);
 
-    return (fs_rename_as(oldpath, newpath,
-                         (p != 0) ? p->uid : 0U,
-                         (p != 0) ? p->gid : 0U) == E_OK) ? 0 : -1;
+    cur_cred(&cred);
+    if (fs_rename_cred(oldpath, newpath, &cred) != E_OK) {
+        audit_deny("rename", oldpath);
+        return -1;
+    }
+    return 0;
 }
 
 static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
@@ -217,12 +272,14 @@ static int sys_stat_user(uint32_t path_ptr, uint32_t ubuf)
     char rel[256];
     char path[256];
     fs_stat_t st;
+    fs_cred_t cred;
     uint32_t out[6];
 
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
 
     make_abs_path(path, sizeof(path), rel);
-    if (fs_stat_ex(path, &st, 0) != 0) return -1;
+    cur_cred(&cred);
+    if (fs_stat_cred(path, &st, &cred, 0) != E_OK) return -1;
 
     out[0] = (uint32_t)st.type;
     out[1] = st.size;
@@ -264,13 +321,15 @@ static int sys_chdir_user(uint32_t path_ptr)
     char rel[256];
     char path[256];
     fs_stat_t st;
+    fs_cred_t cred;
     proc_t *p = proc_current();
 
     if (p == 0) return -1;
     if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
     make_abs_path(path, sizeof(path), rel);
 
-    if (fs_stat(path, &st) != E_OK || st.type != FS_TYPE_DIR) return -1;
+    cur_cred(&cred);
+    if (fs_stat_cred(path, &st, &cred, 0) != E_OK || st.type != FS_TYPE_DIR) return -1;
 
     normalize_abs(path);
     if (path[0] == '\0') return -1;
@@ -386,13 +445,16 @@ int fs_syscall(interrupt_frame_t *f)
         char rel[FS_PATH_MAX];
         char path[FS_PATH_MAX];
         fs_stat_t st;
+        fs_cred_t cred;
 
         if (p == 0 || copy_user_string(rel, sizeof(rel), f->ebx) != E_OK) {
             ret = -1;
             break;
         }
         make_abs_path(path, sizeof(path), rel);
-        if (path[0] == '\0' || fs_stat(path, &st) != 0 || st.type != FS_TYPE_DIR) {
+        cur_cred(&cred);
+        if (path[0] == '\0' ||
+            fs_stat_cred(path, &st, &cred, 0) != E_OK || st.type != FS_TYPE_DIR) {
             ret = -1;
             break;
         }
@@ -406,6 +468,8 @@ int fs_syscall(interrupt_frame_t *f)
         break;
     case SYS_SYNC:
         ret = fs_sync_backing();
+        /* 同步时把审计环刷进 /var/log/audit.log（审计本身不碰文件系统） */
+        (void)acct_audit_flush();
         break;
     case SYS_TIME: {
         /* ebx=用户缓冲, ecx=长度：写入格式化的 RTC 时间 */
@@ -429,26 +493,39 @@ int fs_syscall(interrupt_frame_t *f)
         break;
     }
     case SYS_CHMOD: {
-        /* ebx=路径, ecx=新 mode（低 9 位） */
+        /* ebx=路径, ecx=新 mode（低 12 位：含 setuid/setgid/sticky） */
         char rel[256];
         char path[256];
+        fs_cred_t cred;
 
         if (copy_user_string(rel, sizeof(rel), f->ebx) != E_OK) { ret = -1; break; }
         make_abs_path(path, sizeof(path), rel);
-        ret = (fs_chmod(path, f->ecx, (proc_current() != 0) ? proc_current()->uid : 0) == E_OK)
-              ? 0 : -1;
+        cur_cred(&cred);
+        if (fs_chmod_cred(path, f->ecx, &cred) != E_OK) {
+            audit_deny("chmod", path);
+            ret = -1;
+            break;
+        }
+        acct_audit("CHMOD", path);
+        ret = 0;
         break;
     }
     case SYS_CHOWN: {
         /* ebx=路径, ecx=uid, edx=gid（只有 root 能调用） */
         char rel[256];
         char path[256];
-        proc_t *p = proc_current();
+        fs_cred_t cred;
 
         if (copy_user_string(rel, sizeof(rel), f->ebx) != E_OK) { ret = -1; break; }
         make_abs_path(path, sizeof(path), rel);
-        ret = (fs_chown_as(path, f->ecx, f->edx,
-                           (p != 0) ? p->uid : 0U) == E_OK) ? 0 : -1;
+        cur_cred(&cred);
+        if (fs_chown_cred(path, f->ecx, f->edx, &cred) != E_OK) {
+            audit_deny("chown", path);
+            ret = -1;
+            break;
+        }
+        acct_audit("CHOWN", path);
+        ret = 0;
         break;
     }
     default:

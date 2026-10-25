@@ -284,6 +284,7 @@ static void step_fs(void)
     fat16_selftest();
     install_programs();
     auth_selftest();            /* 权限模型：0600 文件对其他人拒绝 */
+    acct_init();                /* /etc/passwd|shadow|group、/home、/tmp、/root */
     prog_init();
     kprintf("obj: subsystems ready (devices=%u programs=%u)\n",
             (unsigned int)dev_count(), (unsigned int)prog_count());
@@ -360,6 +361,9 @@ static void step_selftests(void)
     /* 块设备 + 磁盘格式：存盘后重新挂载，文件应完好 */
     disk_selftest();
 
+    /* 账号系统自检（P1）：文件/模式/多用户判权/口令/会话/审计 */
+    acct_selftest();
+
     /* VFS 后端一致性：ramfs / FAT16 走同一条 ops 表 */
     fs_backend_selftest();
 }
@@ -377,8 +381,18 @@ static void step_programs(void)
         kprintln("proc: blkd spawn failed");
     }
     service_lifecycle_selftest();
-    if (proc_spawn("shell") == 0) {
-        panic("cannot spawn shell program");
+    /* 控制台 tty 的入口：测试模式（autologin=root）直接起 shell（与引入账号
+     * 系统之前完全一致）；生产模式起 getty，先登录再进 shell。 */
+    if (boot_cmdline_autologin_root()) {
+        kprintf("acct: autologin=root (test build) -> shell without login\n");
+        if (proc_spawn("shell") == 0) {
+            panic("cannot spawn shell program");
+        }
+    } else {
+        kprintf("acct: login required (cmdline \"%s\") -> getty\n", boot_cmdline());
+        if (proc_spawn("getty") == 0) {
+            panic("cannot spawn getty program");
+        }
     }
     if (proc_spawn("heartbeat") == 0) {
         panic("cannot spawn heartbeat program");

@@ -10,6 +10,7 @@
  * 新增文件系统 = 实现一张 fs_backend_t + 在 backends[] 里加一项。
  * ============================================================================= */
 #include "fs.h"
+#include "ramfs.h"
 #include "fat16.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
@@ -280,6 +281,165 @@ int fs_rename_as(const char *old_path, const char *new_path, uint32_t uid, uint3
     }
 
     return ob->rename(orel, nrel, uid, gid);
+}
+
+/* =============================================================================
+ * 凭据版本（ABI v1.3）
+ *
+ * ramfs 是唯一带 Unix 权限元数据的后端，它直接吃 fs_cred_t（附加组 + umask
+ * 都在里面）；其它后端（FAT16/svc/blk）没有 mode/uid/gid，按 (euid, egid)
+ * 转发即可——它们自己的权限模型（FAT 的只读属性等）不受影响。
+ * ========================================================================== */
+
+int fs_open_cred(const char *path, uint32_t flags, const fs_cred_t *c, uint8_t *be)
+{
+    const fs_backend_t *b;
+    const char *rel;
+    int h;
+
+    b = route(path, &rel);
+    if (b == 0) return -1;
+    if (b == &ramfs_backend) {
+        return ramfs_open_cred(rel, flags, c, be);
+    }
+
+    h = b->open(rel, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT),
+                (c != 0) ? c->euid : 0U, (c != 0) ? c->egid : 0U);
+    if (h < 0) return -1;
+    if (be != 0) *be = be_id(b);
+    return h;
+}
+
+int fs_mkdir_cred(const char *path, const fs_cred_t *c, uint8_t *be)
+{
+    const fs_backend_t *b;
+    const char *rel;
+    int r;
+
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b == &ramfs_backend) return ramfs_mkdir_cred(rel, c, be);
+
+    r = b->mkdir(rel, (c != 0) ? c->euid : 0U, (c != 0) ? c->egid : 0U);
+    if (r != 0) return E_ACCES;
+    if (be != 0) *be = be_id(b);
+    return E_OK;
+}
+
+int fs_unlink_cred(const char *path, const fs_cred_t *c, uint8_t *be)
+{
+    const fs_backend_t *b;
+    const char *rel;
+    int r;
+
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b == &ramfs_backend) return ramfs_unlink_cred(rel, c, be);
+
+    r = b->unlink(rel, (c != 0) ? c->euid : 0U, (c != 0) ? c->egid : 0U);
+    if (r != 0) return E_ACCES;
+    if (be != 0) *be = be_id(b);
+    return E_OK;
+}
+
+int fs_access_cred(const char *path, uint32_t want, const fs_cred_t *c)
+{
+    const fs_backend_t *b;
+    const char *rel;
+    fs_stat_t st;
+
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b == &ramfs_backend) return ramfs_access_cred(rel, want, c);
+
+    /* 非 ramfs 后端没有 Unix 权限位：按"存在即可访问"处理
+     * （FAT16 挂载点的 nosuid/只读策略由挂载点与 exec 路径负责）。 */
+    if (b->stat(rel, &st) != 0) return E_NOENT;
+    return E_OK;
+}
+
+int fs_stat_cred(const char *path, fs_stat_t *out, const fs_cred_t *c, uint8_t *be)
+{
+    const fs_backend_t *b;
+    const char *rel;
+    int r;
+
+    if (out == 0) return E_INVAL;
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b == &ramfs_backend) return ramfs_stat_cred(rel, out, c, be);
+
+    r = b->stat(rel, out);
+    if (r != 0) return E_NOENT;
+    if (be != 0) *be = be_id(b);
+    return E_OK;
+}
+
+int fs_listdir_cred(const char *path, uint32_t index, char *name, uint32_t name_max,
+                    fs_stat_t *out, const fs_cred_t *c, uint8_t *be)
+{
+    const fs_backend_t *b;
+    const char *rel;
+    int r;
+
+    if (name == 0) return E_INVAL;
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b == &ramfs_backend) return ramfs_listdir_cred(rel, index, name, name_max, out, c, be);
+
+    /* 非 ramfs 后端没有权限位：列目录本身不做判权（FAT 挂载点由上层限制） */
+    (void)c;
+    r = b->listdir(rel, index, name, name_max, out);
+    if (r != 0) return E_NOENT;
+    if (be != 0) *be = be_id(b);
+    return E_OK;
+}
+
+int fs_chmod_cred(const char *path, uint32_t mode, const fs_cred_t *c)
+{
+    const fs_backend_t *b;
+    const char *rel;
+
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b == &ramfs_backend) return ramfs_chmod_cred(rel, mode, c);
+
+    return E_INVAL;                 /* FAT16 没有 Unix 权限位 */
+}
+
+int fs_chown_cred(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t *c)
+{
+    const fs_backend_t *b;
+    const char *rel;
+
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b == &ramfs_backend) return ramfs_chown_cred(rel, uid, gid, c);
+
+    return E_INVAL;
+}
+
+int fs_rename_cred(const char *old_path, const char *new_path, const fs_cred_t *c)
+{
+    const fs_backend_t *ob;
+    const fs_backend_t *nb;
+    const char *orel;
+    const char *nrel;
+
+    if (old_path == 0 || new_path == 0) return E_INVAL;
+    if (old_path[0] == '\0' || new_path[0] == '\0') return E_INVAL;
+
+    ob = route(old_path, &orel);
+    nb = route(new_path, &nrel);
+    if (ob == 0 || nb == 0) return E_INVAL;
+    if (ob != nb) return E_INVAL;
+    if (ob->rename == 0) return E_INVAL;
+
+    if (ob == &ramfs_backend) {
+        /* 父目录的 w+x、sticky、覆盖策略都由 ramfs 统一判 */
+        return ramfs_rename_cred(orel, nrel, c);
+    }
+    return ob->rename(orel, nrel, (c != 0) ? c->euid : 0U, (c != 0) ? c->egid : 0U);
 }
 
 /* 内核内部调用按 root 身份执行 */

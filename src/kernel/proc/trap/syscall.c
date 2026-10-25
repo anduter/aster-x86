@@ -34,11 +34,15 @@ void syscall_dispatch(interrupt_frame_t *f)
 
     calls++;
 
-    /* 最小沙箱：进程只允许 syscall_mask 中列出的 legacy 调用。 */
-    if (sp != 0 && sp->sandboxed && f->eax < 64U &&
-        (sp->syscall_mask & (1ULL << f->eax)) == 0ULL) {
-        f->eax = (uint32_t)-1;
-        return;
+    /* 最小沙箱：进程只允许 syscall_mask 中列出的 legacy 调用。
+     * 位图只有低 64 位（1..63）；ABI v1.3 起的 64+ 调用默认对沙箱进程关闭，
+     * 否则任何 >= 64 的新调用都能绕过 allowlist。 */
+    if (sp != 0 && sp->sandboxed) {
+        if (f->eax >= 64U ||
+            (f->eax > 0U && (sp->syscall_mask & (1ULL << f->eax)) == 0ULL)) {
+            f->eax = (uint32_t)-1;
+            return;
+        }
     }
 
     /* 网络组（UDP/socket） */

@@ -40,6 +40,111 @@ int signal(int sig, unsigned int handler);
  * 不写串口；位置自动跟随最后一次 SYS_INPUT_SET 画出的行尾。 */
 int console_cursor(int visible);
 
+/* ---- 身份/账号（ABI v1.3，P1）----
+ * 权限判定用"生效身份"（euid/egid + 附加组）；root = euid 0。
+ * 这些是 int 0x81 的薄包装，内核侧实现在 security/security_syscall.c。 */
+static inline int geteuid(void)
+{
+    return syscall3(SYS_GETEUID, 0, 0, 0);
+}
+
+static inline int getegid(void)
+{
+    return syscall3(SYS_GETEGID, 0, 0, 0);
+}
+
+static inline int seteuid(int euid)
+{
+    return syscall3(SYS_SETEUID, euid, 0, 0);
+}
+
+static inline int setegid(int egid)
+{
+    return syscall3(SYS_SETEGID, egid, 0, 0);
+}
+
+static inline int setgid(int gid)
+{
+    return syscall3(SYS_SETGID, gid, 0, 0);
+}
+
+/* 附加组：返回组数（buf 可为 0，只查询个数） */
+static inline int getgroups(int *buf, int max)
+{
+    return syscall3(SYS_GETGROUPS, (int)buf, max, 0);
+}
+
+static inline int setgroups(const int *buf, int n)
+{
+    return syscall3(SYS_SETGROUPS, (int)buf, n, 0);
+}
+
+/* 返回旧 umask */
+static inline int umask(int mask)
+{
+    return syscall3(SYS_SETUMASK, mask, 0, 0);
+}
+
+/* ---- SYS_LOGIN 的封装（PAM-lite：口令在核内比较） ---- */
+static inline int login_needed(void)
+{
+    return syscall3(SYS_LOGIN, LOGIN_CHECK, 0, 0);
+}
+
+static inline int login_auth(const char *user, const char *pass)
+{
+    return syscall3(SYS_LOGIN, LOGIN_AUTH, (int)user, (int)pass);
+}
+
+static inline int login_su(const char *user, const char *pass)
+{
+    return syscall3(SYS_LOGIN, LOGIN_SU, (int)user, (int)pass);
+}
+
+static inline int login_sudo(const char *pass)
+{
+    return syscall3(SYS_LOGIN, LOGIN_SUDO, (int)pass, 0);
+}
+
+static inline int login_sudo_end(void)
+{
+    return syscall3(SYS_LOGIN, LOGIN_SUDO_END, 0, 0);
+}
+
+static inline int login_logout(void)
+{
+    return syscall3(SYS_LOGIN, LOGIN_LOGOUT, 0, 0);
+}
+
+/* 改自己的口令：ecx=旧口令, edx=新口令（顺序与内核参数一致） */
+static inline int login_passwd_self(const char *oldpw, const char *newpw)
+{
+    return syscall3(SYS_LOGIN, LOGIN_PASSWD, (int)oldpw, (int)newpw);
+}
+
+/* root 给任意账户设口令 */
+static inline int login_passwd_user(const char *user, const char *newpw)
+{
+    return syscall3(SYS_LOGIN, LOGIN_PASSWD_USER, (int)user, (int)newpw);
+}
+
+/* who / last：返回行数，文本写进 buf */
+static inline int login_who(char *buf, int max)
+{
+    return syscall3(SYS_LOGIN, LOGIN_WHO, (int)buf, max);
+}
+
+static inline int login_last(char *buf, int max)
+{
+    return syscall3(SYS_LOGIN, LOGIN_LAST, (int)buf, max);
+}
+
+/* "uid=.. euid=.. gid=.. egid=.. groups=.. name=.." */
+static inline int login_info(char *buf, int max)
+{
+    return syscall3(SYS_LOGIN, LOGIN_INFO, (int)buf, max);
+}
+
 int putchar(int c);
 int puts(const char *s);
 int printf(const char *fmt, ...);

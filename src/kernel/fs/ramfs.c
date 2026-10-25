@@ -49,9 +49,11 @@ static spinlock_t fs_lock = SPINLOCK_INIT;
 #define fs_sync_backing fs_sync_backing_impl
 #define fs_check        fs_check_impl
 
-/* 公开名已被宏改名为 *_impl；内部调用发生在定义之前，先声明。 */
+/* 公开名已被宏改名为 *_impl；内部调用发生在定义之前，先声明。
+ * ABI v1.3 起 impl 接收 fs_cred_t（生效身份 + 附加组 + umask）；
+ * 公开的 (uid, gid) 旧入口是"没有附加组、umask=0"的薄包装。 */
 int fs_mount_impl(const char *name);
-uint32_t fs_open_impl(const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
+static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *c);
 int fs_read_impl(uint32_t handle, void *buf, uint32_t len);
 int fs_write_impl(uint32_t handle, const void *buf, uint32_t len);
 int fs_close_impl(uint32_t handle);
@@ -59,9 +61,15 @@ int fs_ref_impl(uint32_t handle);
 int fs_stat_impl(const char *path, fs_stat_t *out);
 int fs_mkdir_impl(const char *path, uint32_t uid, uint32_t gid);
 int fs_unlink_impl(const char *path, uint32_t uid, uint32_t gid);
-int fs_chmod_impl(const char *path, uint32_t mode, uint32_t uid);
-int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid);
+int fs_chmod_impl(const char *path, uint32_t mode, const fs_cred_t *c);
+int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t *c);
 int fs_access_as_impl(const char *path, uint32_t want, uint32_t uid, uint32_t gid);
+int fs_access_cred_impl(const char *path, uint32_t want, const fs_cred_t *c);
+int fs_stat_cred_impl(const char *path, fs_stat_t *out, const fs_cred_t *c);
+int fs_mkdir_cred_impl(const char *path, const fs_cred_t *c);
+int fs_unlink_cred_impl(const char *path, const fs_cred_t *c);
+int fs_listdir_cred_impl(const char *path, uint32_t index, char *name, uint32_t name_max,
+                         fs_stat_t *out, const fs_cred_t *c);
 int fs_listdir_impl(const char *path, uint32_t index, char *name,
                     uint32_t name_max, fs_stat_t *out);
 int fs_format_disk_impl(const char *blk_name);
@@ -70,27 +78,11 @@ int fs_mount_disk_impl(const char *blk_name);
 int fs_sync_backing_impl(void);
 int fs_check_impl(char *report, uint32_t max);
 
-/* *_impl 的前置声明（宏会把下面的公开名展开成 *_impl）。
- * 有些 impl 在定义之前就被调用（如 fs_init 调 fs_mount）。 */
+/* 权限模型的内部辅助（定义在下面的“文件操作”一节）：路径解析要用到，
+ * 这里先声明（fs_node_t 在下面才 typedef，所以放在节点定义之后）。 */
+
+/* 宏会把下面的公开名展开成 *_impl：fs_mount 在 fs_init 里被提前调用。 */
 int      fs_mount(const char *name);
-uint32_t fs_open(const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
-int      fs_read(uint32_t handle, void *buf, uint32_t len);
-int      fs_write(uint32_t handle, const void *buf, uint32_t len);
-int      fs_close(uint32_t handle);
-int      fs_ref(uint32_t handle);
-int      fs_stat(const char *path, fs_stat_t *out);
-int      fs_mkdir(const char *path, uint32_t uid, uint32_t gid);
-int      fs_unlink(const char *path, uint32_t uid, uint32_t gid);
-int      fs_chmod(const char *path, uint32_t mode, uint32_t uid);
-int      fs_chown(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid);
-int      fs_access_as(const char *path, uint32_t want, uint32_t uid, uint32_t gid);
-int      fs_listdir(const char *path, uint32_t index,
-                    char *name, uint32_t name_max, fs_stat_t *out);
-int      fs_format_disk(const char *blk_name);
-int      fs_sync(const char *blk_name);
-int      fs_mount_disk(const char *blk_name);
-int      fs_sync_backing(void);
-int      fs_check(char *report, uint32_t max);
 
 /* ---- 节点 ---- */
 typedef struct fs_node {
@@ -101,11 +93,15 @@ typedef struct fs_node {
     struct fs_node *next_sibling;
     uint32_t  size;
     uint32_t  mtime;        /* 最后修改时间（epoch 秒） */
-    uint32_t  mode;         /* 权限位（rwxrwxrwx） */
+    uint32_t  mode;         /* 权限位（rwxrwxrwx + setuid/setgid/sticky） */
     uint32_t  uid;          /* 属主 */
     uint32_t  gid;          /* 属组 */
     uint8_t   data[FS_FILE_MAX];
 } fs_node_t;
+
+static uint32_t perm_bits(const fs_node_t *n, const fs_cred_t *c);
+static bool     may_access(const fs_node_t *n, uint32_t want, const fs_cred_t *c);
+static bool     may_unlink_in(const fs_node_t *dir, const fs_node_t *node, const fs_cred_t *c);
 
 /* ---- 卷（盘符） ---- */
 typedef struct {
@@ -232,12 +228,22 @@ static fs_volume_t *path_volume(const char *path, const char **rel)
     return default_volume();
 }
 
-/* 在指定卷里逐段解析相对路径；空路径返回卷根 */
-static fs_node_t *walk_rel(fs_volume_t *vol, const char *rel)
+/* 在指定卷里逐段解析相对路径；空路径返回卷根。
+ *
+ * ABI v1.3 起按生效身份检查"沿途目录的 x 位"：访问 system:/a/b/c 时，
+ * a、b 每一层都要对当前 cred 有 x（否则 E_ACCES），c 由调用方按读/写判权。
+ * 这是 chroot/路径穿越防护的基础：没有 x 就进不去，也不需要额外过滤 ".."。
+ *
+ * why（可为 0）：0 = 成功；1 = 不存在；2 = 中间目录缺 x（E_ACCES）。
+ * 传 c == 0 表示内核内部 root 访问（跳过沿途检查）。 */
+static fs_node_t *walk_rel_ex(fs_volume_t *vol, const char *rel,
+                             const fs_cred_t *c, int *why)
 {
     char comp[FS_NAME_MAX];
     const char *p = (rel != 0) ? rel : "";
     fs_node_t *cur = (vol != 0) ? vol->root : 0;
+
+    if (why != 0) *why = 1;
 
     while (cur != 0 && *p != '\0') {
         uint32_t n = 0;
@@ -257,20 +263,32 @@ static fs_node_t *walk_rel(fs_volume_t *vol, const char *rel)
             if (cur->parent != 0) cur = cur->parent;
             continue;
         }
+
+        /* 进入 cur 之前要求 x（root 跳过） */
+        if (!may_access(cur, FS_ACCESS_EXEC, c)) {
+            if (why != 0) *why = 2;
+            return 0;
+        }
+
         cur = find_child(cur, comp);
     }
+
+    if (cur != 0 && why != 0) *why = 0;
     return cur;
 }
 
-/* 把路径拆成“卷 + 父目录 + 末段名字”，用于创建/删除 */
-static int split_parent(const char *path, fs_volume_t **vol_out,
-                        fs_node_t **dir_out, char *name_out)
+/* 把路径拆成“卷 + 父目录 + 末段名字”，用于创建/删除。
+ * c 非 0 时按生效身份检查沿途 x（父目录自己的 w+x 由调用方判）。 */
+static int split_parent_ex(const char *path, fs_volume_t **vol_out,
+                           fs_node_t **dir_out, char *name_out,
+                           const fs_cred_t *c, int *why)
 {
     char buf[FS_PATH_MAX];
     fs_volume_t *vol;
     const char *rel;
     uint32_t n, slash;
 
+    if (why != 0) *why = 1;
     if (path == 0 || path[0] == '\0') return E_INVAL;
 
     vol = path_volume(path, &rel);
@@ -292,6 +310,7 @@ static int split_parent(const char *path, fs_volume_t **vol_out,
         strcpy(name_out, buf);
         *dir_out = vol->root;
         *vol_out = vol;
+        if (why != 0) *why = 0;
         return E_OK;
     }
 
@@ -302,7 +321,7 @@ static int split_parent(const char *path, fs_volume_t **vol_out,
     if (strcmp(name_out, ".") == 0 || strcmp(name_out, "..") == 0) return E_INVAL;
     if (strchr(name_out, ':') != 0) return E_INVAL;
 
-    *dir_out = walk_rel(vol, buf);
+    *dir_out = walk_rel_ex(vol, buf, c, why);
     *vol_out = vol;
     if (*dir_out == 0 || (*dir_out)->type != FS_TYPE_DIR) return E_NOENT;
     return E_OK;
@@ -410,64 +429,135 @@ int fs_volume_name(uint32_t index, char *buf, uint32_t name_max)
 
 /* ==================== 文件操作 ==================== */
 
-/* ---- 权限模型 ---- */
+/* ---- 权限模型（ABI v1.3：生效身份 + 附加组） ----
+ * 判定顺序与 Linux 一致：euid == 属主 -> user 位；否则 egid 或任一附加组
+ * == 属组 -> group 位；否则 other 位。euid == 0 保留 CAP_DAC_OVERRIDE。 */
 
 /* 按“属主 / 属组 / 其他人”取出 3 位权限 */
-static uint32_t perm_bits(const fs_node_t *n, uint32_t uid, uint32_t gid)
+static uint32_t perm_bits(const fs_node_t *n, const fs_cred_t *c)
 {
-    if (uid == n->uid) return (n->mode >> 6) & 7U;
-    if (gid == n->gid) return (n->mode >> 3) & 7U;
+    if (c != 0 && c->euid == n->uid) return (n->mode >> 6) & 7U;
+    if (c != 0 && fs_cred_in_group(c, n->gid)) return (n->mode >> 3) & 7U;
     return n->mode & 7U;
 }
 
-static bool may_access(const fs_node_t *n, uint32_t want, uint32_t uid, uint32_t gid)
+static bool may_access(const fs_node_t *n, uint32_t want, const fs_cred_t *c)
 {
     if (n == 0) return false;
-    if (uid == 0U) return true;                 /* root 绕过权限 */
+    if (fs_cred_is_root(c)) return true;        /* root 绕过权限 */
     if (want == 0U) return true;
-    return (perm_bits(n, uid, gid) & want) == want;
+    return (perm_bits(n, c) & want) == want;
 }
 
-int fs_access_as(const char *path, uint32_t want, uint32_t uid, uint32_t gid)
+/* sticky 目录（/tmp 0755+01000）的删除规则：只有文件属主、目录属主或 root
+ * 能删除/改名目录里的项。没有 sticky 时只看目录的 w+x（由调用方先判）。 */
+static bool may_unlink_in(const fs_node_t *dir, const fs_node_t *node, const fs_cred_t *c)
+{
+    if (fs_cred_is_root(c)) return true;
+    if ((dir->mode & FS_MODE_STICKY) == 0U) return true;
+    if (node->uid == c->euid) return true;
+    if (dir->uid == c->euid) return true;
+    return false;
+}
+
+void fs_cred_from_ids(fs_cred_t *out, uint32_t uid, uint32_t gid)
+{
+    if (out == 0) return;
+    memset(out, 0, sizeof(*out));
+    out->euid = uid;
+    out->egid = gid;
+    out->ngroups = 0;
+    out->umask = 0U;
+}
+
+bool fs_cred_in_group(const fs_cred_t *c, uint32_t gid)
+{
+    if (c == 0) return false;
+    if (c->egid == gid) return true;
+    for (uint32_t i = 0; i < c->ngroups && i < FS_CRED_GROUPS_MAX; i++) {
+        if (c->groups[i] == gid) return true;
+    }
+    return false;
+}
+
+bool fs_cred_is_root(const fs_cred_t *c)
+{
+    return (c == 0) || (c->euid == 0U);
+}
+
+/* 建文件/目录时请求的权限位与 umask：
+ *   mode & ~umask，且 setuid/setgid 位不会被 umask 清掉（Linux 语义） */
+static uint32_t new_mode_umasked(uint32_t base, const fs_cred_t *c)
+{
+    uint32_t mask = (c != 0) ? (c->umask & 0777U) : 0U;
+
+    return (base & ~mask) & FS_MODE_ALL;
+}
+
+static int access_impl(const char *path, uint32_t want, const fs_cred_t *c)
 {
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *n;
+    int why = 0;
 
     if (path == 0) return E_INVAL;
 
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
 
-    n = walk_rel(vol, rel);
-    if (n == 0) return E_NOENT;
+    n = walk_rel_ex(vol, rel, c, &why);
+    if (n == 0) return (why == 2) ? E_ACCES : E_NOENT;
 
-    return may_access(n, want, uid, gid) ? E_OK : E_ACCES;
+    return may_access(n, want, c) ? E_OK : E_ACCES;
 }
 
-int fs_chmod(const char *path, uint32_t mode, uint32_t uid)
+int fs_access_as_impl(const char *path, uint32_t want, uint32_t uid, uint32_t gid)
+{
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return access_impl(path, want, &c);
+}
+
+int fs_access_cred_impl(const char *path, uint32_t want, const fs_cred_t *c)
+{
+    return access_impl(path, want, c);
+}
+
+int fs_chmod_impl(const char *path, uint32_t mode, const fs_cred_t *c)
 {
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *n;
+    uint32_t why = 0;
 
+    (void)why;
     if (path == 0) return E_INVAL;
 
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
 
-    n = walk_rel(vol, rel);
+    n = walk_rel_ex(vol, rel, c, 0);
     if (n == 0) return E_NOENT;
 
     /* 只有 root 或属主能改权限 */
-    if (uid != 0U && uid != n->uid) return E_ACCES;
+    if (!fs_cred_is_root(c) && (c == 0 || c->euid != n->uid)) return E_ACCES;
 
-    n->mode = mode & 0777U;
+    /* 保留 setuid/setgid/sticky（P2）；只有 root 能设置 setuid/setgid 位，
+     * 属主 chmod 时静默丢弃这两位（Linux 语义：非 root 的 chmod 会清 04000/02000
+     * 当文件属主不是自己……这里简化为：非 root 只能改低 9 位）。 */
+    if (fs_cred_is_root(c)) {
+        n->mode = mode & FS_MODE_ALL;
+    } else {
+        n->mode = (n->mode & FS_MODE_SPECIAL) | (mode & FS_MODE_PERM);
+        if (n->uid != c->euid) n->mode &= ~FS_MODE_SPECIAL;
+    }
     n->mtime = rtc_now();
     return E_OK;
 }
 
-int fs_chown(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid)
+int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t *c)
 {
     fs_volume_t *vol;
     const char *rel;
@@ -478,38 +568,43 @@ int fs_chown(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid)
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
 
-    n = walk_rel(vol, rel);
+    n = walk_rel_ex(vol, rel, c, 0);
     if (n == 0) return E_NOENT;
 
-    if (caller_uid != 0U) return E_ACCES;       /* 只有 root 能改属主 */
+    if (!fs_cred_is_root(c)) return E_ACCES;    /* 只有 root 能改属主 */
 
     n->uid = uid;
     n->gid = gid;
+    /* chown 清 setuid/setgid（P2）：避免普通用户借 root 的 chown 保留提权位。
+     * 内核对 chown 请求也遵循这个规则（Linux 的 chown(2) 语义）。 */
+    n->mode &= ~(FS_MODE_SETUID | FS_MODE_SETGID);
     return E_OK;
 }
 
-uint32_t fs_open(const char *path, uint32_t flags, uint32_t uid, uint32_t gid)
+static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *c)
 {
     fs_volume_t *vol = 0;
     const char *rel;
     fs_node_t *node;
     fs_node_t *dir = 0;
     char name[FS_NAME_MAX];
+    int why = 0;
 
     if (path == 0 || path[0] == '\0') return 0;
 
     vol = path_volume(path, &rel);
     if (vol == 0) return 0;
 
-    node = walk_rel(vol, rel);
+    node = walk_rel_ex(vol, rel, c, &why);
 
     if (node == 0) {
         /* 不存在：只有带 FS_OPEN_CREAT 才创建普通文件 */
         if ((flags & FS_OPEN_CREAT) == 0U) return 0;
-        if (split_parent(path, &vol, &dir, name) != E_OK) return 0;
+        if (why == 2) return 0;                 /* 沿途目录缺 x */
+        if (split_parent_ex(path, &vol, &dir, name, c, &why) != E_OK) return 0;
 
         /* 在目录里创建文件需要该目录的写+执行权限 */
-        if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) {
+        if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, c)) {
             return 0;
         }
 
@@ -519,9 +614,9 @@ uint32_t fs_open(const char *path, uint32_t flags, uint32_t uid, uint32_t gid)
         node->type = FS_TYPE_FILE;
         strcpy(node->name, name);
         node->size = 0;
-        node->mode = FS_MODE_FILE_DEFAULT;
-        node->uid = uid;
-        node->gid = gid;
+        node->mode = new_mode_umasked(FS_MODE_FILE_DEFAULT, c);
+        node->uid = (c != 0) ? c->euid : 0U;
+        node->gid = (c != 0) ? c->egid : 0U;
         node->mtime = rtc_now();
         link_child(dir, node);
     } else if (node->type == FS_TYPE_DIR) {
@@ -533,7 +628,7 @@ uint32_t fs_open(const char *path, uint32_t flags, uint32_t uid, uint32_t gid)
         if ((flags & FS_OPEN_READ) != 0U) want |= FS_ACCESS_READ;
         if ((flags & FS_OPEN_WRITE) != 0U) want |= FS_ACCESS_WRITE;
 
-        if (!may_access(node, want, uid, gid)) return 0;
+        if (!may_access(node, want, c)) return 0;
     }
 
     for (uint32_t i = 0; i < FS_MAX_OPEN; i++) {
@@ -631,19 +726,20 @@ int fs_ref(uint32_t handle)
     return E_OK;
 }
 
-int fs_stat(const char *path, fs_stat_t *out)
+static int stat_impl(const char *path, fs_stat_t *out, const fs_cred_t *c)
 {
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *n;
+    int why = 0;
 
     if (path == 0) return E_INVAL;
 
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
 
-    n = walk_rel(vol, rel);
-    if (n == 0) return E_NOENT;
+    n = walk_rel_ex(vol, rel, c, &why);
+    if (n == 0) return (why == 2) ? E_ACCES : E_NOENT;
     if (out != 0) {
         out->type = n->type;
         out->size = (n->type == FS_TYPE_FILE) ? n->size : 0U;
@@ -655,16 +751,27 @@ int fs_stat(const char *path, fs_stat_t *out)
     return E_OK;
 }
 
-int fs_mkdir(const char *path, uint32_t uid, uint32_t gid)
+int fs_stat(const char *path, fs_stat_t *out)
+{
+    return stat_impl(path, out, 0);
+}
+
+int fs_stat_cred_impl(const char *path, fs_stat_t *out, const fs_cred_t *c)
+{
+    return stat_impl(path, out, c);
+}
+
+static int mkdir_impl(const char *path, const fs_cred_t *c)
 {
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
     fs_node_t *node;
     char name[FS_NAME_MAX];
-    int r = split_parent(path, &vol, &dir, name);
+    int why = 0;
+    int r = split_parent_ex(path, &vol, &dir, name, c, &why);
 
-    if (r != E_OK) return r;
-    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) {
+    if (r != E_OK) return (why == 2) ? E_ACCES : r;
+    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, c)) {
         return E_ACCES;
     }
     if (find_child(dir, name) != 0) return E_EXIST;
@@ -674,29 +781,44 @@ int fs_mkdir(const char *path, uint32_t uid, uint32_t gid)
 
     node->type = FS_TYPE_DIR;
     strcpy(node->name, name);
-    node->mode = FS_MODE_DIR_DEFAULT;
-    node->uid = uid;
-    node->gid = gid;
+    node->mode = new_mode_umasked(FS_MODE_DIR_DEFAULT, c);
+    node->uid = (c != 0) ? c->euid : 0U;
+    node->gid = (c != 0) ? c->egid : 0U;
     node->mtime = rtc_now();
     link_child(dir, node);
     return E_OK;
 }
 
-int fs_unlink(const char *path, uint32_t uid, uint32_t gid)
+int fs_mkdir(const char *path, uint32_t uid, uint32_t gid)
+{
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return mkdir_impl(path, &c);
+}
+
+int fs_mkdir_cred_impl(const char *path, const fs_cred_t *c)
+{
+    return mkdir_impl(path, c);
+}
+
+static int unlink_impl(const char *path, const fs_cred_t *c)
 {
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
     fs_node_t *node;
     char name[FS_NAME_MAX];
-    int r = split_parent(path, &vol, &dir, name);
+    int why = 0;
+    int r = split_parent_ex(path, &vol, &dir, name, c, &why);
 
-    if (r != E_OK) return r;
-    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) {
+    if (r != E_OK) return (why == 2) ? E_ACCES : r;
+    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, c)) {
         return E_ACCES;
     }
 
     node = find_child(dir, name);
     if (node == 0) return E_NOENT;
+    if (!may_unlink_in(dir, node, c)) return E_ACCES;   /* sticky 目录 */
     if (node_is_open(node)) return E_BUSY;
     if (node->type == FS_TYPE_DIR && node->first_child != 0) return E_NOSPC;
 
@@ -705,14 +827,29 @@ int fs_unlink(const char *path, uint32_t uid, uint32_t gid)
     return E_OK;
 }
 
-int fs_listdir(const char *path, uint32_t index,
-               char *name, uint32_t name_max, fs_stat_t *out)
+int fs_unlink(const char *path, uint32_t uid, uint32_t gid)
+{
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return unlink_impl(path, &c);
+}
+
+int fs_unlink_cred_impl(const char *path, const fs_cred_t *c)
+{
+    return unlink_impl(path, c);
+}
+
+static int listdir_impl(const char *path, uint32_t index,
+                        char *name, uint32_t name_max, fs_stat_t *out,
+                        const fs_cred_t *c)
 {
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *dir;
-    fs_node_t *c;
+    fs_node_t *c_;
     uint32_t i = 0;
+    int why = 0;
 
     if (path == 0) return E_INVAL;
 
@@ -741,27 +878,41 @@ int fs_listdir(const char *path, uint32_t index,
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
 
-    dir = walk_rel(vol, rel);
-    if (dir == 0 || dir->type != FS_TYPE_DIR) return E_NOENT;
+    dir = walk_rel_ex(vol, rel, c, &why);
+    if (dir == 0) return (why == 2) ? E_ACCES : E_NOENT;
+    if (dir->type != FS_TYPE_DIR) return E_NOENT;
+    if (!may_access(dir, FS_ACCESS_READ | FS_ACCESS_EXEC, c)) return E_ACCES;
 
-    for (c = dir->first_child; c != 0; c = c->next_sibling, i++) {
+    for (c_ = dir->first_child; c_ != 0; c_ = c_->next_sibling, i++) {
         if (i == index) {
             if (name != 0 && name_max > 0U) {
-                strncpy(name, c->name, name_max - 1U);
+                strncpy(name, c_->name, name_max - 1U);
                 name[name_max - 1U] = '\0';
             }
             if (out != 0) {
-                out->type = c->type;
-                out->size = (c->type == FS_TYPE_FILE) ? c->size : 0U;
-                out->mtime = c->mtime;
-                out->mode = c->mode;
-                out->uid = c->uid;
-                out->gid = c->gid;
+                out->type = c_->type;
+                out->size = (c_->type == FS_TYPE_FILE) ? c_->size : 0U;
+                out->mtime = c_->mtime;
+                out->mode = c_->mode;
+                out->uid = c_->uid;
+                out->gid = c_->gid;
             }
             return E_OK;
         }
     }
     return E_NOENT;
+}
+
+int fs_listdir(const char *path, uint32_t index,
+               char *name, uint32_t name_max, fs_stat_t *out)
+{
+    return listdir_impl(path, index, name, name_max, out, 0);
+}
+
+int fs_listdir_cred_impl(const char *path, uint32_t index, char *name, uint32_t name_max,
+                         fs_stat_t *out, const fs_cred_t *c)
+{
+    return listdir_impl(path, index, name, name_max, out, c);
 }
 
 /* ==================== rename / move ==================== */
@@ -791,7 +942,7 @@ static bool dir_is_inside(fs_node_t *dir, fs_node_t *node)
  *   - 跨卷（system: -> data:）：E_INVAL，VFS 层也会先拒一次。
  * 源文件即使被打开也允许改名：句柄指向节点而不是名字，改名后照样读写。 */
 static int ramfs_rename_impl(const char *oldrel, const char *newrel,
-                             uint32_t uid, uint32_t gid)
+                             const fs_cred_t *c)
 {
     fs_volume_t *ovol = 0;
     fs_volume_t *nvol = 0;
@@ -801,20 +952,23 @@ static int ramfs_rename_impl(const char *oldrel, const char *newrel,
     fs_node_t *target;
     char oname[FS_NAME_MAX];
     char nname[FS_NAME_MAX];
+    int why = 0;
     int r;
 
-    r = split_parent(oldrel, &ovol, &odir, oname);
+    r = split_parent_ex(oldrel, &ovol, &odir, oname, c, &why);
     if (r != E_OK) return E_NOENT;              /* 父路径不合法/不存在 */
 
     node = find_child(odir, oname);
     if (node == 0) return E_NOENT;
 
-    r = split_parent(newrel, &nvol, &ndir, nname);
+    r = split_parent_ex(newrel, &nvol, &ndir, nname, c, &why);
     if (r != E_OK) return E_NOENT;
     if (nvol != ovol) return E_INVAL;           /* 跨卷 */
 
-    if (!may_access(odir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) return E_ACCES;
-    if (!may_access(ndir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, uid, gid)) return E_ACCES;
+    if (!may_access(odir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, c)) return E_ACCES;
+    if (!may_access(ndir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, c)) return E_ACCES;
+    /* sticky 源目录：非属主不能把别人的文件搬走 */
+    if (!may_unlink_in(odir, node, c)) return E_ACCES;
 
     if (node->type == FS_TYPE_DIR && dir_is_inside(ndir, node)) return E_INVAL;
 
@@ -829,6 +983,7 @@ static int ramfs_rename_impl(const char *oldrel, const char *newrel,
             return E_EXIST;                                  /* 目录不能顶掉文件 */
         }
         if (target->type == FS_TYPE_FILE && node_is_open(target)) return E_BUSY;
+        if (!may_unlink_in(ndir, target, c)) return E_ACCES;  /* sticky 目标目录 */
 
         unlink_child(ndir, target);
         memset(target, 0, sizeof(*target));
@@ -846,12 +1001,18 @@ static int ramfs_rename_impl(const char *oldrel, const char *newrel,
 
 /* 加锁包装：和公开 fs_* 一样，整次 rename 是原子的 */
 static int ramfs_rename_locked(const char *oldrel, const char *newrel,
-                               uint32_t uid, uint32_t gid)
+                               const fs_cred_t *c)
 {
     uint32_t fl = spin_lock_irqsave(&fs_lock);
-    int r = ramfs_rename_impl(oldrel, newrel, uid, gid);
+    int r = ramfs_rename_impl(oldrel, newrel, c);
     spin_unlock_irqrestore(&fs_lock, fl);
     return r;
+}
+
+/* VFS 的 fs_rename_cred 路由到这里（ramfs 的 rel 就是原始路径） */
+int ramfs_rename_cred(const char *oldrel, const char *newrel, const fs_cred_t *c)
+{
+    return ramfs_rename_locked(oldrel, newrel, c);
 }
 
 /* ==================== 持久化：磁盘格式 ==================== */
@@ -1251,10 +1412,27 @@ int fs_mount(const char *name)
 
 uint32_t fs_open_as(const char *path, uint32_t flags, uint32_t uid, uint32_t gid)
 {
-    uint32_t fl = spin_lock_irqsave(&fs_lock);
-    uint32_t h = fs_open_impl(path, flags, uid, gid);
+    fs_cred_t c;
+    uint32_t fl, h;
+
+    fs_cred_from_ids(&c, uid, gid);
+    fl = spin_lock_irqsave(&fs_lock);
+    h = fs_open_impl(path, flags, &c);
     spin_unlock_irqrestore(&fs_lock, fl);
     return h;
+}
+
+/* ABI v1.3：用户态入口，按调用进程的 euid/egid/附加组判权 */
+/* 返回后端句柄（>=0），失败 -1：FAT16 等后端的合法句柄可以是 0，
+ * 所以失败必须用 -1 表示，不能用 0。 */
+int ramfs_open_cred(const char *path, uint32_t flags, const fs_cred_t *c, uint8_t *be)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    uint32_t h = fs_open_impl(path, flags, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    if (h == 0U) return -1;
+    if (be != 0) *be = FS_BE_RAMFS;
+    return (int)h;
 }
 
 /* 内核内部调用（加载 ELF、安装 shell 等）按 root 身份打开 */
@@ -1303,6 +1481,15 @@ int fs_stat(const char *path, fs_stat_t *out)
     return r;
 }
 
+int ramfs_stat_cred(const char *path, fs_stat_t *out, const fs_cred_t *c, uint8_t *be)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_stat_cred_impl(path, out, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    if (r == E_OK && be != 0) *be = FS_BE_RAMFS;
+    return r;
+}
+
 int fs_mkdir_as(const char *path, uint32_t uid, uint32_t gid)
 {
     uint32_t fl = spin_lock_irqsave(&fs_lock);
@@ -1314,6 +1501,15 @@ int fs_mkdir_as(const char *path, uint32_t uid, uint32_t gid)
 int fs_mkdir(const char *path)
 {
     return fs_mkdir_as(path, 0U, 0U);
+}
+
+int ramfs_mkdir_cred(const char *path, const fs_cred_t *c, uint8_t *be)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_mkdir_cred_impl(path, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    if (r == E_OK && be != 0) *be = FS_BE_RAMFS;
+    return r;
 }
 
 int fs_unlink_as(const char *path, uint32_t uid, uint32_t gid)
@@ -1329,18 +1525,71 @@ int fs_unlink(const char *path)
     return fs_unlink_as(path, 0U, 0U);
 }
 
-int fs_chmod(const char *path, uint32_t mode, uint32_t uid)
+int ramfs_unlink_cred(const char *path, const fs_cred_t *c, uint8_t *be)
 {
     uint32_t fl = spin_lock_irqsave(&fs_lock);
-    int r = fs_chmod_impl(path, mode, uid);
+    int r = fs_unlink_cred_impl(path, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    if (r == E_OK && be != 0) *be = FS_BE_RAMFS;
+    return r;
+}
+
+int ramfs_chmod_cred(const char *path, uint32_t mode, const fs_cred_t *c)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_chmod_impl(path, mode, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int ramfs_chown_cred(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t *c)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_chown_impl(path, uid, gid, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int ramfs_access_cred(const char *path, uint32_t want, const fs_cred_t *c)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_access_cred_impl(path, want, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int ramfs_listdir_cred(const char *path, uint32_t index, char *name, uint32_t name_max,
+                    fs_stat_t *out, const fs_cred_t *c, uint8_t *be)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = fs_listdir_cred_impl(path, index, name, name_max, out, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    if (r == E_OK && be != 0) *be = FS_BE_RAMFS;
+    return r;
+}
+
+int fs_chmod(const char *path, uint32_t mode, uint32_t uid)
+{
+    fs_cred_t c;
+    uint32_t fl;
+    int r;
+
+    fs_cred_from_ids(&c, uid, 0U);
+    fl = spin_lock_irqsave(&fs_lock);
+    r = fs_chmod_impl(path, mode, &c);
     spin_unlock_irqrestore(&fs_lock, fl);
     return r;
 }
 
 int fs_chown_as(const char *path, uint32_t uid, uint32_t gid, uint32_t caller_uid)
 {
-    uint32_t fl = spin_lock_irqsave(&fs_lock);
-    int r = fs_chown_impl(path, uid, gid, caller_uid);
+    fs_cred_t c;
+    uint32_t fl;
+    int r;
+
+    fs_cred_from_ids(&c, caller_uid, 0U);
+    fl = spin_lock_irqsave(&fs_lock);
+    r = fs_chown_impl(path, uid, gid, &c);
     spin_unlock_irqrestore(&fs_lock, fl);
     return r;
 }
@@ -1463,7 +1712,10 @@ static int ramfs_be_unlink(const char *rel, uint32_t uid, uint32_t gid)
 static int ramfs_be_rename(const char *oldrel, const char *newrel,
                            uint32_t uid, uint32_t gid)
 {
-    return ramfs_rename_locked(oldrel, newrel, uid, gid);
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return ramfs_rename_locked(oldrel, newrel, &c);
 }
 
 const fs_backend_t ramfs_backend = {

@@ -186,6 +186,76 @@ static void readline(char *buf, int max)
 
 #pragma GCC pop_options
 
+/* =============================================================================
+ * 登录前端（用户态 getty/login，P1）
+ *
+ * 读字符用 SYS_GETCHAR（阻塞、走键盘），口令不回显、只打 '*'。
+ * 真正的口令校验在核内（SYS_LOGIN/LOGIN_AUTH -> security/accounts.c：
+ * sha256 + 恒定时间比较 + 失败锁定），这里只负责提示、重试与延迟。
+ * 登录成功后内核已把 uid/euid/gid/附加组落到本进程，cwd 也切到了 home，
+ * 于是 /bin/shell 直接以该用户身份继续运行（等价于 login exec shell）。
+ * ========================================================================== */
+static int read_line_echo(char *buf, int max, int secret)
+{
+    int len = 0;
+
+    for (;;) {
+        int c = sc(SYS_GETCHAR, 0, 0, 0);
+
+        if (c < 0) continue;
+        if (c == '\r' || c == '\n') {
+            putch('\n');
+            buf[len] = '\0';
+            return len;
+        }
+        if (c == '\b') {
+            if (len > 0) {
+                len--;
+                putstr("\b \b");                /* 终端没有行编辑：擦掉一个字符 */
+            }
+            continue;
+        }
+        if (c < 0x20) continue;
+        if (len + 1 < max) {
+            buf[len++] = (char)c;
+            if (secret) putch('*'); else putch((char)c);
+        }
+    }
+}
+
+static void login_screen(void)
+{
+    char user[32];
+    char pass[32];
+    int attempt = 0;
+
+    for (;;) {
+        int r;
+
+        putstr("\nosteachos login: ");
+        (void)read_line_echo(user, (int)sizeof(user), 0);
+        putstr("Password: ");
+        (void)read_line_echo(pass, (int)sizeof(pass), 1);
+
+        if (user[0] == '\0') continue;
+
+        r = sc(SYS_LOGIN, LOGIN_AUTH, (int)user, (int)pass);
+        if (r == 0) {
+            printf("login: %s logged in\n", user);
+            return;
+        }
+        if (r == -2) {
+            puterr("login: too many failures, account locked - try again later\n");
+            sc(SYS_SLEEP, 15000, 0, 0);         /* 锁定窗口 15s */
+        } else {
+            puterr("Login incorrect\n");
+            sc(SYS_SLEEP, 1500, 0, 0);          /* 失败延迟，降低暴力猜测速率 */
+        }
+        attempt++;
+        if (attempt > 20) return;               /* 防止无限重试占死 tty */
+    }
+}
+
 /* ls [-l] [path]：-l 显示类型、大小、mtime */
 static bool ls_long;
 
@@ -1362,7 +1432,55 @@ static void run_line(char *cmd)
             putstr("\n");
         }
     } else if (scmp(args[0], "id") == 0) {
-        printf("uid=%d gid=%d\n", sc(SYS_GETUID, 0, 0, 0), sc(SYS_GETGID, 0, 0, 0));
+        /* P1：真实身份 + 生效身份 + 附加组（Linux id 的简化版） */
+        char info[160];
+        int g[8];
+        int ng = sc(SYS_GETGROUPS, (int)g, 8, 0);
+
+        if (sc(SYS_LOGIN, LOGIN_INFO, (int)info, (int)sizeof(info)) == 0) {
+            putstr(info);
+            putstr("\n");
+        } else {
+            printf("uid=%d gid=%d euid=%d egid=%d\n",
+                   sc(SYS_GETUID, 0, 0, 0), sc(SYS_GETGID, 0, 0, 0),
+                   sc(SYS_GETEUID, 0, 0, 0), sc(SYS_GETEGID, 0, 0, 0));
+        }
+        putstr("groups:");
+        for (int i = 0; i < ng && i < 8; i++) printf(" %d", g[i]);
+        putstr("\n");
+    } else if (scmp(args[0], "umask") == 0) {
+        /* 带参数时设置，不带参数时查询（用 s=0 的 setumask 读回旧值再还原） */
+        if (nargs >= 2) {
+            int m = 0, ok = 1;
+            for (const char *p = args[1]; *p != '\0'; p++) {
+                if (*p < '0' || *p > '7') { ok = 0; break; }
+                m = m * 8 + (*p - '0');
+            }
+            if (!ok) puterr("umask: octal expected, e.g. 022\n");
+            else printf("umask: %04o\n", sc(SYS_SETUMASK, m, 0, 0));
+        } else {
+            int old = sc(SYS_SETUMASK, 0, 0, 0);
+            sc(SYS_SETUMASK, old, 0, 0);
+            printf("umask: %04o\n", old);
+        }
+    } else if (scmp(args[0], "whoami") == 0) {
+        char info[160];
+        int r = sc(SYS_LOGIN, LOGIN_INFO, (int)info, (int)sizeof(info));
+        char *p;
+
+        if (r == 0) {
+            p = info;
+            while (*p != '\0' && *p != 'n') p++;       /* 找 "name=" */
+            if (p[0] == 'n' && p[1] == 'a' && p[2] == 'm' && p[3] == 'e' && p[4] == '=') {
+                putstr(p + 5);
+                putstr("\n");
+            } else {
+                putstr(info);
+                putstr("\n");
+            }
+        } else {
+            printf("uid=%d\n", sc(SYS_GETUID, 0, 0, 0));
+        }
     } else if (scmp(args[0], "drop") == 0 && nargs >= 2) {
         int uid = str2int(args[1]);
         if (sc(SYS_SETUID, uid, uid == 0 ? 0 : uid, 0) == 0) {
@@ -1548,7 +1666,20 @@ void _start(int argc, char **argv)
 {
     char line[128];
 
+    /* P1：如果这个 tty 是 getty 起的（生产启动），先登录再进 shell。
+     * 测试模式（内核参数 autologin=root）这里返回 0，直接往下走，
+     * 与引入账号系统之前的行为完全一致。 */
+    if (sc(SYS_LOGIN, LOGIN_CHECK, 0, 0) == 1) {
+        login_screen();
+    }
+
     putstr("ushell: ready (ring3, legacy int 0x81)\n");
+
+    /* P1：凭据可见性——每一代 shell（含 exec 之后）都打印一行 */
+    printf("ushell: euid=%d uid=%d gid=%d egid=%d groups=%d\n",
+           sc(SYS_GETEUID, 0, 0, 0), sc(SYS_GETUID, 0, 0, 0),
+           sc(SYS_GETGID, 0, 0, 0), sc(SYS_GETEGID, 0, 0, 0),
+           sc(SYS_GETGROUPS, 0, 0, 0));
 
     /* 内核按 ELF 启动约定压好的 argc/argv（启动时没有参数） */
     putstr("ushell: argc=");
@@ -1610,6 +1741,24 @@ void _start(int argc, char **argv)
         sc(SYS_SIGACTION, 15, (int)sig_handler, 0);
         sc(SYS_KILL, me, 15, 0);
         putstr("ushell: signal selftest done\n");
+    }
+
+    /* P1 凭据自检：fork 出来的子进程必须继承 euid/egid（不是回到 root）。
+     * 只打印一行结论，父进程等子进程退出后继续，不改变交互时序。 */
+    {
+        int pid = sc(SYS_FORK, 0, 0, 0);
+
+        if (pid == 0) {
+            int child_euid = sc(SYS_GETEUID, 0, 0, 0);
+            printf("acct: fork child euid=%d uid=%d\n",
+                   child_euid, sc(SYS_GETUID, 0, 0, 0));
+            sc(SYS_EXIT, 0, 0, 0);
+        } else if (pid > 0) {
+            int status = -1;
+            sc(SYS_WAIT, pid, (int)&status, 0);
+            printf("acct: fork creds inherited (parent euid=%d status=%d)\n",
+                   sc(SYS_GETEUID, 0, 0, 0), status);
+        }
     }
 
     for (;;) {

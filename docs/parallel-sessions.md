@@ -128,6 +128,6 @@
 - **pre-commit 守卫**：每个克隆装一次 `tools/install-hooks.ps1`（即 `git config core.hooksPath tools/githooks`），
   之后 `git commit` 自动拦截：`.ps1/.psm1` 丢 BOM、构建产物/日志（`.obj-*` `.dist-*` `*.img` `serial-*.log` `logs-*.log` …）、
   `src/kernel/**` 改动导致 `check-deps` 违规。
-- **提交前自检**：`tools/ci.ps1 -Quick`（静态，<10s）或 `-Full`（构建 + 2×`-Test` 98/98）。
+- **提交前自检**：`tools/ci.ps1 -Quick`（静态，<10s）或 `-Full`（构建 + 2×`-Test` 全 PASS）。
 - `git commit --no-verify` 只限救急；绕过之后必须补跑 `tools/ci.ps1 -Quick` 并修复。
 - 工作区仍有别的会话改动时，静态检查用 `tools/ci.ps1 -Quick -AllowDirty`。

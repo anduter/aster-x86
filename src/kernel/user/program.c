@@ -71,6 +71,7 @@ void prog_init(void)
 {
     count = 0;
     prog_register("shell",   1, "ring3 shell loaded from /bin/shell", prog_shell_entry);
+    prog_register("getty",   1, "console getty: mark tty login, exec /bin/shell", getty_entry);
     prog_register("hello",   1, "print a greeting",    prog_hello_entry);
     prog_register("memtest", 1, "run the memory tests", prog_memtest_entry);
     prog_register("heartbeat", 1, "print a heartbeat every second", heartbeat_entry);

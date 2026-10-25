@@ -108,8 +108,20 @@ typedef struct process {
     uint32_t     sig_handlers[NSIG_MAX];  /* 0=SIG_DFL, 1=SIG_IGN, 其它=用户处理函数 */
     uint32_t     sig_frame;     /* 当前信号帧在用户栈的地址（sigreturn 用） */
     int          exit_code;
-    uint32_t     uid;           /* 用户 ID（0 = root） */
-    uint32_t     gid;           /* 组 ID */
+    uint32_t     uid;           /* 真实用户 ID（ruid，0 = root） */
+    uint32_t     gid;           /* 真实组 ID（rgid） */
+    /* ---- Linux 式账号系统（ABI v1.3）：生效身份 + 保存身份 + 附加组 ----
+     * 权限检查一律用 euid/egid（+ groups）；uid/gid 只用于 getuid/getgid
+     * 和"能否回落"判断。fork/exec 都必须原样继承这一组字段。 */
+    uint32_t     euid;          /* 生效用户 ID（权限判定用） */
+    uint32_t     egid;          /* 生效组 ID */
+    uint32_t     suid;          /* 保存的用户 ID（setuid 后可回落） */
+    uint32_t     sgid;          /* 保存的组 ID */
+    uint8_t      ngroups;       /* 附加组个数 */
+    uint32_t     groups[ABI_NGROUPS_MAX];  /* 附加组（不含主组） */
+    uint32_t     umask;         /* 创建文件时的权限掩码（默认 022） */
+    bool         login_required;/* getty 置位：本 tty 必须先 login 才能用 shell */
+    bool         is_login;      /* 已经过 login/su 建立会话（who/last 用） */
     bool         sandboxed;     /* 是否启用 syscall allowlist 沙箱 */
     uint64_t     syscall_mask;  /* 允许的 legacy syscall 位图（bit = syscall 号） */
     uint32_t     native_mask;   /* native ABI 允许位图，见 native.c 的映射 */
@@ -187,6 +199,21 @@ void proc_console_int(void);
 proc_t *proc_current(void);
 uint32_t proc_count(void);
 const proc_t *proc_at(uint32_t index);
+
+/* ---- 凭据（P1 身份，ABI v1.3） ----
+ * 权限检查统一走 euid（root = 0 且含 CAP_DAC_OVERRIDE）。这些辅助函数
+ * 允许 p == 0（启动早期/内核线程），此时按 root 处理。 */
+uint32_t proc_euid_of(const proc_t *p);
+uint32_t proc_egid_of(const proc_t *p);
+bool     proc_is_root(const proc_t *p);
+bool     proc_in_group(const proc_t *p, uint32_t gid);
+/* 把 p 的凭据填进 fs_cred_t（见 fs/fs.h）；p == 0 时填 root */
+struct fs_cred;
+void     proc_fill_cred(const proc_t *p, struct fs_cred *out);
+/* 整体替换凭据（login/su 用）：ruid==euid==suid=uid，rgid==egid==sgid=gid */
+void     proc_set_cred(proc_t *p, uint32_t uid, uint32_t gid);
+/* 设置附加组（同时清空旧的）；n 会被截断到 ABI_NGROUPS_MAX */
+void     proc_set_groups(proc_t *p, const uint32_t *gids, uint32_t n);
 
 /* ---- 由调度器实现（sched.c） ---- */
 /* 时钟中断里调用：递减时间片，到期就切换 */

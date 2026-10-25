@@ -168,6 +168,12 @@ int printf(const char *fmt, ...)
             n = append_padded(out, n, tmp, len, width, zero);
             break;
         }
+        case 'o': {
+            unsigned int v = __builtin_va_arg(ap, unsigned int);
+            len = (int)utoa(v, tmp, 8U);
+            n = append_padded(out, n, tmp, len, width, zero);
+            break;
+        }
         case 'c': {
             tmp[0] = (char)__builtin_va_arg(ap, int);
             n = append_padded(out, n, tmp, 1, width, zero);

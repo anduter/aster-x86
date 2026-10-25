@@ -65,6 +65,12 @@ $CFLAGS = @(
     '-Wall', '-Wextra', '-Werror', '-g', '-O0', '-Isrc/kernel/include', '-Isrc/kernel'
 )
 
+# ---- 测试模式开关（账号系统 P1） ----
+# -Test / -Shot 是开发/回归用的构建：内核参数默认带 autologin=root，bootseq 直接
+# spawn shell 而不经过 getty -> login，保证既有回归不被登录流程打断。
+# 生产构建（不带这两个开关）不带这个 define，cmdline 为空 -> 必须登录。
+if ($Test -or $Shot) { $CFLAGS += '-DOS_TEST_BUILD=1' }
+
 # ---- 增量构建：参数未变且对象比源文件新时跳过编译（头文件变化则全量重编） ----
 $swTotal = [Diagnostics.Stopwatch]::StartNew()
 New-Item -ItemType Directory -Force -Path $objRoot | Out-Null
@@ -628,7 +634,23 @@ if ($Test -or $Shot) {
             @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: 2 cpu') },
             @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*2 cpu\(s\) discovered.*AP startup pending') },
             @{ Name = 'AP 进入 idle';             Ok = ($out -match 'smp: 2/2 cpus online, 1 AP GDT/TSS/IDT ready, AP ticks=[1-9]\d* ipi=[1-9]\d* tlb=[1-9]\d*') },
-            @{ Name = '负载放置把线程送上 AP';    Ok = ($out -match 'sched: pid \d+ \(spin\) running on cpu 1') }
+            @{ Name = '负载放置把线程送上 AP';    Ok = ($out -match 'sched: pid \d+ \(spin\) running on cpu 1') },
+
+            # ---- 账号系统 P1（身份）：Linux 式 uid/gid、/etc/{passwd,shadow,group}、euid 判权 ----
+            @{ Name = '账号文件 /etc/passwd 0644'; Ok = ($out -match 'acct: /etc/passwd 0644 root ok') },
+            @{ Name = '账号文件 /etc/shadow 0600'; Ok = ($out -match 'acct: /etc/shadow 0600 root ok') },
+            @{ Name = '账号文件 /etc/group 0644';  Ok = ($out -match 'acct: /etc/group 0644 root ok') },
+            @{ Name = '账户表 root/系统/普通用户'; Ok = ($out -match 'acct: accounts root=0 alice=1000 bob=1001 ok') },
+            @{ Name = 'wheel 组用于 sudo';         Ok = ($out -match 'acct: group wheel gid=10 root-member=1 alice-member=0 ok') },
+            @{ Name = 'shadow 对 uid 1000 拒绝';   Ok = (($out -match 'acct: shadow denied for uid 1000 ok') -and ($out -match 'acct: shadow readable by root ok')) },
+            @{ Name = '家目录 0700 边界';          Ok = ($out -match 'acct: home 0700 boundary ok') },
+            @{ Name = '附加组参与判权';            Ok = ($out -match 'acct: supplementary group grants group bits ok') },
+            @{ Name = '口令 sha256 + 恒定时间';    Ok = (($out -match 'acct: password verify ok ct-steps=64') -and ($out -match 'acct: wrong password rejected ct-steps=64') -and ($out -match 'acct: constant-time compare equal iterations ok')) },
+            @{ Name = 'shadow 摘要格式稳定';       Ok = ($out -match 'acct: sha256 hex length=64 stable=1 ok') },
+            @{ Name = '账号自检通过';              Ok = ($out -match 'acct: selftest PASS') },
+            @{ Name = '测试模式自动登录 root';     Ok = ($out -match 'acct: autologin=root \(test build\) -> shell without login') },
+            @{ Name = 'shell 报告 euid/gid';       Ok = ([regex]::Matches($out, 'ushell: euid=0 uid=0 gid=0 egid=0 groups=0').Count -ge 2) },
+            @{ Name = 'fork 继承凭据';             Ok = (($out -match 'acct: fork child euid=0 uid=0') -and ($out -match 'acct: fork creds inherited')) }
         )
 
         T 'checks begin'

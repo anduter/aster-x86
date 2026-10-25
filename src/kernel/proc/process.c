@@ -164,6 +164,14 @@ proc_t *proc_spawn(const char *program_name)
     p->user_brk = 0;
     p->uid = 0;                     /* 内核创建的第一个进程是 root */
     p->gid = 0;
+    p->euid = 0;
+    p->egid = 0;
+    p->suid = 0;
+    p->sgid = 0;
+    p->ngroups = 0;
+    p->umask = 022U;                /* 默认 umask：新建文件 0644，目录 0755 */
+    p->login_required = false;
+    p->is_login = false;
     strcpy(p->cwd, "system:/");     /* 默认工作目录：system 驱动器根 */
     memset(p->fds, 0, sizeof(p->fds));
     cap_init(&p->caps);
@@ -366,6 +374,16 @@ proc_t *proc_fork(struct interrupt_frame *f)
     proc_root_copy(parent, child);
     child->uid = parent->uid;               /* fork 继承身份 */
     child->gid = parent->gid;
+    /* 凭据整组继承（POSIX）：euid/egid/suid/sgid + 附加组 + umask */
+    child->euid = parent->euid;
+    child->egid = parent->egid;
+    child->suid = parent->suid;
+    child->sgid = parent->sgid;
+    child->ngroups = parent->ngroups;
+    memcpy(child->groups, parent->groups, sizeof(child->groups));
+    child->umask = parent->umask;
+    child->login_required = false;          /* 子进程不再重复 login */
+    child->is_login = parent->is_login;
     memcpy(child->fds, parent->fds, sizeof(child->fds));
     child->mmap_next = parent->mmap_next;
     memcpy(child->mmaps, parent->mmaps, sizeof(child->mmaps));
@@ -921,3 +939,74 @@ const proc_t *proc_at(uint32_t index)
 {
     return (index < PROC_MAX) ? &proc_table[index] : 0;
 }
+
+/* ==================== 凭据（P1 身份，ABI v1.3） ====================
+ * 所有权限判定都从这里取"生效身份"：p == 0（内核线程/启动早期）按 root。
+ * root 的 CAP_DAC_OVERRIDE 语义在 fs 层实现（euid == 0 直接放行）。 */
+
+uint32_t proc_euid_of(const proc_t *p)
+{
+    return (p != 0) ? p->euid : 0U;
+}
+
+uint32_t proc_egid_of(const proc_t *p)
+{
+    return (p != 0) ? p->egid : 0U;
+}
+
+bool proc_is_root(const proc_t *p)
+{
+    return (p == 0) || (p->euid == 0U);
+}
+
+bool proc_in_group(const proc_t *p, uint32_t gid)
+{
+    if (p == 0) return true;               /* 内核线程：视为 root 组 */
+
+    if (p->egid == gid) return true;
+    for (uint32_t i = 0; i < (uint32_t)p->ngroups && i < ABI_NGROUPS_MAX; i++) {
+        if (p->groups[i] == gid) return true;
+    }
+    return false;
+}
+
+void proc_fill_cred(const proc_t *p, struct fs_cred *out)
+{
+    uint32_t n = 0;
+
+    if (out == 0) return;
+
+    out->euid = (p != 0) ? p->euid : 0U;
+    out->egid = (p != 0) ? p->egid : 0U;
+    if (p != 0) {
+        for (uint32_t i = 0; i < (uint32_t)p->ngroups && i < ABI_NGROUPS_MAX; i++) {
+            out->groups[n++] = p->groups[i];
+        }
+    }
+    out->ngroups = n;
+}
+
+void proc_set_cred(proc_t *p, uint32_t uid, uint32_t gid)
+{
+    if (p == 0) return;
+
+    p->uid = uid;
+    p->euid = uid;
+    p->suid = uid;
+    p->gid = gid;
+    p->egid = gid;
+    p->sgid = gid;
+    p->ngroups = 0;
+    memset(p->groups, 0, sizeof(p->groups));
+}
+
+void proc_set_groups(proc_t *p, const uint32_t *gids, uint32_t n)
+{
+    if (p == 0) return;
+
+    if (n > ABI_NGROUPS_MAX) n = ABI_NGROUPS_MAX;
+    memset(p->groups, 0, sizeof(p->groups));
+    for (uint32_t i = 0; i < n; i++) p->groups[i] = gids[i];
+    p->ngroups = (uint8_t)n;
+}
+

@@ -6,11 +6,12 @@
 /* 文件系统模块（当前后端是内存卷；接口按“卷”设计，日后可换块设备后端） */
 #define FS_NAME_MAX     65    /* 文件名/目录名最长 64 字符（含结尾 0） */
 #define FS_PATH_MAX     256
-#define FS_FILE_MAX     32768 /* 单个文件最大字节数（放得下 ELF 程序） */
+#define FS_FILE_MAX     40960 /* 单个文件最大字节数（放得下 ELF 程序和审计日志） */
 #define FS_MAX_NODES    64    /* 节点池（文件 + 目录，所有卷共用） */
 #define FS_MAX_OPEN     32    /* 同时打开的文件句柄数 */
 #define FS_MAX_VOLUMES  4     /* 最多挂载几个卷（C: D: ...） */
 #define FS_DRIVE_MAX    32    /* 盘符/卷名最长 32 字节（含结尾 0） */
+#define FS_CRED_GROUPS_MAX 16 /* 附加组上限（与 ABI_NGROUPS_MAX 一致） */
 
 /* fs_open 的打开标志 */
 #define FS_OPEN_READ   0x01U
@@ -32,7 +33,7 @@ typedef struct {
     uint32_t  gid;        /* 属组 */
 } fs_stat_t;
 
-/* 权限位（和 Unix 一致的 9 位） */
+/* 权限位（和 Unix 一致的 9 位）+ setuid/setgid/sticky */
 #define FS_MODE_IRUSR 0x100U
 #define FS_MODE_IWUSR 0x080U
 #define FS_MODE_IXUSR 0x040U
@@ -42,6 +43,14 @@ typedef struct {
 #define FS_MODE_IROTH 0x004U
 #define FS_MODE_IWOTH 0x002U
 #define FS_MODE_IXOTH 0x001U
+
+/* 高 3 位（Linux 语义）：mode & 07777 全部保存，mode & 0777 是纯权限位 */
+#define FS_MODE_SETUID  0x800U  /* 04000：执行时 euid = 文件属主 */
+#define FS_MODE_SETGID  0x400U  /* 02000：执行时 egid = 文件属组 */
+#define FS_MODE_STICKY  0x200U  /* 01000：目录内只有属主/root 能删（/tmp） */
+#define FS_MODE_SPECIAL 0xE00U
+#define FS_MODE_PERM    0x1FFU
+#define FS_MODE_ALL     0xFFFU
 
 /* 默认权限：文件 0644、目录 0755 */
 #define FS_MODE_FILE_DEFAULT 0x1A4U   /* 0644 */
@@ -62,11 +71,41 @@ int fs_mount(const char *name);
 uint32_t fs_volume_count(void);
 int fs_volume_name(uint32_t index, char *buf, uint32_t name_max);
 
-/* 打开文件，返回 OBJ_FILE 句柄；失败返回 0。
- * path 支持 "C:/dir/file" 或 "/dir/file"（无盘符时用默认卷 C:）。
- * 内核内部调用按 root 身份；用户态走 fs_open_as / 下面的 _ex 入口。 */
-uint32_t fs_open(const char *path, uint32_t flags);
-uint32_t fs_open_as(const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
+/* =============================================================================
+ * 凭据（ABI v1.3）：权限判定用生效身份 euid/egid + 附加组。
+ *
+ * 旧的 fs_*_as(path, ..., uid, gid) 保留（自检/内核内部按 root 调用），它等价于
+ * 一个没有附加组的 cred。用户态 syscall 一律走 fs_*_cred()，传入进程的
+ * euid/egid/groups——这样 setuid 位、sudo 提权和组权限都只有一处判定逻辑。
+ *
+ * root 判定基于 euid == 0（CAP_DAC_OVERRIDE），与 Linux 一致。
+ * ========================================================================== */
+typedef struct fs_cred {
+    uint32_t euid;                            /* 生效用户 ID */
+    uint32_t egid;                            /* 生效组 ID */
+    uint32_t ngroups;                         /* 附加组个数 */
+    uint32_t groups[FS_CRED_GROUPS_MAX];      /* 附加组（不含主组） */
+    uint32_t umask;                           /* 创建时的权限掩码（0 = 不掩） */
+} fs_cred_t;
+
+/* 用 (uid, gid) 造一个没有附加组的 cred */
+void fs_cred_from_ids(fs_cred_t *out, uint32_t uid, uint32_t gid);
+/* cred 是否属于组 gid（主组或附加组） */
+bool fs_cred_in_group(const fs_cred_t *c, uint32_t gid);
+/* root（euid == 0）：保留 CAP_DAC_OVERRIDE */
+bool fs_cred_is_root(const fs_cred_t *c);
+
+/* 生效身份版本的文件操作（用户态 syscall 用这些） */
+int      fs_open_cred(const char *path, uint32_t flags, const fs_cred_t *c, uint8_t *be);
+int      fs_mkdir_cred(const char *path, const fs_cred_t *c, uint8_t *be);
+int      fs_unlink_cred(const char *path, const fs_cred_t *c, uint8_t *be);
+int      fs_rename_cred(const char *old_path, const char *new_path, const fs_cred_t *c);
+int      fs_chmod_cred(const char *path, uint32_t mode, const fs_cred_t *c);
+int      fs_chown_cred(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t *c);
+int      fs_access_cred(const char *path, uint32_t want, const fs_cred_t *c);
+int      fs_stat_cred(const char *path, fs_stat_t *out, const fs_cred_t *c, uint8_t *be);
+int      fs_listdir_cred(const char *path, uint32_t index, char *name, uint32_t name_max,
+                         fs_stat_t *out, const fs_cred_t *c, uint8_t *be);
 
 /* 读写/关闭句柄（会校验句柄类型，传错类型返回 E_TYPE） */
 int fs_read(uint32_t handle, void *buf, uint32_t len);
@@ -81,6 +120,11 @@ int fs_mkdir(const char *path);
 int fs_mkdir_as(const char *path, uint32_t uid, uint32_t gid);
 int fs_unlink(const char *path);
 int fs_unlink_as(const char *path, uint32_t uid, uint32_t gid);
+
+/* 按 (uid, gid) 打开（自检/内核内部用；用户态走 fs_open_cred） */
+uint32_t fs_open_as(const char *path, uint32_t flags, uint32_t uid, uint32_t gid);
+/* 内核内部调用（加载 ELF、安装 shell 等）按 root 身份打开 */
+uint32_t fs_open(const char *path, uint32_t flags);
 
 /* ---- rename / move（rename(2) 的简化版） ----
  * 在同一卷内改名或移动；new_path 是完整的目标路径（不做 `mv` 的"移入目录"语义）。

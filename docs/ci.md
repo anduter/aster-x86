@@ -66,7 +66,7 @@ elapsed: 0.9s
 | 3 | 被跟踪文件里没有 `.obj-*` `.dist-*` `*.img` `*.o` `*.bin` `*.elf` `*.map` `serial-*.log` `logs-*.log` | 构建产物/日志 |
 | 4 | `tools/check-deps.ps1` 0 违规 | 模块边界，规则见 `docs/modules.md` |
 | 5 | `-Full`：`build.ps1` 成功 | 产物用隔离目录 |
-| 6 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 98/98 |
+| 6 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 112/112（98 + 账号系统 P1 的 14 项） |
 
 `-Full` 的隔离参数（结束自动清理，`-KeepArtifacts` 保留现场）：
 
@@ -112,7 +112,7 @@ elapsed: 0.9s
 | 层 | 文件 | runner | 跑什么 | 为什么 |
 |---|---|---|---|---|
 | 静态 | `static.yml` | `ubuntu-latest`（托管） | BOM、禁用文件、`check-deps`、`ci.ps1 -Quick -AllowDirty` | 只需 git + PowerShell，秒级 |
-| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 98/98 ×2） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
+| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 112 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
 
 **托管 runner 上不要试图构建**：那里没有 vendored 工具链、没有 QEMU，
 `tools/i686-elf` 也不会随仓库分发（见 README 的"自带交叉工具链"一节）。
