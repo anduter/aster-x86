@@ -38,6 +38,8 @@ void fb_clear(unsigned int color);
 /* 填充矩形 [x0,x1) x [y0,y1)，超出屏幕自动裁剪 */
 void fb_fill_rect(unsigned int x0, unsigned int y0, unsigned int x1, unsigned int y1, unsigned int color);
 void fb_char(unsigned int x, unsigned int y, char c, unsigned int fg, unsigned int bg);
+/* 只画字形前景（不填背景），用于纹理/图像上的文字，避免“字块阴影” */
+void fb_glyph(unsigned int x, unsigned int y, char c, unsigned int fg, unsigned int scale);
 /* scale > 1 时按整数倍放大（保持像素清晰），控制台字体放大用 */
 void fb_char_scaled(unsigned int x, unsigned int y, char c,
                     unsigned int fg, unsigned int bg, unsigned int scale);

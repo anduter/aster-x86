@@ -263,6 +263,25 @@ void fb_char_scaled(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg,
     }
 }
 
+void fb_glyph(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t scale)
+{
+    uint32_t off = (uint32_t)(uint8_t)c - 0x20U;
+    if ((uint8_t)c < 0x20U || (uint8_t)c > 0x7EU)
+        return;
+    if (scale == 0U) scale = 1U;
+
+    for (uint32_t j = 0U; j < 8U; j++)
+    {
+        uint8_t row = bios_font_ok ? bios_font[(uint8_t)c][j]
+                                   : font8x8[off][j];
+        for (uint32_t i = 0U; i < 8U; i++)
+        {
+            if ((row & (1U << i)) == 0U) continue;
+            fb_fill_rect(x + i * scale, y + j * scale,
+                         x + (i + 1U) * scale, y + (j + 1U) * scale, fg);
+        }
+    }
+}
 void fb_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg)
 {
     fb_char_scaled(x, y, c, fg, bg, 1U);
