@@ -7,7 +7,9 @@ CI 分两层跑（托管 runner 只能跑静态检查，完整构建需要自托
 
 | 文件 | 作用 |
 |---|---|
-| `tools/ci.ps1` | 统一入口：`-Quick` 静态检查（<10s）/ `-Full` 构建 + N 次回归 |
+| `tools/ci.ps1` | 统一入口：`-Quick` 静态检查 + host 单元测试（约 2s）/ `-Full` 构建 + N 次回归 |
+| `tools/unit.ps1` | host 单元测试：真实内核源文件 + 最小 shim，不启动 QEMU |
+| `tests/unit/` | 单元测试用例、签名夹具与 host shim |
 | `tools/pre-commit.ps1` | 提交守卫本体：BOM、禁用文件、`src/kernel/**` 模块边界 |
 | `tools/githooks/pre-commit` | bash 钩子入口，转调上面的 `.ps1` |
 | `tools/install-hooks.ps1` | 安装钩子（`core.hooksPath`），幂等 |
@@ -20,8 +22,11 @@ CI 分两层跑（托管 runner 只能跑静态检查，完整构建需要自托
 ## 1. 本地用法
 
 ```powershell
-# 提交前常规自检（静态，约 1s）
+# 提交前常规自检（静态 + host 单元测试，约 2s）
 powershell -NoProfile -File tools/ci.ps1 -Quick
+
+# 只跑 host 单元测试（不启动 QEMU）
+powershell -NoProfile -File tools/unit.ps1
 
 # 完整验证：build.ps1 + 连续 2 次 build.ps1 -Test（各 ~14s）
 powershell -NoProfile -File tools/ci.ps1 -Full
@@ -32,10 +37,10 @@ powershell -NoProfile -File tools/ci.ps1 -Quick -AllowDirty
 # 加跑 flake-hunt（只报告，不作门禁；已知偶发 #PF 见 docs/parallel-sessions.md）
 powershell -NoProfile -File tools/ci.ps1 -Full -FlakeRuns 5
 
-# 强制"所有被跟踪脚本都必须有 BOM"（含历史豁免文件）
+# 强制"所有被跟踪脚本都必须有 BOM"（历史豁免表已清空，等价于默认严格）
 powershell -NoProfile -File tools/ci.ps1 -Quick -StrictBom
 
-# 批量给历史脚本补 BOM（会自动列出改了哪些文件；请单独提交）
+# 给缺 BOM 的脚本补 BOM（会自动列出改了哪些文件；请单独提交）
 powershell -NoProfile -File tools/ci.ps1 -Quick -FixBom
 ```
 
@@ -45,15 +50,17 @@ powershell -NoProfile -File tools/ci.ps1 -Quick -FixBom
 === CI (quick) ===
   repo  : D:\OS_Project
   head  : 3f79e0c [net] UDP echo selftest: ...
---- static 1/4: worktree ---
+--- static 1/5: worktree ---
   [PASS] worktree clean  (0 项改动)
---- static 2/4: BOM + parse ---
-  [PASS] BOM + parse (20 files)  (missing BOM: 0, parse errors: 0)
---- static 3/4: forbidden files ---
-  [PASS] no build artifacts (226 tracked)  (bad: 0)
---- static 4/4: module boundaries (check-deps) ---
+--- static 2/5: BOM + parse ---
+  [PASS] BOM + parse (25 files)  (missing BOM: 0, parse errors: 0)
+--- static 3/5: forbidden files ---
+  [PASS] no build artifacts (435 tracked)  (bad: 0)
+--- static 4/5: module boundaries (check-deps) ---
   [PASS] check-deps 0 violations  (exit=0, violations=0)
-elapsed: 0.9s
+--- static 5/5: unit (host) ---
+  [PASS] host unit tests  (5 suites, 1.3s)
+elapsed: 2.1s
 === CI PASS ===
 ```
 
@@ -62,11 +69,12 @@ elapsed: 0.9s
 | # | 检查 | 说明 |
 |---|---|---|
 | 1 | `git status --porcelain` 干净 | `-AllowDirty` 降级为警告 |
-| 2 | `*.ps1`/`*.psm1` 以 `EF BB BF` 开头 + `Parser::ParseFile` 0 错误 | 见第 6 节的"历史豁免" |
+| 2 | `*.ps1`/`*.psm1` 以 `EF BB BF` 开头 + `Parser::ParseFile` 0 错误 | 见第 6 节；历史豁免表已清空 |
 | 3 | 被跟踪文件里没有 `.obj-*` `.dist-*` `*.img` `*.o` `*.bin` `*.elf` `*.map` `serial-*.log` `logs-*.log` | 构建产物/日志 |
 | 4 | `tools/check-deps.ps1` 0 违规 | 模块边界，规则见 `docs/modules.md` |
-| 5 | `-Full`：`build.ps1` 成功 | 产物用隔离目录 |
-| 6 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 122/122（98 + 账号系统 P1 14 项 + P2 10 项） |
+| 5 | `tools/unit.ps1` 全 PASS | host 单元测试；`-NoUnit` 可跳过（仅排障） |
+| 6 | `-Full`：`build.ps1` 成功 | 产物用隔离目录 |
+| 7 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 122/122（98 + 账号系统 P1 14 项 + P2 10 项） |
 
 `-Full` 的隔离参数（结束自动清理，`-KeepArtifacts` 保留现场）：
 
@@ -83,8 +91,9 @@ elapsed: 0.9s
 
 | 参数 | 默认 | 作用 |
 |---|---|---|
-| `-Quick` | （不给模式时默认） | 只跑静态检查 |
+| `-Quick` | （不给模式时默认） | 只跑静态检查 + host 单元测试 |
 | `-Full` | — | 静态 + `build.ps1` + `-Test` ×N |
+| `-NoUnit` | — | 跳过 `tools/unit.ps1`（仅排障用；CI 默认跑） |
 | `-TestRepeat N` | 2 | `-Full` 里 `-Test` 的次数 |
 | `-ExpectChecks N` | 0（自动取第一次的项数） | 要求每次 `-Test` 都是 N/N |
 | `-MinChecks N` | 90 | 低于这个项数视为没跑全 |
@@ -104,6 +113,29 @@ elapsed: 0.9s
 - 宿主 `12345`（UDP+TCP）与 QMP `4691` 空闲 —— 同一时刻只能跑一个 `-Test`。
 
 `-Full` 结束后还会再查一次 `git status`：产物如果漏进被跟踪路径，直接 FAIL。
+
+### 单元测试（host，不启动 QEMU）
+
+`tools/unit.ps1` 用宿主编译器（优先 `tools/w64devkit/bin/gcc.exe`，否则 PATH 上的 `gcc`）
+直接编译**真实内核源文件**，与测试 TU 链接后运行；不依赖 i686-elf、QEMU 或端口。
+内核符号与 host libc 冲突时用 `-Dmemcpy=k_memcpy` 之类改名，测试侧提供最小实现
+（不改内核源码）；依赖内核头的用例通过 `tests/unit/shim/` 提供最小接口
+（自旋锁、`proc_block`、`kprintf` 退化为 no-op）。
+
+| 用例 | 被测代码 | 覆盖 |
+|---|---|---|
+| `abi` | `include/abi.h` | 冻结的 sizeof/offsetof、SYS 编号、版本与 feature bits |
+| `string` | `lib/string.c` | memcpy/memmove 重叠、strcmp/strncmp、strcpy/strncpy、utoa/itoa 边界 |
+| `trust` | `security/trust.c` | SHA-256 标准向量 + 填充边界、RSA-2048 验签正/负样例（篡改消息/签名/模数） |
+| `pipe` | `fs/pipe.c` | 环形缓冲回绕、部分读写、写满、EOF（写端引用计数）、槽位回收复用 |
+| `service` | `svc/service.c` | manifest 版本/参数校验、注册/查重/查找、表满、名字过长 |
+
+签名夹具 `tests/unit/fixtures/signature_fixture.h` 是**公开数据**（消息 + 签名 + 模数），
+不含私钥；换构建密钥不需要改它。
+
+**暂未覆盖（有意为之，不为此改内核）**：`make_abs_path`（依赖 `proc_t`/当前进程）、
+PMM 位图（`pmm.c` 依赖 arch/内存布局）、FAT16 目录项解析（静态函数且依赖块设备）。
+这些仍由整机 `build.ps1 -Test` 覆盖；等对应模块拆出纯函数后再补 host 用例。
 
 ---
 
@@ -274,30 +306,20 @@ pre-commit: blocked: 1 issue(s)
 
 ---
 
-## 6. BOM 历史豁免（迁移中）
+## 6. BOM（已全量迁移，`-StrictBom` 成为默认门禁）
 
 PS5.1 对**没有 BOM 的 UTF-8** 按系统 ANSI 码页解码，中文注释/字符串会变乱码，
 严重时直接语法错误 —— 这就是"`build.ps1` 丢 BOM 导致解析失败"事故的成因（已发生 3 次）。
 
-现状：仓库里有一批**历史上就没有 BOM 的脚本**，其中 15 个是纯 ASCII（PS5.1 能解析）。
-`tools/ci.ps1` 把这份名单写死在 `$BomLegacy` 里（豁免，但会打印警告），因为
-"补 BOM" 会动到不属于本次改动的文件；`tools/pre-commit.ps1` 对**暂存文件是严格模式**，
-所以任何被改到的脚本都会在提交时被迫补上 BOM（棘轮）。
+现状（2026-10-26）：**所有被跟踪的 `*.ps1`/`*.psm1` 都带 `EF BB BF`**，
+`tools/ci.ps1` 的 `$BomLegacy` 豁免表已清空，`-StrictBom` 不再有例外。
+`tools/pre-commit.ps1` 对暂存脚本始终严格，所以新增/改动脚本不可能漏 BOM。
 
-已修复：`sign_image.ps1`（每次构建都会跑）已补 BOM 并从豁免表移除。
-仍需优先处理：
+补充说明：
 
-- `tools/mkfat16.ps1`
-
-迁移建议（单独一个 `[chore]` 提交，不要混进功能提交）：
-
-```powershell
-powershell -NoProfile -File tools/ci.ps1 -Quick -FixBom
-git add -- <列出的文件>
-# 之后可以把 tools/ci.ps1 里的 $BomLegacy 删空，并启用 -StrictBom
-```
-
-补 BOM 不会改变脚本行为（PS5.1 与 pwsh 都认 BOM）。
+- `-FixBom` 仍保留：如果从历史分支 cherry-pick 了无 BOM 的脚本，可一键补齐；
+- 补 BOM 不改变脚本行为（PS5.1 与 pwsh 都认 BOM）；
+- `sign_image.ps1` 已于密钥轮换时补 BOM（它每次构建都会跑，此前是最高风险项）。
 
 ---
 

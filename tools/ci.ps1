@@ -16,13 +16,14 @@
 #   3. 被跟踪文件里没有构建产物/日志：
 #      .obj-* .dist-* *.img *.o *.bin *.elf *.map serial-*.log logs-*.log
 #   4. tools/check-deps.ps1 0 违规
+#   5. tools/unit.ps1 host 单元测试全 PASS（不启动 QEMU；-NoUnit 跳过）
 #
 # 完整检查（追加）：
-#   5. build.ps1 成功
-#   6. 连续 2 次 build.ps1 -Test 全 PASS 且检查项数一致（默认 98/98）
+#   6. build.ps1 成功
+#   7. 连续 2 次 build.ps1 -Test 全 PASS 且检查项数一致（默认 112/112）
 #      隔离产物：-ObjDir .obj-ci -DistDir .dist-ci -QmpPort 4691 -SerialLog serial-ci.log
 #      结束时清理（-KeepArtifacts 保留现场）
-#   7. -FlakeRuns N：追加 tools/flake-hunt.ps1 -Runs N（只报告，不作门禁）
+#   8. -FlakeRuns N：追加 tools/flake-hunt.ps1 -Runs N（只报告，不作门禁）
 #
 # 用法：
 #   powershell -NoProfile -File tools/ci.ps1 -Quick
@@ -37,6 +38,7 @@
 param(
     [switch]$Quick,
     [switch]$Full,
+    [switch]$NoUnit,
     [int]$FlakeRuns = 0,
     [switch]$AllowDirty,
     [switch]$StrictBom,
@@ -149,26 +151,9 @@ function Remove-CiArtifacts {
     }
 }
 
-# 历史上就没有 BOM 的纯 ASCII 脚本（PS5.1 仍能解析）。新增/改动的文件不在豁免之列：
-# pre-commit 对暂存文件是严格模式，所以任何被 touch 的文件都会自动补上 BOM。
-# 全部补齐后删掉这张表，并去掉 docs/ci.md 里的"历史豁免"说明。
-$BomLegacy = @(
-    'tools/arch-move.ps1',
-    'tools/auto-accept-soak.ps1',
-    'tools/converge-includes.ps1',
-    'tools/e1000-probe.ps1',
-    'tools/error-path-check.ps1',
-    'tools/fix-includes.ps1',
-    'tools/gensyms.ps1',
-    'tools/mkfat16.ps1',
-    'tools/net_peer_test.ps1',
-    'tools/session-run.ps1',
-    'tools/session-status.ps1',
-    'tools/soak-file.ps1',
-    'tools/soak.ps1',
-    'tools/stress.ps1',
-    'tools/watch-changes.ps1'
-)
+# 历史豁免表：2026-10-26 已清空（所有被跟踪的 *.ps1/*.psm1 都带 BOM）。
+# 保留空表是为了让 -StrictBom/-FixBom 的行为不变；新增脚本仍由 pre-commit 强制 BOM。
+$BomLegacy = @()
 
 $Forbidden = @(
     @{ Re = '(^|/)\.obj-';                        Label = '.obj-* (构建产物)' },
@@ -217,7 +202,7 @@ try {
     # =========================================================================
     # 静态检查 1/4：工作区干净
     # =========================================================================
-    Phase 'static 1/4: worktree'
+    Phase 'static 1/5: worktree'
     $dirty = @(& git -c core.quotepath=false status --porcelain)
     $dirtyOk = ($dirty.Count -eq 0)
     if (-not $dirtyOk -and $AllowDirty) {
@@ -236,7 +221,7 @@ try {
     # =========================================================================
     # 静态检查 2/4：*.ps1/*.psm1 必须有 UTF-8 BOM 且能被解析
     # =========================================================================
-    Phase 'static 2/4: BOM + parse'
+    Phase 'static 2/5: BOM + parse'
     $trackedPs = @(& git -c core.quotepath=false ls-files '*.ps1' '*.psm1')
 
     if ($FixBom) {
@@ -298,7 +283,7 @@ try {
     # =========================================================================
     # 静态检查 3/4：禁用文件（构建产物 / 日志）
     # =========================================================================
-    Phase 'static 3/4: forbidden files'
+    Phase 'static 3/5: forbidden files'
     $trackedAll = @(& git -c core.quotepath=false ls-files)
     $badFiles = @()
     foreach ($rel in $trackedAll) {
@@ -310,9 +295,9 @@ try {
     if ($badFiles.Count -gt 0) { Sub '修复：git rm --cached <path>（并在 .gitignore 里补规则）' }
 
     # =========================================================================
-    # 静态检查 4/4：模块边界
+    # 静态检查 4/5：模块边界
     # =========================================================================
-    Phase 'static 4/4: module boundaries (check-deps)'
+    Phase 'static 4/5: module boundaries (check-deps)'
     $depScript = Join-Path $root 'tools/check-deps.ps1'
     $depLog = Join-Path $tmpRoot 'check-deps.log'
     $depCode = Invoke-Script $psHost (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $depScript, '-Repo', $root)) $depLog
@@ -327,6 +312,33 @@ try {
     } else {
         $cm = [regex]::Match($depText, '(?m)^checked:.*$')
         if ($cm.Success) { Sub $cm.Value }
+    }
+
+    # =========================================================================
+    # 静态检查 5/5：host 单元测试（不启动 QEMU）
+    # =========================================================================
+    Phase 'static 5/5: unit (host)'
+    if ($NoUnit) {
+        Note '-NoUnit：跳过 host 单元测试（tools/unit.ps1）'
+    } else {
+        $unitScript = Join-Path $root 'tools/unit.ps1'
+        if (-not (Test-Path -LiteralPath $unitScript)) {
+            Report 'tools/unit.ps1 present' $false ('missing: {0}' -f $unitScript)
+        } else {
+            $unitLog = Join-Path $tmpRoot 'unit.log'
+            $swUnit = [Diagnostics.Stopwatch]::StartNew()
+            $unitCode = Invoke-Script $psHost (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $unitScript, '-Repo', $root)) $unitLog
+            $swUnit.Stop()
+            $unitText = if (Test-Path $unitLog) { [IO.File]::ReadAllText($unitLog) } else { '' }
+            $um = [regex]::Match($unitText, '=== UNIT PASS \((\d+)/\1\) ===')
+            $unitOk = ($unitCode -eq 0 -and $um.Success)
+            $unitDetail = if ($um.Success) { "{0} suites" -f $um.Groups[1].Value } else { "exit={0}" -f $unitCode }
+            Report 'host unit tests' $unitOk ("{0}, {1:N1}s, log={2}" -f $unitDetail, $swUnit.Elapsed.TotalSeconds, $unitLog)
+            if (-not $unitOk) {
+                Show-Tail $unitText 40
+                Sub '修复：powershell -NoProfile -File tools/unit.ps1；或 -NoUnit 临时跳过（仅限排障）'
+            }
+        }
     }
 
     # =========================================================================
