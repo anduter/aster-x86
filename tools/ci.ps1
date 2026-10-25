@@ -370,7 +370,8 @@ try {
         }
         if (-not $pfOk) { throw 'full: preflight 未通过' }
 
-        $buildLogDir = Join-Path $root '.session/ci'
+        # 日志放 obj/ci（gitignored、-Full 结束不清理），CI 失败时直接上传 artifact
+        $buildLogDir = Join-Path $root 'obj/ci'
         New-Item -ItemType Directory -Force -Path $buildLogDir | Out-Null
         $commonArgs = @('-ObjDir', $ObjDir, '-DistDir', $DistDir, '-QmpPort', "$QmpPort", '-SerialLog', $SerialLog)
 

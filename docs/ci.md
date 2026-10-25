@@ -14,6 +14,8 @@ CI 分两层跑（托管 runner 只能跑静态检查，完整构建需要自托
 | `tools/githooks/pre-commit` | bash 钩子入口，转调上面的 `.ps1` |
 | `tools/install-hooks.ps1` | 安装钩子（`core.hooksPath`），幂等 |
 | `tools/session-commit.ps1` | 按会话限定路径提交，防止扫入别人 staged 的文件 |
+| `tools/release.ps1` | 发版：bump `version.h` + changelog + 构建/签名 + SHA256SUMS + tag（不 push） |
+| `tools/bench.ps1` | 基准：内核体积、全量/增量构建、`-Test`、启动到 `ushell: ready` → `logs/bench.csv` |
 | `.github/workflows/static.yml` | 托管 runner：只跑静态子集（BOM / 禁用文件 / check-deps） |
 | `.github/workflows/full.yml` | 自托管 Windows runner：`ci.ps1 -Full`（构建 + 2×`-Test`） |
 
@@ -82,7 +84,8 @@ elapsed: 2.1s
 -ObjDir .obj-ci  -DistDir .dist-ci  -QmpPort 4691  -SerialLog serial-ci.log
 ```
 
-构建/回归日志在 `.session/ci/build.log`、`.session/ci/test-1.log`、`test-2.log`（`/session*/` 之外，`.session/` 已被忽略）。
+构建/回归日志在 `obj/ci/build.log`、`obj/ci/test-1.log`、`test-2.log`（`obj/` 已忽略；
+CI 失败时直接把 `obj/ci/**` 上传成 artifact）。
 
 实测（`8f95dbf`，Windows 10 + PowerShell 5.1）：`-Quick` **0.9s**；
 `-Full` **47.7s**（构建 12.7s + `-Test` 19.7s/14.4s，各 **98/98**），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
@@ -143,7 +146,7 @@ PMM 位图（`pmm.c` 依赖 arch/内存布局）、FAT16 目录项解析（静�
 
 | 层 | 文件 | runner | 跑什么 | 为什么 |
 |---|---|---|---|---|
-| 静态 | `static.yml` | `ubuntu-latest`（托管） | BOM、禁用文件、`check-deps`、`ci.ps1 -Quick -AllowDirty` | 只需 git + PowerShell，秒级 |
+| 静态 | `static.yml` | `ubuntu-latest`（托管） | BOM（`-StrictBom`）、禁用文件、`check-deps`、host 单元测试、`ci.ps1 -Quick -AllowDirty` | 只需 git + PowerShell + gcc，秒级 |
 | 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 122 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
 
 **托管 runner 上不要试图构建**：那里没有 vendored 工具链、没有 QEMU，
@@ -159,7 +162,15 @@ PMM 位图（`pmm.c` 依赖 arch/内存布局）、FAT16 目录项解析（静�
   但**同一台机器上别人的本地 `-Test` 仍会抢端口**）。
 
 `full.yml` 是 `workflow_dispatch`（手动触发），可选参数 `test_repeat`（默认 2）、`flake_runs`（默认 0）。
-失败时会尝试上传 `.session/ci/` 日志作为 artifact。
+失败时会尝试上传 `obj/ci/**` 与 `serial-ci.log` 作为 artifact；
+`full.yml` 还会在构建前从 secret `SIGNING_KEY_PEM` 注入签名私钥（未配置则现生成一次性密钥）。
+
+### 当前执行状态（不要伪造）
+
+- **本仓库目前没有 GitHub 远端，也没有绑定自托管 runner**：两个 workflow 都是"已写好、未在 GitHub 上执行"。
+- 本地验证结论只能写成"本地已验证"：`tools/ci.ps1 -Quick -StrictBom`（含单元测试）与
+  `build.ps1 -Test` 连续 2 次全 PASS。
+- 推送并绑定 runner 之后，以 Actions 页面的真实结果为准；`full.yml` 是手动触发，不会自己跑。
 
 ---
 
@@ -330,6 +341,7 @@ PS5.1 对**没有 BOM 的 UTF-8** 按系统 ANSI 码页解码，中文注释/字
 | `宿主 12345 端口已被占用` | 另一个会话的 `-Test` 在跑；等它结束，或看 `tools/session-status.ps1` |
 | `QMP 端口 4691 已被占用` | 有残留 QEMU：`Get-Process qemu-system-i386 \| Stop-Process -Force` |
 | `-Full` 报 `i686-elf toolchain` FAIL | `tools/i686-elf` 不存在（gitignored，需按 README 自备） |
+| host unit tests FAIL | 先单独跑 `tools/unit.ps1` 看断言；`gcc` 缺失时装 w64devkit 或系统 gcc；临时排障可 `-NoUnit` |
 | commit 没被拦住 | `git config --get core.hooksPath` 是否等于 `tools/githooks`；`git commit --no-verify` 会跳过 hook |
 | hook 报 `bad interpreter: /bin/sh^M` | `tools/githooks/pre-commit` 被改成了 CRLF，且该环境是直接 exec（不是用 sh 跑）。改回 LF 即可；Git for Windows 用自己的 sh 执行 hook，实测 CRLF 也能跑（本仓库 `core.autocrlf=true`，checkout 出来会是 CRLF），但建议保持 LF |
 | `ci.ps1 -Quick` 报某个 `.ps1` 无 BOM | `tools/ci.ps1 -FixBom`（或被改过的文件，见上节） |

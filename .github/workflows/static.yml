@@ -1,8 +1,15 @@
 name: static
 
-# 静态检查层：托管 runner 可跑（只需要 git + PowerShell）。
+# 静态检查层：托管 runner 可跑（只需要 git + PowerShell + host gcc）。
 # 完整构建 + 回归在 full.yml（自托管 Windows runner，需要 tools/i686-elf 与 QEMU）。
 # 文档：docs/ci.md
+#
+# 本 workflow 只做"能在秒级跑完"的检查：
+#   - 工作区/禁用产物（-AllowDirty：checkout 后的工作区由 setup 决定）
+#   - *.ps1/*.psm1 的 UTF-8 BOM + 语法解析（-StrictBom：不再豁免历史文件）
+#   - tools/check-deps.ps1 模块边界
+#   - tools/unit.ps1 host 单元测试（ubuntu-latest 自带 gcc）
+# 失败时上传 obj/ci/** 日志（transcript），不伪造任何"已构建/已回归"结论。
 
 on:
   push:
@@ -38,10 +45,35 @@ jobs:
           fi
           pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
 
-      # BOM / 禁用文件 / tools/check-deps.ps1（0 违规）；不构建
-      - name: tools/ci.ps1 -Quick
+      - name: Host compiler (unit tests)
+        shell: bash
+        run: |
+          # tools/unit.ps1 优先用 tools/w64devkit（gitignored），否则 PATH 上的 gcc
+          gcc --version | head -1
+          make --version | head -1
+
+      - name: tools/ci.ps1 -Quick -StrictBom
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          ./tools/ci.ps1 -Quick -AllowDirty
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force obj/ci | Out-Null
+          Start-Transcript -Path obj/ci/static.log -Force | Out-Null
+          $code = 1
+          try {
+            & ./tools/ci.ps1 -Quick -AllowDirty -StrictBom
+            $code = $LASTEXITCODE
+          } finally {
+            Stop-Transcript | Out-Null
+          }
+          if ($code -ne 0) { throw "ci.ps1 -Quick failed (exit=$code)" }
+
+      - name: Upload static logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-logs
+          path: |
+            obj/ci/**
+            serial-ci.log
+          if-no-files-found: ignore
+          retention-days: 7

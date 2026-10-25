@@ -1,12 +1,18 @@
 name: full
 
-# 完整检查层：**自托管 Windows runner**，手动触发。
-# 托管 runner 上跑不了：需要 vendored 交叉工具链 tools/i686-elf（约 3.5GB，gitignored）
-# 与 qemu-system-i386。见 docs/ci.md 第 2 节。
+# 完整检查层：**自托管 Windows runner**，手动触发（workflow_dispatch）。
 #
-# runner 标签：self-hosted, windows, x64
-# 要求：Windows + PowerShell 5.1、tools/i686-elf 就位、PATH 上有 nasm 与 qemu-system-i386、
-#       宿主 12345 与 QMP 4691 空闲（同一时刻只能跑一个 -Test）。
+# 为什么不能跑在托管 runner 上：
+#   - 需要 vendored 交叉工具链 tools/i686-elf（约 3.5GB，gitignored，不随仓库分发）
+#   - 需要 qemu-system-i386、nasm
+#   - 需要本地 12345（UDP+TCP）与 QMP 4691 端口空闲（同一机器同一时刻只能跑一个 -Test）
+# 见 docs/ci.md 第 2 节的"自托管 runner 要求"。
+#
+# 签名私钥不在仓库里：优先用仓库 secret `SIGNING_KEY_PEM`（PEM 文本）注入；
+# 没配置时 job 内用 tools/gen-key.ps1 生成一次性密钥（内核信任本次构建的模数，
+# 所以也能完整跑回归；只是产物不能被外部长期信任）。详见 keys/README.md。
+#
+# 本 workflow 不会自动运行；本仓库当前也没有绑定 runner —— 不要声称它"已执行"。
 
 on:
   workflow_dispatch:
@@ -53,11 +59,31 @@ jobs:
           }
           Write-Host "toolchain OK"
 
-      - name: tools/ci.ps1 -Full
+      - name: Install signing key (secret or ephemeral)
+        shell: powershell
+        env:
+          SIGNING_KEY_PEM: ${{ secrets.SIGNING_KEY_PEM }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:SIGNING_KEY_PEM) {
+            New-Item -ItemType Directory -Force keys | Out-Null
+            [IO.File]::WriteAllText((Join-Path $PWD 'keys/shell_private.pem'), $env:SIGNING_KEY_PEM,
+                                    (New-Object Text.UTF8Encoding($false)))
+            Write-Host 'signing key: from SIGNING_KEY_PEM secret'
+          } else {
+            .\tools\gen-key.ps1
+            Write-Host 'signing key: ephemeral (SIGNING_KEY_PEM not configured)'
+          }
+          # 双重确认：私钥绝不能出现在 git 的跟踪集合里
+          if (git ls-files --error-unmatch keys/shell_private.pem 2>$null) {
+            throw 'keys/shell_private.pem 被 git 跟踪：仓库违反密钥策略，请先修复'
+          }
+
+      - name: tools/ci.ps1 -Full -StrictBom
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          .\tools\ci.ps1 -Full -TestRepeat ${{ inputs.test_repeat }} -FlakeRuns ${{ inputs.flake_runs }}
+          .\tools\ci.ps1 -Full -StrictBom -TestRepeat ${{ inputs.test_repeat }} -FlakeRuns ${{ inputs.flake_runs }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload CI logs
@@ -65,6 +91,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-logs
-          path: .session/ci/
+          path: |
+            obj/ci/**
+            serial-ci.log
           if-no-files-found: ignore
           retention-days: 7

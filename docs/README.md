@@ -21,6 +21,8 @@
 |---|---|
 | [`parallel-sessions.md`](parallel-sessions.md) | 多会话协作约定、文件所有权、构建串行、登记表 |
 | [`changes-fs.md`](changes-fs.md) | 文件系统/VFS 会话的提交清单、验证证据、已知问题 |
+| [`ci.md`](ci.md) | 提交守卫、CI 分层、host 单元测试、BOM 与故障排查 |
+| [`release.md`](release.md) | 发版流程（版本号/changelog/签名/校验和/tag）与基准（bench.csv） |
 | [`status-2026-10-24.md`](status-2026-10-24.md) | 工程监理报告：进度快照、完整度、日志归档、变更记录 |
 
 ## 3. 验证入口
@@ -28,8 +30,13 @@
 | 命令 | 作用 |
 |---|---|
 | `.\build.ps1` | 构建 `dist\floppy.img`（含内核签名、shell 签名、启动验证器） |
-| `.\build.ps1 -Test` | 全量回归（当前 **97 项**）。默认占用 `obj/`、`dist/`、QMP 4444、`serial.log`；并行会话用 `-ObjDir/-DistDir/-QmpPort/-SerialLog` 隔离（宿主 12345 回显端口仍只能单跑） |
+| `.\build.ps1 -Test` | 全量回归（最近一次 **122 项**，以实测为准）。默认占用 `obj/`、`dist/`、QMP 4444、`serial.log`；并行会话用 `-ObjDir/-DistDir/-QmpPort/-SerialLog` 隔离（宿主 12345 回显端口仍只能单跑） |
 | `.\build.ps1 -Run` | 交互运行（挂 `dist\disk.img` + `dist\fat.img`） |
+| `.\tools\ci.ps1 -Quick -StrictBom` | 提交卫生 + host 单元测试（不启动 QEMU） |
+| `.\tools\ci.ps1 -Full` | 构建 + 2×`-Test`（发版前必跑） |
+| `.\tools\unit.ps1` | 只跑 host 单元测试（`tests/unit/`） |
+| `.\tools\release.ps1 -Version x.y.z` | 发版流水线（不 push，见 [`release.md`](release.md)） |
+| `.\tools\bench.ps1` | 性能基准 → `logs/bench.csv` |
 | `.\tools\watch-changes.ps1` | 事件驱动变更监视（提交/版本/文件集合变化时触发） |
 
 回归项清单维护在 [`../README.md`](../README.md) 的“自动回归”章节；安全断言清单在
