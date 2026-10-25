@@ -254,3 +254,10 @@ M8 → 只依赖用户态 ABI（src/user/ulib.h）
 - include/types.h: fixed-width types, size_t/uintptr_t, address types, NULL
 - include/macros.h: KiB/MiB/GiB, ARRAY_SIZE, ALIGN_*, MIN/MAX, UNUSED
 - src/kernel/types.h is now a compatibility shim including both (66 existing includes unchanged)
+
+### kernel <stdint.h> shim (2026-10-25)
+
+- src/kernel/stdint.h provides i686 ABI types (uint32_t == unsigned int, pointer width == 32)
+- -Isrc/kernel makes angle includes resolve to it instead of the toolchain header
+- include/types.h adds size_t/ssize_t/phys_addr_t/virt_addr_t/NULL and pulls include/macros.h
+- root types.h stays as a compatibility shim for the 66 existing includes
