@@ -1,4 +1,4 @@
-# check-deps.ps1 - module boundary checker (see docs/modules.md)
+﻿# check-deps.ps1 - module boundary checker (see docs/modules.md)
 #
 # Contract:
 #   1. A cross-module include MUST use the interface header include/<mod>.h.
@@ -20,16 +20,19 @@
 # against src/kernel (-I). This catches ../mod/x.h, ../../mod/x.h and
 # plain include/<mod>.h alike.
 #
-# usage: powershell -File tools/check-deps.ps1 [-Repo D:\OS_Project] [-Top 20]
+# usage: powershell -File tools/check-deps.ps1 [-Repo <repo root>] [-Top 20]
+# 跨平台：默认仓库根取本脚本的上级目录；路径分隔符不写死（CI 在 ubuntu runner 上也跑这个脚本）。
 param(
-    [string]$Repo = 'D:\OS_Project',
+    [string]$Repo = '',
     [int]$Top = 20
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Repo) { $Repo = Split-Path -Parent $PSScriptRoot }
+$Repo = (Resolve-Path $Repo).Path
 Set-Location $Repo
-$root = (Resolve-Path (Join-Path $Repo 'src\kernel')).Path
-$rootPrefix = $root + '\'
+$root = (Resolve-Path (Join-Path $Repo 'src/kernel')).Path
+$rootPrefix = $root.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
 
 $modules    = @('core','lib','mm','proc','dev','fs','net','svc','security','user','apps','include','ipc')
 $primitives = @('core/error.h','core/atomic.h','core/spinlock.h')

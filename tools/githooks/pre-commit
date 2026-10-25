@@ -1,0 +1,24 @@
+#!/bin/sh
+# =============================================================================
+# tools/githooks/pre-commit - 提交守卫入口（bash，Git for Windows / MSYS 可用）
+#
+# 安装：powershell -NoProfile -File tools/install-hooks.ps1
+#       （等价于 git config core.hooksPath tools/githooks）
+#
+# 真正的检查在 tools/pre-commit.ps1（BOM / 禁用文件 / 模块边界）。
+# 紧急绕过：git commit --no-verify（之后必须补跑 tools/ci.ps1 -Quick 并修复）
+# 文档：docs/ci.md
+# =============================================================================
+
+root=$(git rev-parse --show-toplevel) || exit 0
+
+if command -v powershell >/dev/null 2>&1; then
+    PS=powershell
+elif command -v pwsh >/dev/null 2>&1; then
+    PS=pwsh
+else
+    echo "pre-commit: 找不到 powershell/pwsh，跳过提交守卫（请手工跑 tools/ci.ps1 -Quick）" >&2
+    exit 0
+fi
+
+exec "$PS" -NoProfile -ExecutionPolicy Bypass -File "$root/tools/pre-commit.ps1"

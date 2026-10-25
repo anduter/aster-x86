@@ -113,3 +113,21 @@
 ### 已知偶发问题（未修）
 
 约每几次 -Test 会出现一次用户态 #PF err=15 (reserved bit) at eip=0x4000415c，shell 被杀，导致后续检查失败（eexec 哨兵等不到）。这是独立的用户态/页表问题，与构建/测试优化无关，需要单独定位。
+
+## 11. 提交卫生（机制，2026-10-25）
+
+第 4 节的口头约定不够（`.ps1` 丢 BOM 已 3 次、`git commit` 扫入别人 staged 的文件已 3 次），
+现在改成机制，入口都在 `tools/` 下，说明见 `docs/ci.md`：
+
+- **提交一律走 `tools/session-commit.ps1`**：只 `git add` 指定路径；暂存区里若有别人的文件就**直接拒绝**并列出。
+
+  ```powershell
+  powershell -NoProfile -File tools/session-commit.ps1 -Name <会话名> -Message "..." -Paths p1,p2
+  ```
+
+- **pre-commit 守卫**：每个克隆装一次 `tools/install-hooks.ps1`（即 `git config core.hooksPath tools/githooks`），
+  之后 `git commit` 自动拦截：`.ps1/.psm1` 丢 BOM、构建产物/日志（`.obj-*` `.dist-*` `*.img` `serial-*.log` `logs-*.log` …）、
+  `src/kernel/**` 改动导致 `check-deps` 违规。
+- **提交前自检**：`tools/ci.ps1 -Quick`（静态，<10s）或 `-Full`（构建 + 2×`-Test` 98/98）。
+- `git commit --no-verify` 只限救急；绕过之后必须补跑 `tools/ci.ps1 -Quick` 并修复。
+- 工作区仍有别的会话改动时，静态检查用 `tools/ci.ps1 -Quick -AllowDirty`。

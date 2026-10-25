@@ -1,0 +1,47 @@
+name: static
+
+# 静态检查层：托管 runner 可跑（只需要 git + PowerShell）。
+# 完整构建 + 回归在 full.yml（自托管 Windows runner，需要 tools/i686-elf 与 QEMU）。
+# 文档：docs/ci.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: static-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure PowerShell
+        shell: bash
+        run: |
+          if command -v pwsh >/dev/null 2>&1; then
+            echo "pwsh already present"
+          else
+            sudo apt-get update
+            sudo apt-get install -y powershell
+          fi
+          pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+      # BOM / 禁用文件 / tools/check-deps.ps1（0 违规）；不构建
+      - name: tools/ci.ps1 -Quick
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./tools/ci.ps1 -Quick -AllowDirty
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

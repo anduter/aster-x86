@@ -15,6 +15,8 @@
 # 忽略工具链目录，但保留 tools/ 下的宿主脚本（构建/测试要用）
 /tools/*
 !/tools/*.ps1
+# 提交守卫入口（tools/githooks/pre-commit 是 bash 脚本）必须被跟踪，否则 hook 装不上
+!/tools/githooks/
 
 # ---- 运行时 / 调试产物 ----
 /*.log

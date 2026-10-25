@@ -1,0 +1,70 @@
+name: full
+
+# 完整检查层：**自托管 Windows runner**，手动触发。
+# 托管 runner 上跑不了：需要 vendored 交叉工具链 tools/i686-elf（约 3.5GB，gitignored）
+# 与 qemu-system-i386。见 docs/ci.md 第 2 节。
+#
+# runner 标签：self-hosted, windows, x64
+# 要求：Windows + PowerShell 5.1、tools/i686-elf 就位、PATH 上有 nasm 与 qemu-system-i386、
+#       宿主 12345 与 QMP 4691 空闲（同一时刻只能跑一个 -Test）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_repeat:
+        description: '连续 build.ps1 -Test 次数'
+        required: false
+        default: '2'
+      flake_runs:
+        description: 'flake-hunt 次数（0 = 不跑；只报告，不作门禁）'
+        required: false
+        default: '0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-selfhosted
+  cancel-in-progress: false
+
+jobs:
+  full:
+    name: full build + regression
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: Toolchain preflight
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'tools/i686-elf/bin/i686-elf-gcc.exe')) {
+            throw 'tools/i686-elf 缺失：自托管 runner 需要 vendored 交叉工具链（约 3.5GB，gitignored），见 README / docs/ci.md'
+          }
+          foreach ($exe in 'nasm', 'qemu-system-i386') {
+            if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+              throw "$exe 不在 PATH 上（自托管 runner 需要它）"
+            }
+          }
+          Write-Host "toolchain OK"
+
+      - name: tools/ci.ps1 -Full
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\tools\ci.ps1 -Full -TestRepeat ${{ inputs.test_repeat }} -FlakeRuns ${{ inputs.flake_runs }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: .session/ci/
+          if-no-files-found: ignore
+          retention-days: 7
