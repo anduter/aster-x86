@@ -61,7 +61,7 @@ powershell -NoProfile -File tools/ci.ps1 -Quick -FixBom
 --- static 4/5: module boundaries (check-deps) ---
   [PASS] check-deps 0 violations  (exit=0, violations=0)
 --- static 5/5: unit (host) ---
-  [PASS] host unit tests  (5 suites, 1.3s)
+  [PASS] host unit tests  (7 suites, 3.4s)
 elapsed: 2.1s
 === CI PASS ===
 ```
@@ -132,6 +132,7 @@ CI 失败时直接把 `obj/ci/**` 上传成 artifact）。
 | `trust` | `security/trust.c` | SHA-256 标准向量 + 填充边界、RSA-2048 验签正/负样例（篡改消息/签名/模数） |
 | `pipe` | `fs/pipe.c` | 环形缓冲回绕、部分读写、写满、EOF（写端引用计数）、槽位回收复用 |
 | `service` | `svc/service.c` | manifest 版本/参数校验、注册/查重/查找、表满、名字过长 |
+| `fuzz-trust` / `fuzz-pipe` | `trust.c` / `pipe.c` | 固定种子随机输入（无 libFuzzer 的替代）：篡改必须拒绝、环形缓冲影子队列校验 |
 
 签名夹具 `tests/unit/fixtures/signature_fixture.h` 是**公开数据**（消息 + 签名 + 模数），
 不含私钥；换构建密钥不需要改它。
@@ -139,6 +140,14 @@ CI 失败时直接把 `obj/ci/**` 上传成 artifact）。
 **暂未覆盖（有意为之，不为此改内核）**：`make_abs_path`（依赖 `proc_t`/当前进程）、
 PMM 位图（`pmm.c` 依赖 arch/内存布局）、FAT16 目录项解析（静态函数且依赖块设备）。
 这些仍由整机 `build.ps1 -Test` 覆盖；等对应模块拆出纯函数后再补 host 用例。
+
+静态分析：`cppcheck` / `clang-tidy` 在本机与 CI 镜像里都不可用（未安装），因此**没有接入**；
+`docs/ci.md` 不声称跑过它们。装了之后可以先用只读命令试跑：
+
+```powershell
+cppcheck --enable=warning,style --std=c99 --quiet src/kernel
+clang-tidy src/kernel/lib/string.c -- -Isrc/kernel -Isrc/kernel/include
+```
 
 ---
 

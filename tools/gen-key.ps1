@@ -42,7 +42,7 @@ foreach ($p in @($PrivateKey, $PublicKey)) {
 $dir = Split-Path -Parent $PrivateKey
 if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
 
-# 沿用现有格式：`openssl genrsa -traditional` 产出 "BEGIN RSA PRIVATE KEY"（PKCS#1）。
+# 沿用现有格式：`openssl genrsa -traditional` 产出 PKCS#1（传统 RSA 私钥头）。
 # sign_image.ps1 读取 -modulus 的方式对 PKCS#1/PKCS#8 都成立，但保持旧格式便于 diff 审计。
 & openssl genrsa -traditional -out $PrivateKey 2048
 if ($LASTEXITCODE -ne 0) { throw 'gen-key: openssl genrsa 失败' }

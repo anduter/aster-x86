@@ -1,7 +1,7 @@
 # ---- 密钥：私钥永不进 git（keys/README.md 与公钥可以提交） ----
-# 生成/轮换：tools/gen-key.ps1；私钥由本地或 CI secret 注入
-/keys/*.pem
-!/keys/shell_public.pem
+# 全局兜底：任何 *.pem 都忽略；只放行公开公钥
+*.pem
+!keys/shell_public.pem
 
 # ---- 构建产物 ----
 /dist/

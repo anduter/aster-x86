@@ -92,13 +92,29 @@ $tests = @(
             'memset=k_memset', 'kprintf=unit_kprintf'
         )
         Inc     = @('tests/unit/shim')
+    },
+    @{
+        Name    = 'fuzz-trust'
+        Sources = @('src/kernel/security/trust.c', 'tests/unit/test_fuzz_trust.c')
+        Defines = @(
+            'BOOT_VERIFY',
+            'memcpy=unit_memcpy', 'memset=unit_memset', 'memcmp=unit_memcmp'
+        )
+        Inc     = @()
+    },
+    @{
+        Name    = 'fuzz-pipe'
+        Sources = @('src/kernel/fs/pipe.c', 'tests/unit/test_fuzz_pipe.c')
+        Defines = @('memset=unit_memset')
+        Inc     = @('tests/unit/shim')
     }
 )
 
 if ($Only.Count -gt 0) {
+    $allNames = @($tests | ForEach-Object { $_.Name })
     $want = @($Only | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $tests = @($tests | Where-Object { $want -contains $_.Name })
-    if ($tests.Count -eq 0) { throw ("unit: -Only 没有匹配的用例（可选：{0}）" -f (($tests | ForEach-Object { $_.Name }) -join ', ')) }
+    if ($tests.Count -eq 0) { throw ("unit: -Only 没有匹配的用例（可选：{0}）" -f ($allNames -join ', ')) }
 }
 
 $common = @('-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fno-builtin', '-Wno-unused-parameter')
