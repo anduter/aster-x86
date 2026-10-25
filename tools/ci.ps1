@@ -153,7 +153,6 @@ function Remove-CiArtifacts {
 # pre-commit 对暂存文件是严格模式，所以任何被 touch 的文件都会自动补上 BOM。
 # 全部补齐后删掉这张表，并去掉 docs/ci.md 里的"历史豁免"说明。
 $BomLegacy = @(
-    'sign_image.ps1',
     'tools/arch-move.ps1',
     'tools/auto-accept-soak.ps1',
     'tools/converge-includes.ps1',

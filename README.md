@@ -47,7 +47,15 @@ ELF 段权限分离、代码页只读、COW 只作用于可写页、明确限制
 
 需要：`nasm`、`i686-elf-gcc/ld/objcopy`、`qemu-system-i386`、`openssl`。
 仓库自带交叉工具链在 `tools/i686-elf/bin`（`build.ps1` 会自动加入 PATH）。
-构建时用 `keys/shell_private.pem`（测试密钥）给 shell ELF 签名。
+
+**签名私钥不在仓库里**（开源仓库不能带私钥）。首次构建先本地生成密钥对：
+
+```powershell
+.\tools\gen-key.ps1    # 生成 keys/shell_private.pem（gitignored）+ keys/shell_public.pem
+```
+
+构建时用 `keys/shell_private.pem` 给 shell ELF 与 kernel.bin 签名；公钥模数由构建脚本生成到
+`obj/shell_signature.c`，内核只内嵌公钥。轮换密钥、CI secret 用法见 `keys/README.md` 与 `SECURITY.md`。
 
 **Windows（推荐，无需 POSIX shell）**
 
@@ -687,3 +695,16 @@ New-Item stress-run\STOP                        # 提前停止
 - fork 用 **COW**：只对可写页建立 COW，代码页保持永久只读；物理页有引用计数；
 - 通用异常表只有 8 个槽位、目前只登记了 uaccess 一段；
 - 键盘只处理扫描码 set 1 的可打印键（含 Shift/CapsLock/Ctrl+C），无方向键/功能键。
+
+## 许可证
+
+除另有说明外，本仓库以 **Apache License 2.0** 发布（见 [`LICENSE`](LICENSE)）。
+Copyright 2026 Aster / x86 OS contributors。
+
+提交贡献即表示同意 [DCO 1.1](https://developercertificate.org/) 并以同一许可证授权；
+贡献流程、提交规范与测试要求见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，
+安全问题报告流程见 [`SECURITY.md`](SECURITY.md)，签名密钥管理见 [`keys/README.md`](keys/README.md)。
+
+> 仓库**不含签名私钥**；`keys/shell_private.pem` 被 `.gitignore` 忽略，首次构建前用
+> `tools/gen-key.ps1` 本地生成。发布镜像的模数指纹在发布说明里给出，可用
+> `keys/shell_public.pem` 核对。

@@ -66,7 +66,7 @@ elapsed: 0.9s
 | 3 | 被跟踪文件里没有 `.obj-*` `.dist-*` `*.img` `*.o` `*.bin` `*.elf` `*.map` `serial-*.log` `logs-*.log` | 构建产物/日志 |
 | 4 | `tools/check-deps.ps1` 0 违规 | 模块边界，规则见 `docs/modules.md` |
 | 5 | `-Full`：`build.ps1` 成功 | 产物用隔离目录 |
-| 6 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 112/112（98 + 账号系统 P1 的 14 项） |
+| 6 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 122/122（98 + 账号系统 P1 14 项 + P2 10 项） |
 
 `-Full` 的隔离参数（结束自动清理，`-KeepArtifacts` 保留现场）：
 
@@ -112,7 +112,7 @@ elapsed: 0.9s
 | 层 | 文件 | runner | 跑什么 | 为什么 |
 |---|---|---|---|---|
 | 静态 | `static.yml` | `ubuntu-latest`（托管） | BOM、禁用文件、`check-deps`、`ci.ps1 -Quick -AllowDirty` | 只需 git + PowerShell，秒级 |
-| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 112 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
+| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 122 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
 
 **托管 runner 上不要试图构建**：那里没有 vendored 工具链、没有 QEMU，
 `tools/i686-elf` 也不会随仓库分发（见 README 的"自带交叉工具链"一节）。
@@ -279,14 +279,14 @@ pre-commit: blocked: 1 issue(s)
 PS5.1 对**没有 BOM 的 UTF-8** 按系统 ANSI 码页解码，中文注释/字符串会变乱码，
 严重时直接语法错误 —— 这就是"`build.ps1` 丢 BOM 导致解析失败"事故的成因（已发生 3 次）。
 
-现状：仓库里有一批**历史上就没有 BOM 的脚本**，其中 16 个是纯 ASCII（PS5.1 能解析）。
+现状：仓库里有一批**历史上就没有 BOM 的脚本**，其中 15 个是纯 ASCII（PS5.1 能解析）。
 `tools/ci.ps1` 把这份名单写死在 `$BomLegacy` 里（豁免，但会打印警告），因为
 "补 BOM" 会动到不属于本次改动的文件；`tools/pre-commit.ps1` 对**暂存文件是严格模式**，
 所以任何被改到的脚本都会在提交时被迫补上 BOM（棘轮）。
 
-两个需要优先处理的文件（含非 ASCII 字节，有乱码风险）：
+已修复：`sign_image.ps1`（每次构建都会跑）已补 BOM 并从豁免表移除。
+仍需优先处理：
 
-- `sign_image.ps1`（每次构建都会跑！）
 - `tools/mkfat16.ps1`
 
 迁移建议（单独一个 `[chore]` 提交，不要混进功能提交）：
