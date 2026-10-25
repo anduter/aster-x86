@@ -381,6 +381,10 @@ static void step_programs(void)
         kprintln("proc: blkd spawn failed");
     }
     service_lifecycle_selftest();
+    /* 生产入口 getty -> login -> shell 必须在程序表里（生产构建走这一条；
+     * 测试模式只跳过 login，不删除入口，避免"测试路径能跑、生产路径是死代码"）。 */
+    kprintf("acct: getty program registered=%d (prod entry: getty -> login -> shell)\n",
+            (prog_lookup("getty") != 0) ? 1 : 0);
     /* 控制台 tty 的入口：测试模式（autologin=root）直接起 shell（与引入账号
      * 系统之前完全一致）；生产模式起 getty，先登录再进 shell。 */
     if (boot_cmdline_autologin_root()) {

@@ -663,6 +663,16 @@ if ($Test -or $Shot) {
             @{ Name = 'chown 清 setuid 位';        Ok = ($out -match 'acct: chown clears setuid bits ok') },
             @{ Name = 'umask 生效';                Ok = ($out -match 'acct: umask 077 creates 0600 ok') },
             @{ Name = '多用户文件矩阵通过';        Ok = ($out -match 'acct: file matrix PASS') }
+            # ---- 账号系统 P3（提权与审计） ----
+            @{ Name = '失败 5 次锁定';            Ok = ($out -match 'acct: failed logins=5 threshold=5 ok') },
+            @{ Name = '锁定后正确口令仍被拒';      Ok = ($out -match 'acct: locked account rejects correct password ok') },
+            @{ Name = '锁定可清零';                Ok = ($out -match 'acct: failure lockout cleared ok') },
+            @{ Name = 'sudo 只看 wheel 组';        Ok = ($out -match 'acct: sudo policy root=1 wheel-member=1 other=0 ok') },
+            @{ Name = '普通用户旧口令校验';        Ok = ($out -match 'acct: passwd rejects wrong old password ok') },
+            @{ Name = 'useradd/passwd/userdel';    Ok = (($out -match 'acct: useradd carol uid=1002 ok') -and ($out -match 'acct: passwd \(root\) set carol ok') -and ($out -match 'acct: userdel carol ok')) },
+            @{ Name = 'usermod 加组';              Ok = (($out -match 'acct: usermod carol -> wheel ok') -and ($out -match 'acct: carol in wheel=1')) },
+            @{ Name = '审计含登录/管理/拒绝';      Ok = ($out -match 'acct: audit has LOGIN_FAIL=1 USERADD=1 PASSWD_DENY=1 ok') },
+            @{ Name = 'getty 生产入口已注册';      Ok = ($out -match 'acct: getty program registered=1') }
         )
 
         T 'checks begin'

@@ -157,6 +157,9 @@
 #define LOGIN_SUDO_END 8  /* -> 0（euid 回到 ruid） */
 #define LOGIN_INFO     9  /* ecx=buf, edx=max -> "uid=.. euid=.. gid=.. name=.." */
 #define LOGIN_PASSWD_USER 10 /* ecx=用户名, edx=新口令 -> 0 / -1（root 给他人改） */
+#define LOGIN_USERADD  11 /* ecx=用户名, edx=uid(0=自动) -> 0 / -1（root） */
+#define LOGIN_USERDEL  12 /* ecx=用户名 -> 0 / -1（root） */
+#define LOGIN_USERMOD  13 /* ecx=用户名, edx=gid -> 0 / -1（root 把用户加进组） */
 
 /* 附加组上限（proc_t.groups[]、SYS_GETGROUPS/SETGROUPS 缓冲） */
 #define ABI_NGROUPS_MAX 16

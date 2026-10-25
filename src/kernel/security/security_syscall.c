@@ -173,10 +173,37 @@ static int sys_login(uint32_t cmd, uint32_t a, uint32_t b)
 
     case LOGIN_PASSWD_USER:
         /* root 给任意账户设口令（useradd 之后用） */
-        if (p == 0 || p->euid != 0U) return -1;
+        if (p == 0 || p->euid != 0U) {
+            acct_audit("DENY", "passwd-user (not root)");
+            return -1;
+        }
         if (arg_string(user, sizeof(user), a) != 0) return -1;
         if (arg_string(pass, sizeof(pass), b) != 0) return -1;
         return acct_passwd(user, 0, pass, true);
+
+    case LOGIN_USERADD:
+        if (p == 0 || p->euid != 0U) {
+            acct_audit("DENY", "useradd (not root)");
+            return -1;
+        }
+        if (arg_string(user, sizeof(user), a) != 0) return -1;
+        return acct_useradd(user, b);
+
+    case LOGIN_USERDEL:
+        if (p == 0 || p->euid != 0U) {
+            acct_audit("DENY", "userdel (not root)");
+            return -1;
+        }
+        if (arg_string(user, sizeof(user), a) != 0) return -1;
+        return acct_userdel(user);
+
+    case LOGIN_USERMOD:
+        if (p == 0 || p->euid != 0U) {
+            acct_audit("DENY", "usermod (not root)");
+            return -1;
+        }
+        if (arg_string(user, sizeof(user), a) != 0) return -1;
+        return acct_usermod_add_group(user, b);
 
     case LOGIN_WHO:
         if (a == 0U || b == 0U) return -1;

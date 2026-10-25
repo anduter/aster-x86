@@ -76,7 +76,7 @@ elapsed: 2.1s
 | 4 | `tools/check-deps.ps1` 0 违规 | 模块边界，规则见 `docs/modules.md` |
 | 5 | `tools/unit.ps1` 全 PASS | host 单元测试；`-NoUnit` 可跳过（仅排障） |
 | 6 | `-Full`：`build.ps1` 成功 | 产物用隔离目录 |
-| 7 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 122/122（98 + 账号系统 P1 14 项 + P2 10 项） |
+| 7 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 131/131（98 + 账号系统 P1 14 项 + P2 10 项 + P3 9 项） |
 
 `-Full` 的隔离参数（结束自动清理，`-KeepArtifacts` 保留现场）：
 
@@ -115,7 +115,8 @@ CI 失败时直接把 `obj/ci/**` 上传成 artifact）。
 - PATH 上有 `nasm`、`qemu-system-i386`；
 - 宿主 `12345`（UDP+TCP）与 QMP `4691` 空闲 —— 同一时刻只能跑一个 `-Test`。
 
-`-Full` 结束后还会再查一次 `git status`：产物如果漏进被跟踪路径，直接 FAIL。
+`-Full` 结束后还会再查一次 `git status`：产物如果漏进被跟踪路径，直接 FAIL；
+`-AllowDirty` 时降级为警告并列出改动（并行会话场景）。
 
 ### 单元测试（host，不启动 QEMU）
 
@@ -156,7 +157,7 @@ clang-tidy src/kernel/lib/string.c -- -Isrc/kernel -Isrc/kernel/include
 | 层 | 文件 | runner | 跑什么 | 为什么 |
 |---|---|---|---|---|
 | 静态 | `static.yml` | `ubuntu-latest`（托管） | BOM（`-StrictBom`）、禁用文件、`check-deps`、host 单元测试、`ci.ps1 -Quick -AllowDirty` | 只需 git + PowerShell + gcc，秒级 |
-| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 122 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
+| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 131 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
 
 **托管 runner 上不要试图构建**：那里没有 vendored 工具链、没有 QEMU，
 `tools/i686-elf` 也不会随仓库分发（见 README 的"自带交叉工具链"一节）。

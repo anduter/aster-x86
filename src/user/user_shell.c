@@ -1481,6 +1481,111 @@ static void run_line(char *cmd)
         } else {
             printf("uid=%d\n", sc(SYS_GETUID, 0, 0, 0));
         }
+    } else if (scmp(args[0], "who") == 0) {
+        char b[192];
+        int n = sc(SYS_LOGIN, LOGIN_WHO, (int)b, (int)sizeof(b));
+
+        putstr(n > 0 ? b : "who: no sessions\n");
+    } else if (scmp(args[0], "last") == 0) {
+        char b[512];
+        int n = sc(SYS_LOGIN, LOGIN_LAST, (int)b, (int)sizeof(b));
+
+        putstr(n > 0 ? b : "last: no audit records\n");
+    } else if (scmp(args[0], "su") == 0) {
+        char pass[32];
+        const char *who = (nargs >= 2) ? args[1] : "root";
+
+        putstr("Password: ");
+        (void)read_line_echo(pass, (int)sizeof(pass), 1);
+        if (sc(SYS_LOGIN, LOGIN_SU, (int)who, (int)pass) == 0) {
+            printf("su: now %s (euid=%d uid=%d)\n", who,
+                   sc(SYS_GETEUID, 0, 0, 0), sc(SYS_GETUID, 0, 0, 0));
+        } else {
+            puterr("su: authentication failure\n");
+        }
+    } else if (scmp(args[0], "sudo") == 0) {
+        if (nargs < 2) {
+            puterr("usage: sudo <command>\n");
+        } else if (sc(SYS_LOGIN, LOGIN_SUDO, 0, 0) != 0) {
+            puterr("sudo: not in wheel (or wrong password)\n");
+        } else {
+            char cmd[120];
+            int n = 0;
+
+            for (int i = 1; i < nargs && n < 110; i++) {
+                if (i > 1 && n < 110) cmd[n++] = ' ';
+                for (const char *q = args[i]; *q != '\0' && n < 112; q++) cmd[n++] = *q;
+            }
+            cmd[n] = '\0';
+            printf("sudo: euid=%d\n", sc(SYS_GETEUID, 0, 0, 0));
+            run_line(cmd);                       /* 以 euid=0 执行一条命令 */
+            sc(SYS_LOGIN, LOGIN_SUDO_END, 0, 0);
+        }
+    } else if (scmp(args[0], "passwd") == 0) {
+        char pw1[32];
+        char pw2[32];
+
+        if (nargs >= 2) {
+            /* passwd <user>：只有 root 能改别人的口令 */
+            if (sc(SYS_GETEUID, 0, 0, 0) != 0) {
+                puterr("passwd: only root can change another user's password\n");
+            } else {
+                putstr("New password: ");
+                (void)read_line_echo(pw1, (int)sizeof(pw1), 1);
+                putstr("Retype new password: ");
+                (void)read_line_echo(pw2, (int)sizeof(pw2), 1);
+                if (scmp(pw1, pw2) != 0) {
+                    puterr("passwd: mismatch\n");
+                } else if (sc(SYS_LOGIN, LOGIN_PASSWD_USER, (int)args[1], (int)pw1) == 0) {
+                    printf("passwd: %s updated\n", args[1]);
+                } else {
+                    puterr("passwd: failed\n");
+                }
+            }
+        } else {
+            char old[32];
+
+            if (sc(SYS_GETEUID, 0, 0, 0) != 0) {
+                putstr("Current password: ");
+                (void)read_line_echo(old, (int)sizeof(old), 1);
+            } else {
+                old[0] = '\0';                   /* root 改自己的免旧口令 */
+            }
+            putstr("New password: ");
+            (void)read_line_echo(pw1, (int)sizeof(pw1), 1);
+            putstr("Retype new password: ");
+            (void)read_line_echo(pw2, (int)sizeof(pw2), 1);
+            if (scmp(pw1, pw2) != 0) {
+                puterr("passwd: mismatch\n");
+            } else if (sc(SYS_LOGIN, LOGIN_PASSWD, (int)old, (int)pw1) == 0) {
+                putstr("passwd: ok\n");
+            } else {
+                puterr("passwd: failed (wrong old password?)\n");
+            }
+        }
+    } else if (scmp(args[0], "useradd") == 0 && nargs >= 2) {
+        int uid = (nargs >= 3) ? str2int(args[2]) : 0;
+
+        if (sc(SYS_LOGIN, LOGIN_USERADD, (int)args[1], uid) == 0) {
+            printf("useradd: %s created (set a password with: passwd %s)\n",
+                   args[1], args[1]);
+        } else {
+            puterr("useradd: failed (root only / exists / bad uid)\n");
+        }
+    } else if (scmp(args[0], "userdel") == 0 && nargs >= 2) {
+        if (sc(SYS_LOGIN, LOGIN_USERDEL, (int)args[1], 0) == 0) {
+            printf("userdel: %s removed (home kept)\n", args[1]);
+        } else {
+            puterr("userdel: failed (root only / not found)\n");
+        }
+    } else if (scmp(args[0], "usermod") == 0 && nargs >= 3) {
+        int gid = str2int(args[2]);
+
+        if (sc(SYS_LOGIN, LOGIN_USERMOD, (int)args[1], gid) == 0) {
+            printf("usermod: %s -> gid %d\n", args[1], gid);
+        } else {
+            puterr("usermod: failed (root only / no such group)\n");
+        }
     } else if (scmp(args[0], "drop") == 0 && nargs >= 2) {
         int uid = str2int(args[1]);
         if (sc(SYS_SETUID, uid, uid == 0 ? 0 : uid, 0) == 0) {

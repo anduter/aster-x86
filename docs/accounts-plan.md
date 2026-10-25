@@ -93,11 +93,46 @@ FAT 加上宿主 mode 透传时悄悄引入提权面。
 - 审计：登录/提权/改权限/拒绝访问。
 
 **验收**：-Test 连续 2 次全 PASS；失败 5 次锁定；审计行可断言；sudo 可用。
+### P3 实施状态（2026-10-26）
+
+| 项 | 状态 | 落地 |
+| --- | --- | --- |
+| `su`（要口令）/`sudo`（wheel 组，root 免口令） | 完成 | shell 命令 + `acct_su`/`acct_sudo`/`acct_sudo_end` |
+| sudoers-lite：只认 wheel（无 sudoers 文件解析） | 完成 | `acct_is_sudoer()` / `acct_in_group(name, 10)` |
+| `passwd`（普通用户必须旧口令；root 可改他人） | 完成 | `acct_passwd` + `LOGIN_PASSWD`/`LOGIN_PASSWD_USER` |
+| `useradd`/`userdel`/`usermod`（root） | 完成 | `acct_useradd`/`acct_userdel`/`acct_usermod_add_group` |
+| `who`（内核会话表）/`last`（审计环） | 完成 | `acct_who`/`acct_last` + `LOGIN_WHO`/`LOGIN_LAST` |
+| 登录失败锁定（连续 5 次 -> 15s） | 完成 | `fail_bump`/`fail_locked`，锁定后连正确口令也拒 |
+| 审计：登录/提权/改权限/拒绝访问 | 完成 | `acct_audit`（`audit: <event> <detail>` 串口行 + 环形缓冲，`sync` 刷进 `/var/log/audit.log`） |
+| 检查项 | 完成（+9 条，122 -> 131） | `build.ps1` |
+| -Test 连续 2 次 131/131 | 通过 | 两轮隔离目录 `build.ps1 -Test` |
+
+**顺带修复（P3 期间发现）**：`FS_FILE_MAX` 从 32KB 提到 40KB 后内核 `.bss`
+越过了 `HEAP_BASE`（8MB），堆的第一批块头落在内核数据上——表现为随机 oops +
+内核栈 canary 被踩。`mm/heap.c` 现在在 `heap_init()` 里把 arena 起点抬到
+`_kernel_end`（4KB 对齐）之后再建空闲链表，并打印
+`heap: arena … (… KB usable)`；`heap_stats/heap_check/free` 一律用这对真实边界。
+这一改动让"内核变大"不再需要手工调链接脚本。
+
+命令行示例（生产镜像，登录后）：
+
+```
+osteachos login: alice
+Password: ********
+alice@osteachos:~$ id
+uid=1000 euid=1000 gid=1000 egid=1000 groups=100 name=alice
+alice@osteachos:~$ sudo cat /etc/shadow
+sudo: euid=0
+cat: permission denied or no such file          # 见下方限制：cat 走 shell 的 fd 判权
+alice@osteachos:~$ su
+Password: ********
+su: now root (euid=0 uid=0)
+```
 
 ## 每阶段门禁
 
 1. tools/ci.ps1 -Quick（静态）；
-2. -Test 连续 2 次 **全 PASS**（项数见 build.ps1：P1 112、P2 122、P3 见文末）；
+2. -Test 连续 2 次 **全 PASS**（项数见 build.ps1：P1 112、P2 122、P3 131）；
 3. check-deps 0 违规；
 4. 路径限定提交，前缀 [accounts]；
 5. 更新本文件与 docs/accounts.md。

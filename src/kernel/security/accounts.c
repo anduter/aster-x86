@@ -1120,6 +1120,385 @@ static void file_matrix_selftest(void)
     kprintf("acct: file matrix %s\n", ok ? "PASS" : "FAIL");
 }
 
+/* ==================== P3：用户管理 / 审计断言 ==================== */
+
+static bool text_contains(const char *hay, const char *needle)
+{
+    uint32_t hn = (uint32_t)strlen(hay);
+    uint32_t nn = (uint32_t)strlen(needle);
+
+    if (nn == 0U || hn < nn) return false;
+    for (uint32_t i = 0; i + nn <= hn; i++) {
+        if (strncmp(hay + i, needle, nn) == 0) return true;
+    }
+    return false;
+}
+
+bool acct_audit_contains(const char *needle)
+{
+    static char buf[ACCT_AUDIT_LINES * ACCT_AUDIT_LEN + 8];
+
+    if (needle == 0) return false;
+    (void)audit_text(buf, sizeof(buf));
+    return text_contains(buf, needle);
+}
+
+/* 追加一行到文本文件（不存在则创建） */
+static int append_line(const char *path, const char *line)
+{
+    static char buf[1400];
+    int n = read_file(path, buf, sizeof(buf));
+    uint32_t len = (n > 0) ? (uint32_t)n : 0U;
+    uint32_t add = (uint32_t)strlen(line);
+
+    if (len + add + 1U > sizeof(buf)) return -1;
+    memcpy(buf + len, line, add);
+    len += add;
+    buf[len] = '\0';
+    return write_file(path, buf, len);
+}
+
+/* 删掉首个字段等于 name 的行；返回 0 表示删掉了，-1 表示没有这一行 */
+static int remove_line_for(const char *path, const char *name)
+{
+    static char in[1400];
+    static char out[1400];
+    char *p;
+    char *line;
+    uint32_t n = 0;
+    uint32_t nl;
+    bool removed = false;
+
+    if (name == 0) return -1;
+    nl = (uint32_t)strlen(name);
+    if (read_file(path, in, sizeof(in)) < 0) return -1;
+
+    p = in;
+    out[0] = '\0';
+    while ((line = line_take(&p)) != 0) {
+        uint32_t len;
+
+        if (strncmp(line, name, nl) == 0 && line[nl] == ':') {
+            removed = true;
+            continue;
+        }
+        len = (uint32_t)strlen(line);
+        if (n + len + 2U >= sizeof(out)) break;
+        memcpy(out + n, line, len);
+        n += len;
+        out[n++] = '\n';
+        out[n] = '\0';
+    }
+    if (!removed) return -1;
+    return write_file(path, out, n);
+}
+
+/* 成员列表（"a,b,c"）里是否有 name */
+static bool member_has(const char *list, const char *name)
+{
+    uint32_t nl;
+
+    if (list == 0 || name == 0) return false;
+    nl = (uint32_t)strlen(name);
+
+    while (*list != '\0') {
+        const char *end = strchr(list, ',');
+        uint32_t len = (end != 0) ? (uint32_t)(end - list) : (uint32_t)strlen(list);
+
+        if (len == nl && strncmp(list, name, nl) == 0) return true;
+        if (end == 0) break;
+        list = end + 1;
+    }
+    return false;
+}
+
+/* 从组 gid 的成员列表里去掉 name（usermod 自检的收尾用） */
+static int group_remove_member(uint32_t gid, const char *name)
+{
+    static char in[1400];
+    static char out[1400];
+    char *p;
+    char *line;
+    uint32_t n = 0;
+
+    if (name == 0) return -1;
+    if (read_file(ACCT_GROUP_PATH, in, sizeof(in)) < 0) return -1;
+
+    p = in;
+    out[0] = '\0';
+    while ((line = line_take(&p)) != 0) {
+        char tmp[128];
+        char *f[4];
+        uint32_t nf;
+        char rebuilt[160];
+
+        strncpy(tmp, line, sizeof(tmp) - 1U);
+        tmp[sizeof(tmp) - 1U] = '\0';
+        nf = split_fields(tmp, f, 4);
+
+        if (nf >= 4 && parse_u32(f[2]) == gid && f[3][0] != '\0') {
+            char members[128];
+            uint32_t m = 0;
+            const char *q = f[3];
+
+            members[0] = '\0';
+            while (*q != '\0') {
+                const char *end = strchr(q, ',');
+                uint32_t len = (end != 0) ? (uint32_t)(end - q) : (uint32_t)strlen(q);
+
+                if (!(len == (uint32_t)strlen(name) && strncmp(q, name, len) == 0)) {
+                    if (m > 0 && m + 2U < sizeof(members)) members[m++] = ',';
+                    if (m + len + 1U < sizeof(members)) {
+                        memcpy(members + m, q, len);
+                        m += len;
+                    }
+                    members[m] = '\0';
+                }
+                if (end == 0) break;
+                q = end + 1;
+            }
+            ksnprintf(rebuilt, sizeof(rebuilt), "%s:%s:%s:%s\n", f[0], f[1], f[2], members);
+        } else {
+            ksnprintf(rebuilt, sizeof(rebuilt), "%s\n", line);
+        }
+
+        {
+            uint32_t len = (uint32_t)strlen(rebuilt);
+
+            if (n + len + 1U >= sizeof(out)) break;
+            memcpy(out + n, rebuilt, len);
+            n += len;
+            out[n] = '\0';
+        }
+    }
+
+    if (write_file(ACCT_GROUP_PATH, out, n) != 0) return -1;
+    (void)fs_chmod(ACCT_GROUP_PATH, 0644U, 0U);
+    return 0;
+}
+
+int acct_useradd(const char *name, uint32_t uid_hint)
+{
+    char line[128];
+    char path[80];
+    acct_user_t u;
+    uint32_t uid = uid_hint;
+
+    if (name == 0 || name[0] == '\0' || strlen(name) >= ACCT_NAME_MAX) return ACCT_EBAD;
+    if (strchr(name, '/') != 0 || strchr(name, ':') != 0) return ACCT_EBAD;
+    if (acct_find(name, &u) == 0) return ACCT_EBAD;            /* 已存在 */
+
+    if (uid == 0U) {
+        char buf[1024];
+        acct_user_t users[ACCT_MAX_USERS];
+        uint32_t n;
+
+        uid = ACCT_UID_USER_MIN;
+        if (read_file(ACCT_PASSWD_PATH, buf, sizeof(buf)) >= 0) {
+            n = parse_passwd(buf, users, ACCT_MAX_USERS);
+            for (uint32_t i = 0; i < n; i++) {
+                if (users[i].uid >= ACCT_UID_USER_MIN && users[i].uid >= uid) {
+                    uid = users[i].uid + 1U;
+                }
+            }
+        }
+    } else if (uid < ACCT_UID_USER_MIN) {
+        return ACCT_EBAD;                                     /* 不允许占用系统 uid */
+    }
+
+    ksnprintf(line, sizeof(line), "%s:x:%u:%u:%s:/home/%s:/bin/shell\n",
+              name, (unsigned int)uid, (unsigned int)uid, name, name);
+    if (append_line(ACCT_PASSWD_PATH, line) != 0) return ACCT_EBAD;
+
+    /* shadow：先锁定（*），等 passwd/useradd -p 设口令后才能登录 */
+    ksnprintf(line, sizeof(line), "%s:*:0:0:99999:7:::\n", name);
+    (void)append_line(ACCT_SHADOW_PATH, line);
+
+    /* 同名主组 */
+    ksnprintf(line, sizeof(line), "%s:x:%u:%s\n", name, (unsigned int)uid, name);
+    (void)append_line(ACCT_GROUP_PATH, line);
+
+    ksnprintf(path, sizeof(path), "system:/home/%s", name);
+    ensure_dir(path, uid, uid, 0700U);
+
+    (void)fs_chmod(ACCT_PASSWD_PATH, 0644U, 0U);
+    (void)fs_chmod(ACCT_SHADOW_PATH, 0600U, 0U);
+    (void)fs_chmod(ACCT_GROUP_PATH, 0644U, 0U);
+
+    {
+        char detail[ACCT_NAME_MAX + 16];
+
+        ksnprintf(detail, sizeof(detail), "%s uid=%u", name, (unsigned int)uid);
+        acct_audit("USERADD", detail);
+    }
+    return ACCT_OK;
+}
+
+int acct_userdel(const char *name)
+{
+    acct_user_t u;
+
+    if (name == 0) return ACCT_EBAD;
+    if (acct_find(name, &u) != 0) return ACCT_ENOENT;
+    if (u.uid == ACCT_UID_ROOT || u.uid < ACCT_UID_USER_MIN) return ACCT_EBAD;
+
+    (void)remove_line_for(ACCT_PASSWD_PATH, name);
+    (void)remove_line_for(ACCT_SHADOW_PATH, name);
+    (void)remove_line_for(ACCT_GROUP_PATH, name);
+
+    acct_audit("USERDEL", name);      /* 家目录保留（与 userdel 默认行为一致） */
+    return ACCT_OK;
+}
+
+int acct_usermod_add_group(const char *name, uint32_t gid)
+{
+    static char in[1400];
+    static char out[1400];
+    char *p;
+    char *line;
+    uint32_t n = 0;
+    bool found = false;
+
+    if (name == 0) return ACCT_EBAD;
+    if (read_file(ACCT_GROUP_PATH, in, sizeof(in)) < 0) return ACCT_ENOENT;
+
+    p = in;
+    out[0] = '\0';
+    while ((line = line_take(&p)) != 0) {
+        char tmp[128];
+        char *f[4];
+        uint32_t nf;
+        char rebuilt[160];
+
+        strncpy(tmp, line, sizeof(tmp) - 1U);
+        tmp[sizeof(tmp) - 1U] = '\0';
+        nf = split_fields(tmp, f, 4);
+        rebuilt[0] = '\0';
+
+        if (nf >= 3 && parse_u32(f[2]) == gid) {
+            found = true;
+            if (member_has((nf >= 4) ? f[3] : "", name)) {
+                ksnprintf(rebuilt, sizeof(rebuilt), "%s\n", line);
+            } else if (nf >= 4 && f[3][0] != '\0') {
+                ksnprintf(rebuilt, sizeof(rebuilt), "%s:%s:%s:%s,%s\n",
+                          f[0], f[1], f[2], f[3], name);
+            } else {
+                ksnprintf(rebuilt, sizeof(rebuilt), "%s:%s:%s:%s\n",
+                          f[0], f[1], f[2], name);
+            }
+        } else {
+            ksnprintf(rebuilt, sizeof(rebuilt), "%s\n", line);
+        }
+
+        {
+            uint32_t len = (uint32_t)strlen(rebuilt);
+
+            if (n + len + 1U >= sizeof(out)) break;
+            memcpy(out + n, rebuilt, len);
+            n += len;
+            out[n] = '\0';
+        }
+    }
+
+    if (!found) return ACCT_ENOENT;
+    if (write_file(ACCT_GROUP_PATH, out, n) != 0) return ACCT_EBAD;
+    (void)fs_chmod(ACCT_GROUP_PATH, 0644U, 0U);
+
+    {
+        char detail[ACCT_NAME_MAX + 16];
+
+        ksnprintf(detail, sizeof(detail), "%s gid=%u", name, (unsigned int)gid);
+        acct_audit("USERMOD", detail);
+    }
+    return ACCT_OK;
+}
+
+/* 失败锁定（faillock 简化）：连续 ACCT_FAIL_MAX 次错口令后，连正确口令也拒绝，
+ * 直到锁定窗口过去或清零。自检结束后复位 bob，不影响交互测试。 */
+void acct_lockout_selftest(void)
+{
+    int last = 0;
+    int count;
+    int locked_rejects;
+
+    acct_fail_reset("bob");
+    for (uint32_t i = 0; i < ACCT_FAIL_MAX; i++) {
+        last = password_check("bob", "definitely-not-the-password");
+    }
+    count = acct_fail_count("bob");
+    kprintf("acct: failed logins=%d threshold=%d %s\n",
+            count, ACCT_FAIL_MAX, (last == ACCT_ELOCKED) ? "ok" : "FAIL");
+
+    locked_rejects = (password_check("bob", ACCT_BOB_PW) == ACCT_ELOCKED);
+    kprintf("acct: locked account rejects correct password %s\n",
+            locked_rejects ? "ok" : "FAIL");
+
+    acct_fail_reset("bob");
+    kprintf("acct: failure lockout cleared %s\n",
+            (acct_fail_count("bob") == 0) ? "ok" : "FAIL");
+}
+
+/* P3 自检：sudo 策略 / useradd / passwd / usermod / userdel / 审计事件 */
+static void admin_selftest(void)
+{
+    acct_user_t u;
+    int add_ok;
+    int pass_bad;
+    int pass_ok;
+    int mod_ok;
+    int del_ok;
+    int root_ok;
+    int other_no;
+    int wheel_ok;
+
+    acct_lockout_selftest();
+
+    /* 清理上次启动可能残留的 carol（幂等） */
+    (void)acct_userdel("carol");
+
+    root_ok = acct_is_sudoer(ACCT_UID_ROOT) ? 1 : 0;
+    add_ok = (acct_useradd("carol", 1002U) == ACCT_OK);
+    other_no = (!acct_is_sudoer(1002U)) ? 1 : 0;
+    kprintf("acct: useradd carol uid=1002 %s\n", add_ok ? "ok" : "FAIL");
+
+    /* 普通用户改口令：旧口令错误必须被拒（并写 PASSWD_FAIL 审计） */
+    pass_bad = (acct_passwd("carol", "wrong-old", "newpw", false) != ACCT_OK);
+    kprintf("acct: passwd rejects wrong old password %s\n", pass_bad ? "ok" : "FAIL");
+
+    pass_ok = (acct_passwd("carol", 0, "carol-pw", true) == ACCT_OK);
+    kprintf("acct: passwd (root) set carol %s\n", pass_ok ? "ok" : "FAIL");
+
+    mod_ok = (acct_usermod_add_group("carol", ACCT_GID_WHEEL) == ACCT_OK);
+    wheel_ok = acct_is_sudoer(1002U) ? 1 : 0;
+    kprintf("acct: usermod carol -> wheel %s\n",
+            (mod_ok && wheel_ok) ? "ok" : "FAIL");
+    kprintf("acct: carol in wheel=%d\n", wheel_ok);
+
+    /* 收尾：把 carol 从 wheel 移除，再验证 sudo 策略三态 */
+    (void)group_remove_member(ACCT_GID_WHEEL, "carol");
+    kprintf("acct: sudo policy root=%d wheel-member=%d other=%d %s\n",
+            root_ok, wheel_ok, (other_no != 0) ? 0 : 1,
+            (root_ok && wheel_ok && other_no) ? "ok" : "FAIL");
+
+    del_ok = (acct_userdel("carol") == ACCT_OK);
+    kprintf("acct: userdel carol %s\n",
+            (del_ok && acct_find("carol", &u) != 0) ? "ok" : "FAIL");
+
+    /* 三个文件在改写后必须回到正确模式（防止 admin 操作放宽权限） */
+    (void)fs_chmod(ACCT_PASSWD_PATH, 0644U, 0U);
+    (void)fs_chmod(ACCT_SHADOW_PATH, 0600U, 0U);
+    (void)fs_chmod(ACCT_GROUP_PATH, 0644U, 0U);
+
+    {
+        int lf = acct_audit_contains("LOGIN_FAIL") ? 1 : 0;
+        int ua = acct_audit_contains("USERADD") ? 1 : 0;
+        int pd = acct_audit_contains("PASSWD_FAIL") ? 1 : 0;
+
+        kprintf("acct: audit has LOGIN_FAIL=%d USERADD=%d PASSWD_DENY=%d %s\n",
+                lf, ua, pd, (lf && ua && pd) ? "ok" : "FAIL");
+    }
+}
+
 /* ==================== 启动自检 ==================== */
 
 /* 用合成凭据判权，不依赖当前进程：证明 0600/0700/组权限/root 绕过都对 */
@@ -1310,6 +1689,9 @@ void acct_selftest(void)
 
     /* P2：多用户文件矩阵（0600/sticky/目录 x/setuid/nosuid/umask） */
     file_matrix_selftest();
+
+    /* P3：失败锁定 + sudo 策略 + useradd/passwd/usermod/userdel + 审计事件 */
+    admin_selftest();
 
     kprintf("acct: selftest %s\n", ok ? "PASS" : "FAIL");
 }

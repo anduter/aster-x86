@@ -141,4 +141,13 @@ void acct_apply_cred(acct_user_t *u);
 struct process;
 void acct_exec_cred(struct process *p, const char *path);
 
+/* ---- P3 提权与用户管理（调用方负责 root 校验） ---- */
+int  acct_useradd(const char *name, uint32_t uid_hint);
+int  acct_userdel(const char *name);
+int  acct_usermod_add_group(const char *name, uint32_t gid);
+/* 失败锁定自检：连续 5 次错口令 -> -2，之后正确口令仍被拒 */
+void acct_lockout_selftest(void);
+/* 审计环里是否包含某子串（自检/断言用） */
+bool acct_audit_contains(const char *needle);
+
 #endif

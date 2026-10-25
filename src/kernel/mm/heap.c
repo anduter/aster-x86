@@ -21,6 +21,23 @@ typedef struct block_header {
 
 static block_t* first_block;
 
+/* 实际 arena 边界。HEAP_BASE/HEAP_SIZE 是"计划区间"，但内核 .bss 会长：
+ * 每加一个静态数组 _kernel_end 就往上走，一旦越过 HEAP_BASE，堆的第一块
+ * 元数据就会写进内核数据（表现为随机的 oops / 栈 canary 被踩）。
+ * heap_init() 在 .bss 之后重新定起点，所有范围判断都用这两个值。 */
+static uintptr_t heap_lo;
+static uintptr_t heap_hi;
+
+static uintptr_t heap_base_addr(void)
+{
+    return (heap_lo != 0U) ? heap_lo : (uintptr_t)HEAP_BASE;
+}
+
+static uintptr_t heap_end_addr(void)
+{
+    return (heap_hi != 0U) ? heap_hi : ((uintptr_t)HEAP_BASE + (uintptr_t)HEAP_SIZE);
+}
+
 /* 异常释放的诊断计数：同一个错误最多打印 8 次，避免误导出的死循环刷屏 */
 static unsigned int heap_bad_magic;
 static unsigned int heap_double_free;
@@ -30,8 +47,8 @@ void heap_stats(unsigned int *used, unsigned int *total)
 {
     uint32_t flags = spin_lock_irqsave(&heap_lock);
     block_t *b = first_block;
-    uintptr_t base = (uintptr_t)HEAP_BASE;
-    uintptr_t end  = base + (uintptr_t)HEAP_SIZE;
+    uintptr_t base = heap_base_addr();
+    uintptr_t end  = heap_end_addr();
     unsigned int u = 0, t = 0;
 
     while (b != NULL && (uintptr_t)b >= base && (uintptr_t)b < end &&
@@ -52,8 +69,8 @@ void heap_frag_stats(unsigned int *largest_free, unsigned int *free_blocks)
 {
     uint32_t flags = spin_lock_irqsave(&heap_lock);
     block_t *b = first_block;
-    uintptr_t base = (uintptr_t)HEAP_BASE;
-    uintptr_t end  = base + (uintptr_t)HEAP_SIZE;
+    uintptr_t base = heap_base_addr();
+    uintptr_t end  = heap_end_addr();
     unsigned int max_free = 0;
     unsigned int nfree = 0;
 
@@ -79,8 +96,8 @@ int heap_check(void)
 {
     uint32_t flags = spin_lock_irqsave(&heap_lock);
     block_t *b = first_block;
-    uintptr_t base = (uintptr_t)HEAP_BASE;
-    uintptr_t end  = base + (uintptr_t)HEAP_SIZE;
+    uintptr_t base = heap_base_addr();
+    uintptr_t end  = heap_end_addr();
     uintptr_t expect = base;
     block_t *prev = NULL;
     bool prev_free = false;
@@ -121,15 +138,41 @@ int heap_check(void)
     return rc;
 }
 
-/* 初始化堆：整个堆作为唯一一个空闲块 */
+/* 初始化堆：从"内核映像之后"到 HEAP_BASE+HEAP_SIZE 作为唯一一个空闲块。
+ *
+ * HEAP_BASE（8MB）是链接期约定的起点，但内核 .bss 会随静态数组增长；一旦
+ * _kernel_end 越过 HEAP_BASE，堆的块头就会落在内核数据上（曾经表现为
+ * 随机 oops + 内核栈 canary 被踩）。这里把起点抬到 _kernel_end 对齐处，
+ * 让"内核变大"不再需要手工调链接脚本。 */
 void heap_init(void)
 {
-    first_block = (block_t*)HEAP_BASE;
+    extern unsigned char _kernel_end[];
+    uintptr_t lo = (uintptr_t)HEAP_BASE;
+    uintptr_t hi = (uintptr_t)HEAP_BASE + (uintptr_t)HEAP_SIZE;
+    uintptr_t kend = (uintptr_t)_kernel_end;
+
+    if (kend > lo) {
+        lo = (kend + 0xFFFU) & ~(uintptr_t)0xFFFU;
+        kprintf("heap: kernel ends at %p, arena moved to %p\n",
+                (void *)kend, (void *)lo);
+    }
+    if (lo + HEADER_SIZE + 0x1000U >= hi) {
+        /* 内核大到把堆挤没了：不能静默继续（malloc 会返回指向内核数据的块） */
+        panic("kernel image leaves no heap (set HEAP_BASE higher)");
+    }
+
+    heap_lo = lo;
+    heap_hi = hi;
+
+    first_block = (block_t*)lo;
     first_block->magic = BLOCK_MAGIC;
-    first_block->size  = HEAP_SIZE - HEADER_SIZE;
+    first_block->size  = hi - lo - HEADER_SIZE;
     first_block->used  = 0;
     first_block->next  = NULL;
     first_block->prev  = NULL;
+
+    kprintf("heap: arena %p..%p (%u KB usable)\n",
+            (void *)lo, (void *)hi, (unsigned int)((hi - lo) >> 10));
 }
 
 /* 与后面相邻的空闲块合并 */
@@ -216,7 +259,8 @@ static void* malloc_locked(size_t size)
 static void free_locked(void* ptr)
 {
     uintptr_t p;
-    uintptr_t base = (uintptr_t)HEAP_BASE;
+    uintptr_t base = heap_base_addr();
+    uintptr_t end = heap_end_addr();
     block_t* block;
 
     if (!ptr) return;
@@ -225,7 +269,7 @@ static void free_locked(void* ptr)
 
     /* 先把指针限制在堆范围内再解引用块头：野指针直接读 block->magic 可能
      * 正好命中可读内存里的伪魔数，把无关数据当成块头改坏。 */
-    if (p < base + HEADER_SIZE || p >= base + HEAP_SIZE) return;
+    if (p < base + HEADER_SIZE || p >= end) return;
     if (((p - base - HEADER_SIZE) & ALIGN_MASK) != 0U) return;  /* 不是 malloc 返回的地址 */
 
     block = (block_t*)((uint8_t*)ptr - HEADER_SIZE);
