@@ -650,7 +650,7 @@ void net_init(void)
             uint8_t ubuf[64];
             uint8_t uip[4];
             uint16_t uport = 0;
-            int n = net_udp_recv(uip, &uport, ubuf, sizeof(ubuf), 30000000U);
+            int n = net_udp_recv(uip, &uport, ubuf, sizeof(ubuf), 2000000U);
 
             if (n == (int)(sizeof(net_udp_payload) - 1U) &&
                 memcmp(ubuf, net_udp_payload, sizeof(net_udp_payload) - 1U) == 0) {
