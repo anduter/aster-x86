@@ -15,7 +15,7 @@
  * ============================================================================= */
 #include "include/dev.h"
 #include "include/dev.h"
-#include "../../io.h"
+#include "arch/x86/io.h"
 #include "../../lib/string.h"
 #include "../../core/spinlock.h"
 

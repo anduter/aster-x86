@@ -20,7 +20,7 @@
  * 返回值是失败项数，0 表示全部通过。
  * ============================================================================= */
 #include "memtest.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "include/mm.h"

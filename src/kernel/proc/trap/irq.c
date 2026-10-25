@@ -9,7 +9,7 @@
  * ============================================================================= */
 #include "interrupt.h"
 #include "uaccess.h"
-#include "../../io.h"
+#include "arch/x86/io.h"
 #include "../../core/error.h"
 #include "../percpu.h"
 #include "../proc.h"

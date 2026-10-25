@@ -244,7 +244,7 @@ foreach ($f in $cFiles) {
     $objs += $obj
 }
 
-Invoke-Step 'link'    'i686-elf-ld' (@('-m', 'elf_i386', '--no-warn-rwx-segments', '-T', 'src/kernel/linker.ld', '-o', (Join-Path $objRoot 'kernel.elf')) + $objs)
+Invoke-Step 'link'    'i686-elf-ld' (@('-m', 'elf_i386', '--no-warn-rwx-segments', '-T', 'src/kernel/arch/x86/linker.ld', '-o', (Join-Path $objRoot 'kernel.elf')) + $objs)
 Invoke-Step 'objcopy' 'i686-elf-objcopy' @('-O', 'binary', (Join-Path $objRoot 'kernel.elf'), (Join-Path $objRoot 'kernel.bin'))
 
 # ---- loader 内核签名验证器 ----

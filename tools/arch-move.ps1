@@ -7,6 +7,9 @@
 # types.h stays at src/kernel/types.h (option C is intentionally NOT done).
 # Updates build.ps1 / Makefile paths, runs two full tests, then commits.
 #
+# NOTE: this script is ASCII-only on purpose (PS 5.1 reads non-BOM scripts as
+# ANSI; non-ASCII text here would corrupt the parse).
+#
 # usage: powershell -File tools\arch-move.ps1 [-NoCommit]
 param(
     [string]$Repo = 'D:\OS_Project',
@@ -39,7 +42,7 @@ if (-not ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)) { throw 'buil
 $mp = 'Makefile'
 $m = [IO.File]::ReadAllText($mp)
 $m = $m.Replace('-T $(KERNEL_DIR)/linker.ld', '-T $(KERNEL_DIR)/arch/x86/linker.ld')
-$m = $m.Replace('                $(wildcard $(KERNEL_DIR)/*/*.asm)', "                $(wildcard $(KERNEL_DIR)/*/*.asm) \`r`n                $(wildcard $(KERNEL_DIR)/*/*/*.asm)")
+$m = $m.Replace('                $(wildcard $(KERNEL_DIR)/*/*.asm)', "                $(wildcard $(KERNEL_DIR)/*/*.asm) `r`n                $(wildcard $(KERNEL_DIR)/*/*/*.asm)")
 [IO.File]::WriteAllText($mp, $m, $encPlain)
 Write-Host '[arch-move] build scripts updated'
 
@@ -60,20 +63,28 @@ for ($i = 1; $i -le 2; $i++) {
 # document the layout change
 $dp = 'docs\modules.md'
 $d = [IO.File]::ReadAllText($dp)
-$note = @"
-
-### arch/x86 平台层（B 方案，2026-10-24）
-
-- `head.asm`、`io.c/h`、`linker.ld` 迁入 `src/kernel/arch/x86/`；
-- `types.h` 保留在 `src/kernel/types.h`（C 方案不做：改动面大、收益低）；
-- `build.ps1` 的 linker 路径与 `Makefile` 的 asm wildcard 同步更新。
-"@
-if ($d -notmatch 'arch/x86 平台层') { $d = $d.TrimEnd() + "`n" + $note; [IO.File]::WriteAllText($dp, $d, $encPlain) }
+$noteLines = @(
+    '',
+    '### arch/x86 platform layer (option B, 2026-10-25)',
+    '',
+    '- head.asm / io.c / io.h / linker.ld moved to src/kernel/arch/x86/',
+    '- types.h stays at src/kernel/types.h (option C not done: wide churn, low value)',
+    '- build.ps1 linker path and Makefile asm wildcard updated'
+)
+$note = $noteLines -join "`n"
+if ($d -notmatch 'arch/x86 platform layer') {
+    $d = $d.TrimEnd() + "`n" + $note
+    [IO.File]::WriteAllText($dp, $d, $encPlain)
+}
 Write-Host '[arch-move] docs updated'
 
 if ($NoCommit) { Write-Host '[arch-move] -NoCommit: skipping commit'; exit 0 }
 
-git add src/kernel/arch src/kernel/head.asm src/kernel/io.c src/kernel/io.h src/kernel/linker.ld build.ps1 Makefile docs/modules.md
-git commit -m "[refactor] 平台原语迁入 arch/x86（head/io/linker.ld），types.h 保留根目录" -- src/kernel/arch src/kernel/head.asm src/kernel/io.c src/kernel/io.h src/kernel/linker.ld build.ps1 Makefile docs/modules.md
+$paths = @(
+    'src/kernel/arch', 'src/kernel/head.asm', 'src/kernel/io.c', 'src/kernel/io.h',
+    'src/kernel/linker.ld', 'build.ps1', 'Makefile', 'docs/modules.md'
+)
+git add @paths
+git commit -m "[refactor] move platform primitives to arch/x86 (head/io/linker.ld); keep types.h at root" -- @paths
 Write-Host '[arch-move] committed'
 exit 0

@@ -241,3 +241,10 @@ M8 → 只依赖用户态 ABI（src/user/ulib.h）
 - M8 程序注册表（`kernel/user/program.c`）与用户态目录的最终合并仍可继续收口，但不影响模块边界；
 - 文档历史记号（`docs/driver-service.md` 的 `ipc/channel.c`、`docs/error-paths.md` 的 `ipc/port.c` 审计快照）
   仍未改；属其它文档范围，已在 8.5 记录。
+
+### arch/x86 platform layer (option B, 2026-10-25)
+
+- head.asm / io.c / io.h / linker.ld moved to src/kernel/arch/x86/
+- types.h stays at src/kernel/types.h (option C not done: wide churn, low value)
+- all includes repointed to "arch/x86/io.h" (17 files)
+- build.ps1 linker path and Makefile asm wildcard updated

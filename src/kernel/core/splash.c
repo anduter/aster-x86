@@ -7,7 +7,7 @@
  * ============================================================================= */
 #include "splash.h"
 #include "include/dev.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
 

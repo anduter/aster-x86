@@ -39,7 +39,7 @@ CFLAGS  := -ffreestanding -fno-pic -fno-pie -m32 -nostdlib \
            -MMD -MP \
            -DFONT_SCALE=$(FONT_SCALE) \
            -Wall -Wextra -Werror -g -O0 -I$(KERNEL_DIR)
-LDFLAGS := -m elf_i386 --no-warn-rwx-segments -T $(KERNEL_DIR)/linker.ld
+LDFLAGS := -m elf_i386 --no-warn-rwx-segments -T $(KERNEL_DIR)/arch/x86/linker.ld
 
 FLOPPY_IMG := $(DIST_DIR)/floppy.img
 BOOT_BIN   := $(OBJ_DIR)/boot.bin
@@ -53,6 +53,7 @@ KERNEL_CSRCS := $(wildcard $(KERNEL_DIR)/*.c) \
                 $(wildcard $(KERNEL_DIR)/*/*/*.c)
 KERNEL_ASMS  := $(wildcard $(KERNEL_DIR)/*.asm) \
                 $(wildcard $(KERNEL_DIR)/*/*.asm)
+                $(wildcard $(KERNEL_DIR)/*/*/*.asm)
 KERNEL_OBJS  := $(patsubst $(KERNEL_DIR)/%.c,$(OBJ_DIR)/%.o,$(KERNEL_CSRCS)) \
                 $(patsubst $(KERNEL_DIR)/%.asm,$(OBJ_DIR)/%.o,$(KERNEL_ASMS))
 

@@ -11,7 +11,7 @@
 #include "include/proc.h"
 #include "include/proc.h"
 #include "include/dev.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "include/kernel.h"
 
 #define HEARTBEAT_PERIOD 100U   /* tick 数，100 Hz 下约 1 秒 */

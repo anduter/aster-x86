@@ -6,7 +6,7 @@
  * 具体子系统的初始化顺序见 core/bootseq.c 的 boot_steps[]。
  * ============================================================================= */
 #include "../types.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/proc.h"

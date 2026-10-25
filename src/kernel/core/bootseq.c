@@ -6,7 +6,7 @@
  * 有名字的函数，方便日志、调试与后续改成动态注册。
  * ============================================================================= */
 #include "../types.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/mm.h"

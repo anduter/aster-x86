@@ -8,7 +8,7 @@
  * ============================================================================= */
 #include "ata.h"
 #include "block.h"
-#include "../../io.h"
+#include "arch/x86/io.h"
 #include "../../core/error.h"
 #include "../../lib/kprintf.h"
 #include "../../lib/string.h"

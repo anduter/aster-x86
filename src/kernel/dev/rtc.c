@@ -5,7 +5,7 @@
  * 再换算成 1970 起的秒数，给文件时间戳和 shell 的 date 命令用。
  * ============================================================================= */
 #include "rtc.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71

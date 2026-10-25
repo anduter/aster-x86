@@ -21,7 +21,7 @@
 #include "include/fs.h"
 #include "include/proc.h"
 #include "include/proc.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
 #include "include/dev.h"

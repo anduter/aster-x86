@@ -2,7 +2,7 @@
 #define MM_VMM_H
 
 #include "../types.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "pmm.h"
 
 /* 页表项/页目录项标志位 */

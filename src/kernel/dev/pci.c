@@ -5,7 +5,7 @@
  * 记录厂商号、设备号、类代码。只做枚举与展示，不分配资源。
  * ============================================================================= */
 #include "pci.h"
-#include "../io.h"
+#include "arch/x86/io.h"
 #include "include/kernel.h"
 
 #define PCI_MAX_DEVS 16
