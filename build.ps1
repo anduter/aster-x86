@@ -601,6 +601,19 @@ if ($Test -or $Shot) {
         Remove-Job -Job $tcpEcho -Force -ErrorAction SilentlyContinue
     }
 
+    # TCP listen/accept 自检在负载下可能晚于固定等待收尾；等它打出最终行再做断言。
+    if ($Test) {
+        $tcpDeadline = (Get-Date).AddSeconds(25)
+        while ((Get-Date) -lt $tcpDeadline) {
+            if (Test-Path $serial) {
+                $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
+                if ($snap -and $snap.Contains('net: tcp selftest PASS') -and $snap.Contains('net: tcp socket fd close releases port ok')) { break }
+                if ($snap -and $snap.Contains('net: tcp selftest FAIL')) { break }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+
     $out = if (Test-Path $serial) { Get-Content $serial -Raw } else { '' }
     T 'teardown done'
     Write-Host "=== serial ===" -ForegroundColor Cyan
