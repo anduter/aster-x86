@@ -6,15 +6,16 @@
 - 本会话提交：`e0eddab`（ring3 探针 + 回归驱动）、`2463479`（misc/brk/权限门）、
   `25b8587`+`360617a`（报告/边界套件）、`97e1d74`（DUP2 管道读端引用）、
   `fd263f5`（LOGIN 缓冲长度）、`010343c`（两条新回归）；`e80605d`/`bbd04c5`
-  只改测试驱动（full 套件按键/结论解析）
-- 集成基线：`e80605d` 内核快照（含 audit-fs `b4d5fd9`、audit-net `e4ef7ea` 与
-  本会话全部修复；当前 HEAD `bbd04c5` 的内核源码与其相同）
+  只改测试驱动（full 套件按键/结论解析），`402272b` 是 unit shim 的一行补齐
+- 集成基线：`be81eb7` 快照（含 audit-fs `b4d5fd9`、audit-net `e4ef7ea`、
+  audit-smp `f1e05d9` 与本会话全部修复；之后的 `1c4a22c` 仅 fs 文档）
 
 ## 1. 结论
 
-**找到 15 项，本会话修复 10 项；其余 5 项已分派：AS-9、AS-14 的 SYS_TIME 子项、
-AS-15 已由 audit-fs 在 `b4d5fd9` 修复；AS-10、AS-11、AS-12 转交 audit-smp。**
-10 项修复都有 QEMU 动态回归（修复前失败/崩溃，修复后 PASS）。
+**找到 15 项，本会话修复 10 项；其余 5 项均已由对应会话修复：AS-9、AS-14 的
+SYS_TIME 子项、AS-15 由 audit-fs 在 `b4d5fd9` 修复；AS-10、AS-11、AS-12 由
+audit-smp 在 `f1e05d9` 修复。** 10 项本会话修复都有 QEMU 动态回归（修复前
+失败/崩溃，修复后 PASS）。
 
 | # | 位置 | 问题 | 状态 |
 |---|------|------|------|
@@ -27,9 +28,9 @@ AS-15 已由 audit-fs 在 `b4d5fd9` 修复；AS-10、AS-11、AS-12 转交 audit-
 | AS-7 | `mm/mm_syscall.c` SYS_BRK | 32 位加法回绕 + 无堆下界，brk 可落到内核地址 | 已修 |
 | AS-8 | `core/misc_syscall.c` 调试入口 | 非 root 可 panic/hang/reboot/poweroff 整机 | 已修 |
 | AS-9 | `fs/fs_syscall.c` SYS_CHROOT | `strcpy` 到 192B `cwd`，路径可达 255B → `proc_t` 溢出 | 已由 audit-fs 修（b4d5fd9） |
-| AS-10 | `proc/process.c` SYS_SIGRETURN | 从用户可改的信号帧恢复 cs/eip/ss/eflags → 越权 iret | 转交 audit-smp |
-| AS-11 | `proc/trap/uaccess.c` | `copy_*_user` 全局缺用户窗口校验（其余模块仍可内核 R/W） | 转交 audit-smp |
-| AS-12 | `proc/proc_syscall.c` SYS_KILL | 任意用户可向任意 pid 发信号（可 SIGKILL root shell） | 转交 audit-smp |
+| AS-10 | `proc/process.c` SYS_SIGRETURN | 从用户可改的信号帧恢复 cs/eip/ss/eflags → 越权 iret | 已由 audit-smp 修（f1e05d9） |
+| AS-11 | `proc/trap/uaccess.c` | `copy_*_user` 全局缺用户窗口校验（其余模块仍可内核 R/W） | 已由 audit-smp 修（f1e05d9） |
+| AS-12 | `proc/proc_syscall.c` SYS_KILL | 任意用户可向任意 pid 发信号（可 SIGKILL root shell） | 已由 audit-smp 修（f1e05d9） |
 | AS-13 | `svc/svc_syscall.c` + `fs/pipe.*` SYS_DUP2 | 管道读端复制不增加引用，槽位提前回收 → 跨进程串数据 | 已修 |
 | AS-14 | `security/security_syscall.c` LOGIN_WHO/LAST/INFO | 忽略调用方缓冲长度，80B 缓冲被写 192B | 已修（security）；SYS_TIME 由 audit-fs 修 |
 | AS-15 | `fs/fs_syscall.c` SYS_FSCK | 忽略 `copy_to_user` 返回值，失败仍报成功 | 已由 audit-fs 修（b4d5fd9） |
@@ -220,7 +221,7 @@ proc: pid 7 (shell) exited with 142
 回归：`loginlen` 覆盖 size=0/1/8（`-1` + canary 完好）与 80B（成功且 NUL 结尾），
 输出 `ushell: login len clamp ok`。
 
-## 4. 转交项（含已由其它会话修复的条目）
+## 4. 转交项（均已由对应会话修复）
 
 ### AS-9 SYS_CHROOT：`proc_t.cwd[192]` 栈外写（P0，fs）
 
@@ -240,6 +241,11 @@ proc: pid 7 (shell) exited with 142
 
 ### AS-10 SYS_SIGRETURN：恢复用户可改的 iret 现场（P0，proc）
 
+**状态：audit-smp 已在 `f1e05d9` 修复**——新增 `proc_sigframe_valid()`：
+要求 `cs==0x1B`、`ss==0x23`、`eip` 在用户窗口内、`eflags` 只保留允许位，
+并用 `copy_from_user()` 读帧（#PF 修复表兜底），失败拒绝返回而不是 iret。
+以下为原始分析，保留备查。
+
 `proc/process.c::proc_sigreturn()` 只校验 `sig_frame` 的地址范围，然后
 `memcpy(f, user_frame, sizeof(*f))`；`isr.asm` 的 `iret` 不做 cs/ss 校验。
 但信号帧保存在用户栈上（`deliver_signal` 写入 `useresp - sizeof(frame)`），
@@ -256,7 +262,13 @@ handler 在入口处 `esp+8` 就是帧起点，可随意改：
 `eip < USER_ADDR_LIMIT`、`eflags` 只允许用户可改位，并校验 `sig_frame` 确实是
 本次投递写入的（序号/魔数）。
 
-### AS-11 `copy_*_user` 的根因仍在（P0，proc）
+### AS-11 `copy_*_user` 的根因（P0，proc）
+
+**状态：audit-smp 已在 `f1e05d9` 修复**——`uaccess_addr_ok()` 在
+`copy_from_user/copy_to_user` 入口统一检查 `ptr < 0xC0000000`、`len` 不回绕，
+并在 `p->is_user` 时要求 `ptr >= USER_LAYOUT_CODE_BASE`；内核自检
+（`is_user == false`）保持可用。misc 组的 `misc_user_buf()` 因此成为冗余保险。
+以下为原始分析，保留备查。
 
 `proc/trap/uaccess.c` 只拒绝 `ptr == 0`，不校验用户窗口；本会话只在 misc 组
 加了 `misc_user_buf()`。仍然存在同类调用的组（ring3 可内核读/写）：
@@ -278,6 +290,9 @@ handler 在入口处 `esp+8` 就是帧起点，可随意改：
 `misc_user_buf()` 就退化成冗余保险。
 
 ### AS-12 SYS_KILL 无权限检查（P1，proc）
+
+**状态：audit-smp 已在 `f1e05d9` 修复**——发送前调用 `proc_can_signal()`：
+只允许 root、自己、或 ruid/euid/suid 匹配的目标进程。以下为原始分析，保留备查。
 
 `proc/proc_syscall.c` 直接用 `pid` 找进程并 `proc_send_signal()`，不比较
 ruid/euid。普通用户可 `kill <任意pid> 9` 杀掉 root shell、getty、服务进程。
@@ -318,10 +333,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\audit-syscall.ps1 -Sui
   LOGIN 长度钳制、dup2/fork 管道读端引用），全部断言通过
   （`[audit-syscall] suite=guard => PASS`）。
 - `priv`：`drop 1000` 后 4 个停机调用全部 `-1`（`suite=priv => PASS`）。
-- `full`：标准 225 项回归。集成快照 `e80605d`（含 audit-fs `b4d5fd9`、
-  audit-net `e4ef7ea` 与本会话全部修复）上 `-Suite full => PASS`，build.ps1 打出
-  `=== TEST PASS (225/225) ===`。同一快照另一次重跑命中仓库已记录的 TCP 时序抖动
-  （仅“TCP 健壮性自检通过”一项，224/225；见 b79ca12/1a6998e），重跑即过。
+- `full`：标准 225 项回归。集成快照 `be81eb7`（含 audit-fs `b4d5fd9`、
+  audit-net `e4ef7ea`、audit-smp `f1e05d9` 与本会话全部修复）上 `-Suite guard`
+  与 `-Suite full` 均 PASS，build.ps1 打出 `=== TEST PASS (225/225) ===`；
+  更早的 `e80605d` 快照同样 225/225 PASS。期间一次重跑命中仓库已记录的 TCP
+  时序抖动（仅“TCP 健壮性自检通过”，224/225；见 b79ca12/1a6998e），重跑即过。
+- 主机单测：`tools/unit.ps1 -Only pipe,fuzz-pipe` => **51 checks / 0 failures**
+  （DUP2 读端引用改动；`tests/unit/shim/include/proc.h` 补了 `FD_KIND_PIPE_R`）。
 - `probe`：修复前证据（`KRNL` 泄漏、brk 回绕、RESINFO/MOUSE `ret=0`）。
 
 关键串口行（修复后）：
@@ -364,6 +382,7 @@ ushell: dup2 pipe read ref FAIL (last=-1)     # 关闭原 read 后 dup 读到 -1
   FAT16、security/accounts 口令路径、pkg 安装器、SMP 并发与 TLB shootdown、
   文件映射内容语义、长时间 soak。
 - **限制**：审计期间共享树被并行会话修改，动态验证都在 `git archive HEAD` 的
-  私有快照 + 本会话补丁上完成；最终 225 项用的是集成快照 `e80605d`
-  （含 audit-fs `b4d5fd9`、audit-net `e4ef7ea`）。转交项的细节见第 4 节。
+  私有快照 + 本会话补丁上完成；最终 225 项用的是集成快照 `be81eb7`
+  （含 audit-fs `b4d5fd9`、audit-net `e4ef7ea`、audit-smp `f1e05d9`）。
+  转交项的细节见第 4 节。
 - 预算：8h 未用完；在修复 10 项后提前收尾。
