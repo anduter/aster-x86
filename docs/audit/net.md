@@ -277,19 +277,19 @@ MAC 写成攻击者 MAC：修复前 `net_parse_arp()` 只比 `rd16(f+28) == 0x0A
 
 ## 7. 验证记录
 
-### 7.1 隔离 worktree（基线 `38161af` + 本会话 `net/**`）
+### 7.1 隔离 worktree（最终验证：集成 HEAD `3f8d8a4`，含 audit-smp 的 tcptest 修复）
 
-验证前逐文件比对过 worktree 里的 5 个 net 文件与主树（= HEAD）一致，所以下面的
-结果就是**已提交代码**的结果。
+验证前把 worktree 切到集成 HEAD（= 我的 net 改动 + audit-smp 的调度修复），
+所以下面的结果就是**集成后的代码**：
 
 | 轮次 | 全量断言 | `net: audit` 行 | elapsed | 说明 |
 |---|---|---|---|---|
-| 终验（干净窗口） | `=== TEST PASS (225/225) ===` | **9/9** | 39.2s | `tools/audit-net.ps1` 首轮即 PASS（未触发重试） |
-| 宿主争用窗口（其它会话 QEMU 并发） | 8~26 项 shell/键注入类失败 | **9/9（全部轮次）** | 112~190s | 宿主被占满，键注入/超时类检查成批失败，与本改动无关 |
-| 既有 flake 命中轮次 | 只缺 `TCP 健壮性自检通过` + `TCP close 释放端口` | **9/9** | — | 仓库既有 tcptest 尾部延迟（§5-9） |
-| 基线对照（未改 `net/**`） | 3/3 通过 | —（无审计行） | ~40s | 既有正向链路正常 |
+| 终验（集成 HEAD） | `=== TEST PASS (225/225) ===` | **11/11** | 54.1s | `tools/audit-net.ps1` 首轮即 PASS（未触发重试） |
+| 逐点验证（基线 38161af + 本会话 V1–V7） | `225/225` | 9/9 | 39.2s | 干净窗口 |
+| 宿主争用窗口（其它会话 QEMU 并发） | 8~26 项 shell/键注入/pkg 类失败 | 9~11/11（全部轮次） | 112~190s | 宿主被占满，键注入/超时类检查成批失败，与本改动无关 |
+| 既有 flake 命中轮次（audit-smp 修复前） | 缺 `TCP 健壮性自检通过` / `TCP close 释放端口` / listen 段 | 9/9 或 11/11 | — | tcptest 线程卡死（§5-8）；audit-smp 已定根因并修复 |
 
-关键点：**9 条审计行在所有轮次都出现**（包括宿主争用、既有 flake 命中的轮次），
+关键点：**所有审计行在每一轮都出现**（包括宿主争用、tcptest 卡死命中的轮次），
 因为它们在 `net_tcp_robust_selftest()` 最前面执行，且是纯状态断言（不 sleep、
 不依赖真实对端）。
 
@@ -314,10 +314,14 @@ MAC 写成攻击者 MAC：修复前 `net_parse_arp()` 只比 `rd16(f+28) == 0x0A
   [PASS] net: audit tcp handshake seq validated ok
   [PASS] net: audit tcp ip ingress rejects malformed ok (bad=3)
   [PASS] net: audit listen socket owned by pid ok
+  [PASS] net: audit dns txid entropy ok
+  [PASS] net: audit tcp forged ACK ignored ok
   [PASS] net: audit tcp ok
 --- 既有 net 正向断言 ---
-  [PASS] net: ARP reply gw=      ...（11 条全 PASS）
---- tcptest 尾部（已知 flake，单独判定） ---
+  [PASS] net: ARP reply gw=      ...（8 条全 PASS）
+--- tcptest 尾部 ---
+  [PASS] net: TCP echo reply
+  [PASS] net: tcp listen/accept selftest PASS
   [PASS] net: tcp selftest PASS
 --- 全量检查：225/225 PASS ---
 === audit-net: PASS（1 轮；修复回归行齐全 + 225/225 + 正向链路未回归） ===
@@ -329,7 +333,9 @@ MAC 写成攻击者 MAC：修复前 `net_parse_arp()` 只比 `rd16(f+28) == 0x0A
 |---|---|
 | `e4ef7ea` | `[fix] net: 7 项收包校验/状态机缺陷（audit-net）` |
 | `74042d9` | `[test] net: 审计用例前置且不依赖调度；audit-net 门禁读 build 日志 + 尾部 flake 重试` |
-| 本提交 | `[docs] audit-net: 网络协议栈审计报告与回归证据`（`docs/audit/net.md`） |
+| `c46a9cd` | `[fix] net: DNS 事务 ID 熵 + 拒绝伪造 ACK（audit-net V8/V9）` |
+| `3f8d8a4` | `[docs][test] audit-net: V8/V9 回归行与门禁收敛` |
+| 本提交 | `[docs] audit-net: 终验数字（集成 HEAD 225/225 + 11/11）` |
 
 改动文件：
 
