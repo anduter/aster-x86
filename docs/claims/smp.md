@@ -136,7 +136,10 @@ sched: pid 16 (spin) running on cpu 3
   （2s 时 `bsp=200 ap=348 ap2=253 ap3=160`）；
 - 四颗 CPU 的 runqueue 位图都非零（进程被负载放置到 cpu0..3）；
 - TLB shootdown 3/3 ack；调度器把 spin 线程实际跑在 cpu2/cpu3；
-- 进入用户态 shell 后 `ushell: ready` 正常出现，键盘注入 `help` 有响应。
+- 心跳线程持续打印 `thread: heartbeat 0..19 pid=8 cpu=1`（每秒递增，
+  四核运行期间未停），说明时钟/调度/用户态入口都活着；
+- 进入用户态 shell 后 `ushell: ready (ring3, legacy int 0x81)` 正常出现，
+  键盘注入 `help` 有响应（`ushell: commands`）。
 
 ## 5. IOAPIC 全量路由
 
