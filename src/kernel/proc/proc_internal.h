@@ -38,7 +38,8 @@ void proc_root_copy(proc_t *parent, proc_t *child);
 /* 从所有 runqueue 摘掉（进程退出/回收时调用）。 */
 void sched_dequeue(proc_t *p);
 
-/* 回收进程槽：摘队 + memset 清零，整体在 sched_lock 内完成。 */
+/* 回收进程槽：摘队（全部 rq_lock）+ memset 清零（sched_lock），
+ * 顺序 rq -> global。 */
 void sched_clear_slot(proc_t *p);
 
 /* 按当前负载选一个 CPU（最小负载，平局优先 BSP）。 */

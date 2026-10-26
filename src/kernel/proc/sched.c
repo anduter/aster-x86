@@ -25,7 +25,25 @@
 #include "include/mm.h"           /* vmm_kernel_dir/vmm_current_dir：idle CR3 断言 */
 #include "include/dev.h"          /* apic_send_ipi：跨 CPU 重新调度 IPI */
 
-/* 全局调度锁：BSP/AP 不能同时改同一份 runqueue / 进程状态。 */
+/* ==================== 锁拆分（P1） ====================
+ * 旧实现只有一把全局 sched_lock，所有 CPU 的 runqueue 和进程状态都串行化。
+ * 现在拆成：
+ *   - rq_lock[cpu]：每 CPU runqueue 锁，保护 per_cpu[cpu].runq_mask 和
+ *     sched_bucket[cpu][prio]；本 CPU 的 tick/选进程只拿自己的锁。
+ *   - sched_lock：全局进程状态锁，保护 proc_t 的 state / eff_prio /
+ *     base_prio / wait_ticks / wake_pending / runs / last_cpu，以及
+ *     proc_switch_from[] 和 sched_aging_ticks。
+ *
+ * 锁顺序（严格，见 sched: per-cpu locks ok 自检）：
+ *     rq_lock[*]  ->  sched_lock
+ * 多条 runqueue 需要同时修改时（wake/enqueue/balance/reap），按 CPU 号
+ * 升序拿全部 rq_lock（rq_lock_all），因此不会出现 ABBA；任何路径都不允许
+ * 在持有 sched_lock 时回头拿 rq_lock。
+ *
+ * 只读近似值（sched_place/balance 的负载估计）可以在不持 sched_lock 时
+ * 读 proc_t 的 state：32 位对齐读是原子的，最坏只是把一个正在迁移的
+ * 进程多算/少算一次，不影响队列归属（队列归属始终由 rq_lock 保护）。 */
+static spinlock_t rq_lock[SMP_MAX_CPUS];
 static spinlock_t sched_lock = SPINLOCK_INIT;
 static volatile uint32_t smp_sched_enabled;
 
@@ -37,8 +55,9 @@ static volatile uint32_t smp_sched_enabled;
 #define SCHED_AP_WATCHDOG_TICKS 300U
 
 static uint32_t balance_ticks;
-static uint32_t ap_wdg_last_ticks;
-static uint32_t ap_wdg_stall_ticks;
+/* 每颗 AP 一组看门狗状态：>2 核时不能只看 cpu1。 */
+static uint32_t ap_wdg_last_ticks[SMP_MAX_CPUS];
+static uint32_t ap_wdg_stall_ticks[SMP_MAX_CPUS];
 
 /* 每 CPU、每优先级的 runqueue 桶；runq_mask 是它们的并集，保持同步。 */
 static uint32_t sched_bucket[SMP_MAX_CPUS][PROC_PRIO_LEVELS];
@@ -73,20 +92,38 @@ static void prio_default_locked(proc_t *p)
     p->prio_set  = true;
 }
 
-/* 从所有 CPU 的位图/优先级桶里摘掉（调用者必须持有 sched_lock） */
-static void rq_unlink_locked(proc_t *p)
+/* ---- runqueue 锁：一次拿全部（按 CPU 号升序，防 ABBA） ---- */
+static void rq_lock_all(uint32_t *flags)
+{
+    *flags = irq_save();
+    for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) spin_lock(&rq_lock[c]);
+}
+
+static void rq_unlock_all(uint32_t flags)
+{
+    for (uint32_t c = SMP_MAX_CPUS; c-- > 0U; ) spin_unlock(&rq_lock[c]);
+    irq_restore(flags);
+}
+
+/* 从指定 CPU 的位图/优先级桶里摘掉（调用者持有该 CPU 的 rq_lock） */
+static void rq_unlink_cpu_locked(uint32_t cpu, proc_t *p)
 {
     uint32_t bit = proc_bit(p);
 
-    for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
-        per_cpu[c].runq_mask &= ~bit;
-        for (uint32_t q = 0; q < PROC_PRIO_LEVELS; q++) {
-            sched_bucket[c][q] &= ~bit;
-        }
+    if (cpu >= SMP_MAX_CPUS) return;
+    per_cpu[cpu].runq_mask &= ~bit;
+    for (uint32_t q = 0; q < PROC_PRIO_LEVELS; q++) {
+        sched_bucket[cpu][q] &= ~bit;
     }
 }
 
-/* 挂到指定 CPU 的对应优先级桶（调用者必须持有 sched_lock，且保证不在别的桶里） */
+/* 从所有 CPU 摘掉（调用者持有全部 rq_lock，rq_lock_all） */
+static void rq_unlink_all_locked(proc_t *p)
+{
+    for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) rq_unlink_cpu_locked(c, p);
+}
+
+/* 挂到指定 CPU 的对应优先级桶（调用者持有该 CPU 的 rq_lock，且保证不在别的桶里） */
 static void rq_link_locked(uint32_t cpu, proc_t *p)
 {
     uint32_t bit = proc_bit(p);
@@ -95,17 +132,25 @@ static void rq_link_locked(uint32_t cpu, proc_t *p)
     sched_bucket[cpu][prio_clamp(p->eff_prio)] |= bit;
 }
 
-/* 进程已经在某个 CPU 的 runqueue 上时，把它挪到 eff_prio 对应的桶 */
-static void rq_reset_bucket_locked(proc_t *p)
+/* 进程在本 CPU 的 runqueue 上时，把它挪到 eff_prio 对应的桶（本地锁） */
+static void rq_reset_bucket_cpu_locked(uint32_t cpu, proc_t *p)
+{
+    uint32_t bit = proc_bit(p);
+
+    for (uint32_t q = 0; q < PROC_PRIO_LEVELS; q++) {
+        sched_bucket[cpu][q] &= ~bit;
+    }
+    sched_bucket[cpu][prio_clamp(p->eff_prio)] |= bit;
+}
+
+/* 进程可能挂在任一 CPU 的 runqueue 上，找到并重排桶（调用者持有全部 rq_lock） */
+static void rq_reset_bucket_all_locked(proc_t *p)
 {
     uint32_t bit = proc_bit(p);
 
     for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
         if ((per_cpu[c].runq_mask & bit) == 0U) continue;
-        for (uint32_t q = 0; q < PROC_PRIO_LEVELS; q++) {
-            sched_bucket[c][q] &= ~bit;
-        }
-        sched_bucket[c][prio_clamp(p->eff_prio)] |= bit;
+        rq_reset_bucket_cpu_locked(c, p);
         return;
     }
 }
@@ -137,19 +182,20 @@ uint32_t sched_place(const proc_t *p)
         }
     }
 
-    flags = spin_lock_irqsave(&sched_lock);
+    /* 只拿目标 CPU 自己的 runqueue 锁做负载采样；不同 CPU 的 runqueue 互不阻塞。 */
     for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
         uint32_t load;
 
         if (!per_cpu[c].online) continue;
         if (c != 0U && !per_cpu[c].ready) continue;   /* AP 还没装好 GDT/IDT */
+        flags = spin_lock_irqsave(&rq_lock[c]);
         load = load_locked(c);
+        spin_unlock_irqrestore(&rq_lock[c], flags);
         if (load < best_load) {
             best_load = load;
             best = c;
         }
     }
-    spin_unlock_irqrestore(&sched_lock, flags);
     return best;
 }
 
@@ -164,15 +210,19 @@ void sched_kick(uint32_t cpu)
 /* 把进程挂到指定 CPU 的 runqueue：先从所有位图摘掉，保证一个进程只属于一个 CPU */
 void sched_enqueue(proc_t *p, uint32_t cpu)
 {
+    uint32_t rq_flags;
     uint32_t flags;
 
     if (p == 0 || cpu >= SMP_MAX_CPUS) return;
 
+    /* 先拿全部 runqueue 锁（升序）再拿全局状态锁：rq -> global。 */
+    rq_lock_all(&rq_flags);
     flags = spin_lock_irqsave(&sched_lock);
     prio_default_locked(p);
-    rq_unlink_locked(p);
+    rq_unlink_all_locked(p);
     rq_link_locked(cpu, p);
     spin_unlock_irqrestore(&sched_lock, flags);
+    rq_unlock_all(rq_flags);
 
     /* 目标 CPU 正在空转就踢一下，不用等它下一个 timer tick */
     if (cpu != smp_cpu_id()) sched_kick(cpu);
@@ -235,25 +285,32 @@ void sched_end_switch(void)
  * 只投到当前 CPU 的 runqueue，由本 CPU 的 tick/调度点取走。 */
 void sched_deliver_pending(void)
 {
-    uint32_t flags = spin_lock_irqsave(&sched_lock);
     uint32_t cpu = smp_cpu_id();
+    uint32_t rq_flags;
+    uint32_t flags;
 
-    if (cpu < SMP_MAX_CPUS) {
-        for (uint32_t i = 0; i < PROC_MAX; i++) {
-            proc_t *p = &proc_table[i];
+    if (cpu >= SMP_MAX_CPUS) return;
 
-            if (p->state != PROC_BLOCKED || !p->wake_pending) continue;
-            if (proc_still_on_cpu(p)) continue;
-            if (proc_in_switch(p)) continue;    /* 栈还没切完，别投 */
+    /* 只投到本 CPU 的 runqueue：拿本地 rq 锁 + 全局状态锁，顺序 rq -> global。 */
+    rq_flags = spin_lock_irqsave(&rq_lock[cpu]);
+    flags = spin_lock_irqsave(&sched_lock);
 
-            p->wake_pending = false;
-            p->state = PROC_READY;
-            rq_unlink_locked(p);
-            rq_link_locked(cpu, p);
-        }
+    for (uint32_t i = 0; i < PROC_MAX; i++) {
+        proc_t *p = &proc_table[i];
+
+        if (p->state != PROC_BLOCKED || !p->wake_pending) continue;
+        if (proc_still_on_cpu(p)) continue;
+        if (proc_in_switch(p)) continue;    /* 栈还没切完，别投 */
+
+        /* 不变量：wake_pending 的进程还在 BLOCKED，不会挂在任何 runqueue 上，
+         * 因此这里只需 link 本 CPU；老实现的无条件 unlink 已不再需要。 */
+        p->wake_pending = false;
+        p->state = PROC_READY;
+        rq_link_locked(cpu, p);
     }
 
     spin_unlock_irqrestore(&sched_lock, flags);
+    spin_unlock_irqrestore(&rq_lock[cpu], rq_flags);
 }
 
 /* 唤醒一个阻塞进程：状态迁移与入队在同一把锁里完成，
@@ -265,6 +322,7 @@ void sched_deliver_pending(void)
  * 执行（共享同一内核栈/esp），表现为 ret 到 0x1b 之类的内核 oops。 */
 void sched_wake(proc_t *p)
 {
+    uint32_t rq_flags;
     uint32_t flags;
     uint32_t cpu;
     bool enqueued = false;
@@ -273,12 +331,17 @@ void sched_wake(proc_t *p)
 
     /* 调度器还没启动（内核初始化阶段）：只迁移状态，不入队 */
     if (!smp_sched_enabled) {
+        flags = spin_lock_irqsave(&sched_lock);
         if (p->state == PROC_BLOCKED) p->state = PROC_READY;
+        spin_unlock_irqrestore(&sched_lock, flags);
         return;
     }
 
-    cpu = sched_place(p);                 /* 内部自己拿锁 */
+    cpu = sched_place(p);                 /* 内部只拿各 CPU 的 rq 锁采样 */
 
+    /* 目标可能在别的 CPU 队列上（重复 wake）：拿全部 rq 锁才能安全迁移。
+     * 顺序 rq_lock_all（升序）-> sched_lock。 */
+    rq_lock_all(&rq_flags);
     flags = spin_lock_irqsave(&sched_lock);
     prio_default_locked(p);
     if (p->state != PROC_ZOMBIE && p->state != PROC_RUNNING) {
@@ -291,12 +354,13 @@ void sched_wake(proc_t *p)
             p->wake_pending = true;
         } else {
             p->state = PROC_READY;
-            rq_unlink_locked(p);
+            rq_unlink_all_locked(p);
             rq_link_locked(cpu, p);
             enqueued = true;
         }
     }
     spin_unlock_irqrestore(&sched_lock, flags);
+    rq_unlock_all(rq_flags);
 
     if (enqueued && cpu != smp_cpu_id()) sched_kick(cpu);
 }
@@ -308,9 +372,10 @@ void sched_dequeue(proc_t *p)
 
     if (p == 0) return;
 
-    flags = spin_lock_irqsave(&sched_lock);
-    rq_unlink_locked(p);
-    spin_unlock_irqrestore(&sched_lock, flags);
+    /* 进程可能挂在任一 CPU 队列上：只拿全部 rq 锁，不改进程状态。 */
+    rq_lock_all(&flags);
+    rq_unlink_all_locked(p);
+    rq_unlock_all(flags);
 }
 
 /* 回收一个进程槽：摘 runqueue + memset 清零，全部在 sched_lock 里完成。
@@ -318,30 +383,37 @@ void sched_dequeue(proc_t *p)
  * proc_t（pid=0/name=NULL 但 state 还是旧值），是 pid 0/(null) 脏现场的来源。 */
 void sched_clear_slot(proc_t *p)
 {
+    uint32_t rq_flags;
     uint32_t flags;
 
     if (p == 0) return;
 
+    /* 摘队列（全部 rq 锁）与清状态（全局锁）一起完成：rq -> global。 */
+    rq_lock_all(&rq_flags);
     flags = spin_lock_irqsave(&sched_lock);
-    rq_unlink_locked(p);
+    rq_unlink_all_locked(p);
     memset(p, 0, sizeof(*p));
     spin_unlock_irqrestore(&sched_lock, flags);
+    rq_unlock_all(rq_flags);
 }
 
 /* 设置静态优先级：同时重置 aging 状态，已入队的进程迁移到新桶。 */
 int sched_set_priority(proc_t *p, uint8_t prio)
 {
+    uint32_t rq_flags;
     uint32_t flags;
 
     if (p == 0 || prio >= PROC_PRIO_LEVELS) return -1;
 
+    rq_lock_all(&rq_flags);
     flags = spin_lock_irqsave(&sched_lock);
     p->base_prio  = prio;
     p->eff_prio   = prio;
     p->wait_ticks = 0;
     p->prio_set   = true;
-    rq_reset_bucket_locked(p);
+    rq_reset_bucket_all_locked(p);
     spin_unlock_irqrestore(&sched_lock, flags);
+    rq_unlock_all(rq_flags);
     return 0;
 }
 
@@ -364,6 +436,7 @@ void sched_set_aging_ticks(uint32_t ticks)
 proc_t *sched_next(proc_t *cur)
 {
     uint32_t start = 0;
+    uint32_t rq_flags;
     uint32_t flags;
     uint32_t cpu = smp_cpu_id();
     uint32_t mask;
@@ -372,12 +445,16 @@ proc_t *sched_next(proc_t *cur)
     proc_t *found = 0;
     proc_t *announce = 0;
 
+    if (cpu >= SMP_MAX_CPUS) return 0;
     if (cur != 0) {
         start = (uint32_t)(cur - proc_table) + 1U;
     }
 
+    /* 本 CPU runqueue 锁 -> 全局状态锁。只扫描本 CPU 的位图，
+     * 别的 CPU 的 tick/选进程不会在这里排队。 */
+    rq_flags = spin_lock_irqsave(&rq_lock[cpu]);
     flags = spin_lock_irqsave(&sched_lock);
-    mask = (cpu < SMP_MAX_CPUS) ? per_cpu[cpu].runq_mask : 0U;
+    mask = per_cpu[cpu].runq_mask;
 
     for (uint32_t i = 0; i < PROC_MAX; i++) {
         uint32_t bit = 1U << i;
@@ -422,7 +499,7 @@ proc_t *sched_next(proc_t *cur)
         p->eff_prio = p->base_prio;       /* 运行后回落到 base */
         p->wait_ticks = 0;
         p->runs++;
-        rq_reset_bucket_locked(p);        /* 桶位置同步到 base 优先级 */
+        rq_reset_bucket_cpu_locked(cpu, p);   /* 桶位置同步到 base 优先级 */
         found = p;
         break;
     }
@@ -431,6 +508,7 @@ proc_t *sched_next(proc_t *cur)
         found->last_cpu = cpu;
     }
     spin_unlock_irqrestore(&sched_lock, flags);
+    spin_unlock_irqrestore(&rq_lock[cpu], rq_flags);
 
     /* 日志放在锁外：console 自己还有锁，避免两把锁嵌套 */
     if (announce != 0) {
@@ -444,30 +522,35 @@ proc_t *sched_next(proc_t *cur)
  * 当前进程（正在跑）不参与，运行后 eff_prio 已经在 sched_next 里回落。 */
 static void sched_age_runqueue(const proc_t *cur)
 {
-    uint32_t flags = spin_lock_irqsave(&sched_lock);
     uint32_t cpu = smp_cpu_id();
+    uint32_t rq_flags;
+    uint32_t flags;
+    uint32_t mask;
 
-    if (cpu < SMP_MAX_CPUS) {
-        uint32_t mask = per_cpu[cpu].runq_mask;
+    if (cpu >= SMP_MAX_CPUS) return;
 
-        for (uint32_t i = 0; i < PROC_MAX; i++) {
-            proc_t *p;
+    rq_flags = spin_lock_irqsave(&rq_lock[cpu]);
+    flags = spin_lock_irqsave(&sched_lock);
+    mask = per_cpu[cpu].runq_mask;
 
-            if ((mask & (1U << i)) == 0U) continue;
-            p = &proc_table[i];
-            if (p == cur || p->state != PROC_READY) continue;
-            if (p->eff_prio == 0U) { p->wait_ticks = 0; continue; }
+    for (uint32_t i = 0; i < PROC_MAX; i++) {
+        proc_t *p;
 
-            if (++p->wait_ticks >= sched_aging_ticks) {
-                p->wait_ticks = 0;
-                p->eff_prio--;
-                p->aged++;
-                rq_reset_bucket_locked(p);
-            }
+        if ((mask & (1U << i)) == 0U) continue;
+        p = &proc_table[i];
+        if (p == cur || p->state != PROC_READY) continue;
+        if (p->eff_prio == 0U) { p->wait_ticks = 0; continue; }
+
+        if (++p->wait_ticks >= sched_aging_ticks) {
+            p->wait_ticks = 0;
+            p->eff_prio--;
+            p->aged++;
+            rq_reset_bucket_cpu_locked(cpu, p);
         }
     }
 
     spin_unlock_irqrestore(&sched_lock, flags);
+    spin_unlock_irqrestore(&rq_lock[cpu], rq_flags);
 }
 
 /* 负载均衡：把最忙 CPU 上的一个 READY 进程挪到完全空转的 CPU。
@@ -476,6 +559,7 @@ static void sched_age_runqueue(const proc_t *cur)
 void sched_balance(void)
 {
     uint32_t flags;
+    uint32_t gflags;
     uint32_t busiest = SMP_MAX_CPUS;
     uint32_t idlest = SMP_MAX_CPUS;
     uint32_t max_load = 0;
@@ -484,7 +568,10 @@ void sched_balance(void)
 
     if (smp_cpu_count < 2U) return;
 
-    flags = spin_lock_irqsave(&sched_lock);
+    /* 需要一致地比较所有 runqueue 并把 victim 从一队搬到另一队：
+     * 按 CPU 号升序拿全部 rq 锁，再拿全局状态锁（rq -> global）。 */
+    rq_lock_all(&flags);
+    gflags = spin_lock_irqsave(&sched_lock);
 
     for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
         uint32_t load;
@@ -509,12 +596,13 @@ void sched_balance(void)
             break;
         }
         if (victim != 0) {
-            rq_unlink_locked(victim);
+            rq_unlink_all_locked(victim);
             rq_link_locked(idlest, victim);
         }
     }
 
-    spin_unlock_irqrestore(&sched_lock, flags);
+    spin_unlock_irqrestore(&sched_lock, gflags);
+    rq_unlock_all(flags);
 
     if (victim != 0) {
         kprintf("sched: migrate pid %u (%s) cpu %u -> %u\n",
@@ -528,29 +616,32 @@ void sched_tick(void)
     proc_t *cur = proc_current();
     proc_t *next;
 
-    /* AP 看门狗（只在 BSP tick 里跑）：AP 的 LAPIC tick 连续 ~3s 不推进，
-     * 说明 AP 卡死在关中断/自旋/中断风暴里。此时 BSP 可能一切正常，
+    /* AP 看门狗（只在 BSP tick 里跑）：每颗在线 AP 的 LAPIC tick 连续 ~3s
+     * 不推进，说明它卡死在关中断/自旋/中断风暴里。此时 BSP 可能一切正常，
      * 现有 NMI watchdog 只看 timer_ticks+syscall_count，不会报警；这里用
-     * 两核现场 panic 代替 8h 浸泡里的无信息 hang。正常路径只做一次比较，
-     * AP tick 一旦推进就清零。 */
-    if (smp_cpu_id() == 0U &&
-        smp_cpu_count > 1U && per_cpu[1].online && per_cpu[1].ready) {
-        uint32_t ap_ticks = per_cpu[1].ticks;
+     * 每 CPU 现场 panic 代替 8h 浸泡里的无信息 hang。正常路径只做一次比较，
+     * AP tick 一旦推进就清零。-smp 4 时四颗核都会被检查。 */
+    if (smp_cpu_id() == 0U) {
+        for (uint32_t c = 1; c < SMP_MAX_CPUS; c++) {
+            uint32_t ap_ticks;
 
-        if (ap_ticks != ap_wdg_last_ticks) {
-            ap_wdg_last_ticks = ap_ticks;
-            ap_wdg_stall_ticks = 0;
-        } else if (++ap_wdg_stall_ticks >= SCHED_AP_WATCHDOG_TICKS) {
-            proc_t *c0 = (proc_t *)per_cpu[0].current;
-            proc_t *c1 = (proc_t *)per_cpu[1].current;
+            if (!per_cpu[c].online || !per_cpu[c].ready) continue;
+            ap_ticks = per_cpu[c].ticks;
+            if (ap_ticks != ap_wdg_last_ticks[c]) {
+                ap_wdg_last_ticks[c] = ap_ticks;
+                ap_wdg_stall_ticks[c] = 0;
+            } else if (++ap_wdg_stall_ticks[c] >= SCHED_AP_WATCHDOG_TICKS) {
+                proc_t *cc = (proc_t *)per_cpu[c].current;
+                proc_t *c0 = (proc_t *)per_cpu[0].current;
 
-            panic("cpu1 tick stalled (c1.ticks=%u bsp=%u, cur1=pid%u state=%u, "
-                  "runq1=0x%x, runq0=0x%x, cur0=pid%u state=%u)",
-                  ap_ticks, (unsigned int)this_cpu()->ticks,
-                  c1 ? c1->pid : 0U, c1 ? (unsigned int)c1->state : 0U,
-                  (unsigned int)per_cpu[1].runq_mask,
-                  (unsigned int)per_cpu[0].runq_mask,
-                  c0 ? c0->pid : 0U, c0 ? (unsigned int)c0->state : 0U);
+                panic("cpu%u tick stalled (ticks=%u bsp=%u, cur=pid%u state=%u, "
+                      "runq%u=0x%x, runq0=0x%x, cur0=pid%u state=%u)",
+                      c, ap_ticks, (unsigned int)this_cpu()->ticks,
+                      cc ? cc->pid : 0U, cc ? (unsigned int)cc->state : 0U,
+                      c, (unsigned int)per_cpu[c].runq_mask,
+                      (unsigned int)per_cpu[0].runq_mask,
+                      c0 ? c0->pid : 0U, c0 ? (unsigned int)c0->state : 0U);
+            }
         }
     }
 
@@ -628,8 +719,56 @@ void sched_tick(void)
     }
 }
 
+/* 锁拆分自检：确认每颗在线 CPU 都有独立的 runqueue 锁/位图，且
+ * “rq_lock -> sched_lock” 的获取顺序可以真正跑通（不只看注释）。
+ * 期望串口行： sched: per-cpu locks ok (nr=N, order=rq->global) */
+static void sched_locks_selftest(void)
+{
+    bool ok = true;
+    uint32_t online = 0;
+
+    for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
+        if (&rq_lock[c] == &sched_lock) ok = false;
+        for (uint32_t d = 0; d < c; d++) {
+            if (&rq_lock[c] == &rq_lock[d]) ok = false;
+        }
+    }
+
+    for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
+        uint32_t rq_flags;
+        uint32_t flags;
+
+        if (!per_cpu[c].online) continue;
+        online++;
+
+        /* 真实获取一次：先 rq_lock[c]，再全局锁，反向释放。 */
+        rq_flags = spin_lock_irqsave(&rq_lock[c]);
+        flags = spin_lock_irqsave(&sched_lock);
+        if (per_cpu[c].id != c) ok = false;
+        spin_unlock_irqrestore(&sched_lock, flags);
+        spin_unlock_irqrestore(&rq_lock[c], rq_flags);
+    }
+
+    if (ok) {
+        kprintf("sched: per-cpu locks ok (nr=%u, order=rq->global)\n",
+                (unsigned int)online);
+    } else {
+        kprintln("sched: per-cpu locks FAIL (lock alias or cpu id mismatch)");
+    }
+
+    /* 每 CPU runqueue 位图现场：-smp 4 时应看到 cpu0..cpu3 四行。 */
+    for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
+        if (!per_cpu[c].online) continue;
+        kprintf("sched: runqueue cpu%u mask=0x%x\n",
+                (unsigned int)c, (unsigned int)per_cpu[c].runq_mask);
+    }
+}
+
 void sched_start(void)
 {
+    /* 锁拆分自检：确认每 CPU runqueue 锁/位图独立、顺序可获取。 */
+    sched_locks_selftest();
+
     /* 优先级/aging 自检线程必须在选第一个进程之前入队（全部固定在 BSP）。 */
     sched_selftest_start();
 

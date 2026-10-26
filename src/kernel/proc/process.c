@@ -506,6 +506,11 @@ void proc_block(unsigned int chan)
     p->wait_chan = chan;
     p->state = PROC_BLOCKED;
 
+    /* 阻塞进程从本 CPU runqueue 摘掉：wake_pending 的补投路径只往一个
+     * CPU 入队，如果这里留下旧位图位，补投后同一个进程会同时出现在两颗
+     * CPU 的队列里（共享内核栈 → 并发执行）。 */
+    sched_dequeue(p);
+
     if (!p->slept) {
         p->slept = true;
         kprintf("proc: pid %u (%s) went to sleep on %p\n",

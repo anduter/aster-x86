@@ -7,8 +7,9 @@
  *   - 重定向表项 0x10 + 2*n：低 32 位含 vector/delivery/trigger/mask，
  *     高 32 位 24..31 是目标 LAPIC ID。
  *
- * 当前策略：初始化并打印信息，路由函数先只做“掩码状态下的自检”，
- * 传统 IRQ 继续走 8259 PIC；等每 CPU 调度稳定后再逐条迁移。
+ * 策略：初始化并打印信息；路由函数供 irq.c 逐条迁移传统 IRQ 使用，
+ * IRQ->GSI 的映射来自 MADT Interrupt Source Override（PIT 是 IRQ0->GSI2）。
+ * 迁移失败的单条 IRQ 保留 8259 PIC 回退。
  * ============================================================================= */
 #include "ioapic.h"
 #include "madt.h"
@@ -94,7 +95,7 @@ int ioapic_present(void) { return ioapic_ok ? 1 : 0; }
 uint32_t ioapic_gsi_count(void) { return ioapic_entries; }
 
 int ioapic_route(uint32_t gsi, uint32_t apic_id, uint8_t vector,
-                 bool masked, bool level)
+                 bool masked, bool level, bool active_low)
 {
     uint32_t reg;
     uint32_t low = 0;
@@ -105,6 +106,7 @@ int ioapic_route(uint32_t gsi, uint32_t apic_id, uint8_t vector,
     low = (uint32_t)vector;                    /* vector 0..7 */
     low |= (0U << 8);                          /* delivery: fixed */
     low |= (0U << 11);                         /* dest mode: physical */
+    if (active_low) low |= (1U << 13);         /* polarity: active low */
     if (level) low |= (1U << 15);              /* trigger: level */
     if (masked) low |= (1U << 16);
 
@@ -131,6 +133,18 @@ int ioapic_mask(uint32_t gsi, bool masked)
     if (masked) low |= (1U << 16);
     else        low &= ~(1U << 16);
     io_write(reg, low);
+    spin_unlock_irqrestore(&ioapic_lock, flags);
+    return E_OK;
+}
+
+int ioapic_eoi(uint8_t vector)
+{
+    uint32_t flags;
+
+    if (!ioapic_ok) return E_NOENT;
+
+    flags = spin_lock_irqsave(&ioapic_lock);
+    io_write(0x40U, (uint32_t)vector);         /* IOAPIC EOI: 写回中断向量 */
     spin_unlock_irqrestore(&ioapic_lock, flags);
     return E_OK;
 }

@@ -71,6 +71,9 @@ int irq_unmask(unsigned int irq);
 
 /* 把 IRQ 从 8259 迁到 IOAPIC（目标 CPU 的 LAPIC），成功返回 0 */
 int irq_migrate_to_ioapic(unsigned int irq, unsigned int apic_id);
+/* 把所有已注册处理函数的传统 IRQ 迁到 IOAPIC（跳过级联 IRQ2），
+ * 返回成功条数；失败的单条保留 PIC 回退。 */
+int irq_migrate_all_to_ioapic(void);
 int irq_is_ioapic_routed(unsigned int irq);
 
 /* 统计与命名（供 shell / 日志） */

@@ -19,6 +19,8 @@
 
 /* 哪些 IRQ 已经改由 IOAPIC 投递（EOI 要发给 LAPIC 而不是 8259） */
 static uint32_t ioapic_routed;
+/* 其中哪些是电平触发（LAPIC EOI 之后还要写 IOAPIC EOI）。 */
+static uint32_t ioapic_level;
 
 #define LAPIC_EOI_OFFSET 0xB0U
 
@@ -113,6 +115,10 @@ static void pic_set_mask(unsigned int irq, bool masked)
 int irq_mask(unsigned int irq)
 {
     if (irq >= IRQ_MAX) return E_INVAL;
+    /* 已迁到 IOAPIC 的线要同时改重定向表，否则只掩 PIC 不会真正静音。 */
+    if ((ioapic_routed & (1U << irq)) != 0U) {
+        (void)ioapic_mask(madt_irq_gsi(irq), true);
+    }
     pic_set_mask(irq, true);
     return E_OK;
 }
@@ -120,6 +126,9 @@ int irq_mask(unsigned int irq)
 int irq_unmask(unsigned int irq)
 {
     if (irq >= IRQ_MAX) return E_INVAL;
+    if ((ioapic_routed & (1U << irq)) != 0U) {
+        (void)ioapic_mask(madt_irq_gsi(irq), false);
+    }
     pic_set_mask(irq, false);
     return E_OK;
 }
@@ -168,26 +177,78 @@ unsigned int irq_count(unsigned int irq)
     return (irq < IRQ_MAX) ? slots[irq].count : 0U;
 }
 
-/* 把一条传统 IRQ 从 8259 迁到 IOAPIC（边沿触发、固定投递）：
- * 先屏蔽 PIC 线，成功编程 IOAPIC 后再取消屏蔽，避免两套同时投递。 */
+/* 把一条传统 IRQ 从 8259 迁到 IOAPIC：
+ *   - IRQ -> GSI 走 MADT Interrupt Source Override（QEMU 的 PIT 是 IRQ0->GSI2）；
+ *   - 触发方式/极性按 override flags 解释（0 = ISA 默认：边沿、高有效）；
+ *   - 先屏蔽 PIC 线，IOAPIC 编程失败则取消屏蔽回滚到 PIC。 */
 int irq_migrate_to_ioapic(unsigned int irq, uint32_t apic_id)
 {
     uint8_t vector;
+    uint32_t gsi;
+    uint16_t flags;
+    bool level;
+    bool active_low;
 
     if (irq >= IRQ_MAX || !ioapic_present() || apic_base() == 0U) return E_INVAL;
 
     vector = (uint8_t)(32U + irq);
+    gsi = madt_irq_gsi(irq);
+    flags = madt_irq_flags(irq);
+
+    /* ACPI flags: bits0..1 polarity (0=bus,1=high,3=low)，
+     *             bits2..3 trigger  (0=bus,1=edge,3=level)。 */
+    level      = (((flags >> 2) & 0x3U) == 0x3U);
+    active_low = ((flags & 0x3U) == 0x3U);
 
     pic_set_mask(irq, true);                 /* 1. 关掉 PIC 这一路 */
-    if (ioapic_route(irq, apic_id, vector, false, false) != E_OK) {
+    if (ioapic_route(gsi, apic_id, vector, false, level, active_low) != E_OK) {
         pic_set_mask(irq, false);            /* 回滚 */
         return E_INVAL;
     }
 
     ioapic_routed |= (1U << irq);
-    kprintf("ioapic: irq%u -> apic %u vector=0x%x (PIC masked, LAPIC EOI)\n",
-            irq, (unsigned int)apic_id, (unsigned int)vector);
+    if (level) ioapic_level |= (1U << irq);
+    else       ioapic_level &= ~(1U << irq);
+    kprintf("ioapic: irq%u -> gsi%u apic %u vector=0x%x %s%s(PIC masked, LAPIC EOI)\n",
+            irq, (unsigned int)gsi, (unsigned int)apic_id, (unsigned int)vector,
+            level ? "level " : "edge ", active_low ? "active-low " : "");
     return E_OK;
+}
+
+/* 把已注册处理函数的传统 IRQ 全部迁到 IOAPIC，目标默认 BSP。
+ * 跳过 IRQ2：8259 级联线在 IOAPIC 模式下就是 GSI2（PIT 的 override 目标），
+ * 不能当作“IRQ2 设备”路由。任何一条失败只影响该条（保留 PIC 回退），
+ * 返回成功迁移的条数。 */
+int irq_migrate_all_to_ioapic(void)
+{
+    uint32_t routed = 0;
+    uint32_t needed = 0;
+    uint32_t bsp = apic_id_from_cpuid();
+
+    if (!ioapic_present() || apic_base() == 0U) {
+        kprintln("ioapic: not available, legacy IRQs stay on PIC");
+        return 0;
+    }
+
+    for (unsigned int irq = 0; irq < IRQ_MAX; irq++) {
+        if (irq == 2U) continue;                 /* cascade: not a device GSI */
+        if (slots[irq].handler == 0) continue;
+        needed++;
+        if ((ioapic_routed & (1U << irq)) != 0U) { routed++; continue; }
+
+        if (irq_migrate_to_ioapic(irq, bsp) == E_OK) {
+            routed++;
+        } else {
+            kprintf("ioapic: irq%u stays on PIC (fallback)\n", irq);
+        }
+    }
+
+    /* 只有全部设备都走 IOAPIC 时才掩掉 PIC 级联线；否则保留从片回退路径。 */
+    if (routed > 0U && routed == needed) pic_set_mask(2U, true);
+
+    kprintf("ioapic: legacy IRQ routing done (%u irq(s) via IOAPIC, PIC fallback armed)\n",
+            (unsigned int)routed);
+    return (int)routed;
 }
 
 int irq_is_ioapic_routed(unsigned int irq)
@@ -296,11 +357,14 @@ static void timer_handler(void *arg)
      * 全局 ticks 继续供 uptime/soak 使用，语义不受影响。 */
     this_cpu()->ticks++;
 
-    /* 启动 2 秒后打印一次两核的 tick，用于验证 AP 定时器已校准到 ~100Hz */
+    /* 启动 2 秒后打印每颗 CPU 的 tick，用于验证所有 AP 定时器都已校准到
+     * ~100Hz（-smp 4 时四颗核都要有数）。 */
     if (ticks == 200U && smp_cpu_count > 1U) {
-        kprintf("smp: tick check after 2s bsp=%u ap=%u\n",
-                per_cpu[0].ticks,
-                per_cpu[1].ticks);
+        kprintf("smp: tick check after 2s bsp=%u ap=%u ap2=%u ap3=%u (online=%u)\n",
+                per_cpu[0].ticks, per_cpu[1].ticks,
+                per_cpu[2].online ? per_cpu[2].ticks : 0U,
+                per_cpu[3].online ? per_cpu[3].ticks : 0U,
+                (unsigned int)smp_cpu_count);
     }
 
     /* 浸泡测试：每 60 秒往串口打一行运行状态（只走串口，不刷屏幕）。
@@ -515,8 +579,12 @@ void irq_dispatch(interrupt_frame_t *f)
     }
 
     /* EOI：从片上的中断要两个 PIC 都通知 */
-    /* EOI：IOAPIC 投递的中断走 LAPIC EOI；其余走 8259（从片要两个都通知） */
+    /* EOI：IOAPIC 投递的中断走 LAPIC EOI；电平触发还要给 IOAPIC 写 EOI，
+     * 否则电平线保持有效会立刻重触发。其余走 8259（从片要两个都通知）。 */
     if ((ioapic_routed & (1U << irq)) != 0U) {
+        if ((ioapic_level & (1U << irq)) != 0U) {
+            (void)ioapic_eoi((uint8_t)f->vec);
+        }
         lapic_send_eoi();
     } else {
         if (irq >= 8U) {
