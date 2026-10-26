@@ -124,11 +124,15 @@ $buildArgs = @(
     '-TimeoutSec', "$TimeoutSec", '-Keys', $keys
 )
 Write-Host ("[audit-syscall] suite={0} build-root={1}" -f $tag, $BuildRoot) -ForegroundColor Cyan
-& powershell @buildArgs
+# 把 build.ps1 的控制台输出也落到文件：-Suite full 的 225 项结论在 build 输出里，
+# 不在串口里（串口只有内核日志）。
+$buildLog = Join-Path $logDir ("build-{0}.log" -f $tag)
+& powershell @buildArgs *> $buildLog
 $buildExit = $LASTEXITCODE
 
-if (-not (Test-Path $serial)) { throw "串口日志不存在：$serial（构建/启动失败？）" }
+if (-not (Test-Path $serial)) { throw "串口日志不存在：$serial（构建/启动失败？见 $buildLog）" }
 $out = Get-Content $serial -Raw
+$buildOut = if (Test-Path $buildLog) { Get-Content $buildLog -Raw } else { '' }
 
 # ---- 断言 ----
 $fail = 0
@@ -142,9 +146,9 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
 }
 
 if ($Suite -eq 'full') {
-    $pass = ($out -match '=== TEST PASS \(\d+/\d+\)') -and ($buildExit -eq 0)
+    $pass = ($buildExit -eq 0) -and ($buildOut -match '=== TEST PASS \(\d+/\d+\)')
     Check '标准 225 项回归' $pass ("(build exit=$buildExit)")
-    $dump = @($out -split "`r?`n" | Where-Object { $_ -match '\[FAIL\]' -or $_ -match 'TEST (PASS|FAIL)' })
+    $dump = @($buildOut -split "`r?`n" | Where-Object { $_ -match '\[FAIL\]' -or $_ -match '=== TEST (PASS|FAIL)' })
     foreach ($d in $dump) { Write-Host ("    " + $d) }
 } else {
     $sysLines = @([regex]::Matches($out, 'sys: nr=(\d+) a=(\d+) b=(\d+) c=(\d+) ret=(-?\d+)') |
