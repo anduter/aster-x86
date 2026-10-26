@@ -8,6 +8,7 @@
 #include "include/kernel.h"
 #include "proc_syscall.h"
 #include "proc.h"
+#include "proc_sec.h"
 #include "trap/interrupt.h"
 #include "trap/syscall.h"
 #include "trap/syscall_internal.h"
@@ -74,7 +75,9 @@ int proc_syscall(interrupt_frame_t *f)
             const proc_t *q = proc_at(i);
             if (q != 0 && q->pid == f->ebx && q->state != PROC_FREE) { t = (proc_t *)q; break; }
         }
-        if (t == 0) {
+        /* audit-syscall P0：按 pid 查表就发信号会让普通用户 kill root/别的
+         * 用户进程。只允许 root、自己、或同一 uid（真实/生效/保存）的目标。 */
+        if (t == 0 || !proc_can_signal(proc_current(), t)) {
             ret = -1;
         } else {
             proc_send_signal(t, (int)f->ecx);

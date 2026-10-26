@@ -1,5 +1,8 @@
 #include "proc.h"
 #include "proc_internal.h"
+#include "proc_slot.h"
+#include "proc_sync.h"
+#include "proc_sec.h"
 #include "include/proc.h"
 #include "include/userland.h"
 #include "include/kernel.h"
@@ -23,6 +26,51 @@ proc_t  proc_table[PROC_MAX];
 
 static uint32_t next_pid = 1;
 static char proc_roots[PROC_MAX][192];
+
+/* 进程槽位分配/回收的锁（audit-smp）：
+ * proc_spawn() 与 proc_fork() 会在不同 CPU 上并发执行。旧的“无锁扫描
+ * FREE 槽位 + next_pid++”在 SMP 下会让两个进程落到同一个 proc_t
+ * （同一内核栈/页目录被覆盖）或拿到同一个 pid。扫描、pid 分配、占位
+ * 必须在同一临界区里完成；回收时 memset 也走这把锁，避免 allocator
+ * 看到 state 已清零但其余字段还在的槽位。 */
+static spinlock_t proc_slot_lock = SPINLOCK_INIT;
+
+proc_t *proc_slot_alloc(void)
+{
+    uint32_t flags = spin_lock_irqsave(&proc_slot_lock);
+    proc_t *p = 0;
+
+    for (uint32_t i = 0; i < PROC_MAX; i++) {
+        if (proc_table[i].state == PROC_FREE) {
+            p = &proc_table[i];
+            break;
+        }
+    }
+    if (p != 0) {
+        if (next_pid == 0U) next_pid = 1U;      /* pid 0 = 无效 */
+        p->pid = next_pid++;
+        p->state = PROC_READY;                  /* 占位：其它 allocator 立刻跳过 */
+    }
+    spin_unlock_irqrestore(&proc_slot_lock, flags);
+    return p;
+}
+
+void proc_slot_discard(proc_t *p)
+{
+    /* 与 clear 相同的 memset，但语义不同：discard 用于“已占位、还没入队”的
+     * 失败路径，clear 用于 proc_reap（此时还必须先 rq_unlink）。 */
+    proc_slot_clear(p);
+}
+
+void proc_slot_clear(proc_t *p)
+{
+    uint32_t flags;
+
+    if (p == 0) return;
+    flags = spin_lock_irqsave(&proc_slot_lock);
+    memset(p, 0, sizeof(*p));
+    spin_unlock_irqrestore(&proc_slot_lock, flags);
+}
 
 /* 用户栈/堆/蹦床页 ASLR：每个进程在各自区域内选择随机地址。 */
 static uint32_t aslr_state;
@@ -121,19 +169,17 @@ proc_t *proc_spawn(const char *program_name)
         return 0;
     }
 
-    for (uint32_t i = 0; i < PROC_MAX; i++) {
-        if (proc_table[i].state == PROC_FREE) {
-            p = &proc_table[i];
-            break;
-        }
-    }
+    /* 无锁扫描 FREE 槽位在 SMP 下会让两个 spawn 选中同一个槽位；槽位/pid
+     * 的分配统一走 proc_slot_alloc()（内部持 proc_slot_lock）。 */
+    p = proc_slot_alloc();
     if (p == 0) return 0;           /* 进程表满 */
 
     void *stack = malloc(PROC_STACK_SIZE);
-    if (stack == 0) return 0;
+    if (stack == 0) {
+        proc_slot_discard(p);
+        return 0;
+    }
 
-    p->pid        = next_pid++;
-    p->state      = PROC_READY;
     p->name       = prog->name;
     p->entry      = prog->entry;
     p->cpu_pin    = -1;             /* 默认允许在任意 CPU 上运行 */
@@ -144,7 +190,7 @@ proc_t *proc_spawn(const char *program_name)
     p->page_dir   = vmm_new_dir();     /* 独立地址空间（内核映射共享） */
     if (p->page_dir == 0) {
         free(stack);
-        sched_clear_slot(p);
+        proc_slot_discard(p);       /* 尚未入队，不需要 rq/sched 锁 */
         return 0;
     }
     /* 用户栈/堆/蹦床页 ASLR：只随机起始地址，边界与 guard 不变。 */
@@ -335,19 +381,17 @@ proc_t *proc_fork(struct interrupt_frame *f)
     if (parent == 0 || f == 0) return 0;
     if ((f->cs & 3U) != 3U) return 0;       /* 只支持用户态进程 fork */
 
-    for (uint32_t i = 0; i < PROC_MAX; i++) {
-        if (proc_table[i].state == PROC_FREE) {
-            child = &proc_table[i];
-            break;
-        }
-    }
+    /* 与 proc_spawn 相同：并发 fork 必须原子地拿槽位 + 分配 pid。
+     * 槽位在 proc_slot_alloc() 里已经置 state=READY（占位），这里不再写。 */
+    child = proc_slot_alloc();
     if (child == 0) return 0;
 
     stack = malloc(PROC_STACK_SIZE);
-    if (stack == 0) return 0;
+    if (stack == 0) {
+        proc_slot_discard(child);
+        return 0;
+    }
 
-    child->pid        = next_pid++;
-    child->state      = PROC_READY;
     child->name       = parent->name;
     child->entry      = fork_child_entry;
     child->stack_base = stack;
@@ -423,7 +467,7 @@ proc_t *proc_fork(struct interrupt_frame *f)
 
         if (child->page_dir != 0) vmm_destroy_dir((pde_t *)child->page_dir);
         free(stack);
-        sched_clear_slot(child);
+        proc_slot_discard(child);   /* 尚未入队，不占 runqueue */
         return 0;
     }
 
@@ -503,8 +547,18 @@ void proc_block(unsigned int chan)
     __asm__ volatile ("pushfl; popl %0" : "=r"(flags));
     __asm__ volatile ("cli");
 
-    p->wait_chan = chan;
-    p->state = PROC_BLOCKED;
+    /* 与 sched_wake() 串行化“读 wake latch + 置 BLOCKED”：
+     *
+     * 调用方都是“先检查条件（管道空/没有僵尸/无键按下），再 proc_block”。
+     * 如果唤醒方在两步之间到达，它看到的是 RUNNING —— 旧实现直接丢弃，
+     * 本线程随后永久睡眠（lost wakeup；waitpid、pipe_read、getchar 都有这个
+     * 窗口）。现在 sched_wake()/proc_wakeup() 对 RUNNING/READY 进程只置
+     * wake_pending，这里在 sched_lock 内先消费它：有 latch 就不睡，直接返回，
+     * 让调用方重新检查条件。 */
+    if (sched_block_begin(p, chan)) {
+        __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
+        return;
+    }
 
     /* 阻塞进程从本 CPU runqueue 摘掉：wake_pending 的补投路径只往一个
      * CPU 入队，如果这里留下旧位图位，补投后同一个进程会同时出现在两颗
@@ -538,6 +592,17 @@ void proc_block(unsigned int chan)
     p->state = PROC_RUNNING;
     p->wait_chan = 0;
 
+    /* 恢复 RUNNING 时必须重新挂回本 CPU 的 runqueue。
+     *
+     * 关键路径：proc_block() 在“没有别的 READY”时走 sti;hlt 分支，被唤醒后
+     * 是直接从“已 dequeue”状态恢复的；旧代码只清 wake_pending 就返回，
+     * 进程以 RUNNING 身份继续跑却不在任何 runq_mask 里。下一次时间片到期，
+     * sched_tick() 把它置 READY 后 sched_next() 永远选不到它 → 永久饿死
+     * （audit-smp 自检在 -smp 2 的 vmalloc 压测里稳定复现：worker 卡在
+     *  state=READY、bit 不在 0/1 任何位图里）。普通分支虽然仍带位，这里
+     * unlink+link 是幂等的，顺手把不变量统一成“RUNNING ⇒ 在队”。 */
+    sched_enqueue(p, smp_cpu_id());
+
     __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
 }
 
@@ -545,7 +610,14 @@ void proc_wakeup(unsigned int chan)
 {
     for (uint32_t i = 0; i < PROC_MAX; i++) {
         proc_t *p = &proc_table[i];
+
         if (p->state == PROC_BLOCKED && p->wait_chan == chan) {
+            sched_wake(p);
+        } else if (p->state == PROC_RUNNING) {
+            /* 该线程可能正处在“条件检查完、还没真正置 BLOCKED”的窗口里
+             * （proc_block 的 sched_lock 临界区之前）。这里也走 sched_wake：
+             * 它在锁内只给 RUNNING/READY 进程置 wake_pending，不会把正在
+             * 别的 CPU 上跑的进程搬走，但能保证这次唤醒不丢。 */
             sched_wake(p);
         }
     }
@@ -704,20 +776,72 @@ void proc_check_signals(struct interrupt_frame *f)
     proc_exit((int)(128U + sig));
 }
 
-/* SYS_SIGRETURN：从用户栈上的信号帧恢复现场 */
+/* SYS_SIGRETURN：从用户栈上的信号帧恢复现场。
+ *
+ * 安全边界（audit-syscall P0）：
+ *   - 帧在用户栈上，handler 可以随意改写，所以恢复前必须校验 cs/ss/eip/eflags；
+ *     旧实现直接 memcpy + iret，构造 cs=0x08、eip=内核地址或 EFLAGS.IOPL=3
+ *     就能从 ring3 提权到 ring0 / 获得 I/O 端口权限。
+ *   - 用 copy_from_user（#PF 修复表）读帧，而不是裸 memcpy：即使 sig_frame
+ *     指向的页被并发 unmap/mprotect，也只会返回 -1，不会内核态 oops。
+ *   - 先拷到内核临时帧、校验通过后再写回现场：非法帧不能污染 f。
+ */
+bool proc_sigframe_valid(const struct interrupt_frame *f)
+{
+    /* EFLAGS 允许位：CF(0) 保留(1) PF(2) AF(4) ZF(6) SF(7) TF(8) IF(9)
+     * DF(10) OF(11) AC(18) ID(21)。IOPL(12-13)/NT(14)/RF(16)/VM(17)/
+     * VIF(19)/VIP(20) 全部拒绝（VM86 是 ring0 提权面）。 */
+    const uint32_t user_eflags_mask = 0x00240FD7U;
+
+    if (f == 0) return false;
+    if (f->cs != 0x1BU) return false;             /* 用户代码段（RPL=3） */
+    if (f->ss != 0x23U) return false;             /* 用户数据段（RPL=3） */
+    if (f->eip >= 0xC0000000U) return false;      /* 非用户地址 */
+    if ((f->eflags & 0x2U) == 0U) return false;   /* EFLAGS.bit1 恒为 1 */
+    if ((f->eflags & ~user_eflags_mask) != 0U) return false;
+    return true;
+}
+
 int proc_sigreturn(struct interrupt_frame *f)
 {
     proc_t *p = proc_current();
+    struct interrupt_frame frame;
 
-    if (p == 0 || p->sig_frame == 0U) return -1;
+    if (p == 0 || f == 0 || p->sig_frame == 0U) return -1;
     if (p->sig_frame < USER_LAYOUT_STACK_GUARD_END) return -1;
-    if (p->sig_frame + (uint32_t)sizeof(*f) > p->user_stack_top) return -1;
+    if (p->sig_frame > p->user_stack_top ||
+        (uint32_t)sizeof(frame) > p->user_stack_top - p->sig_frame) {
+        return -1;
+    }
 
-    user_access_begin();
-    memcpy(f, (const void *)(uintptr_t)p->sig_frame, sizeof(*f));
-    user_access_end();
+    if (copy_from_user(&frame, (const void *)(uintptr_t)p->sig_frame,
+                       sizeof(frame)) != E_OK) {
+        return -1;                    /* 帧页被 unmap/只读：拒绝，绝不 oops */
+    }
+    if (!proc_sigframe_valid(&frame)) {
+        kprintf("proc: pid %u sigreturn rejected (cs=%x ss=%x eip=%p flags=%x)\n",
+                p->pid, (unsigned int)frame.cs, (unsigned int)frame.ss,
+                (void *)(uintptr_t)frame.eip, (unsigned int)frame.eflags);
+        return -1;
+    }
+
+    frame.eflags &= 0x00240FD7U;
+    frame.eflags |= 0x2U;
+    memcpy(f, &frame, sizeof(frame));
     p->sig_frame = 0U;
     return 0;
+}
+
+/* SYS_KILL 的权限判定：root / 自己 / 同一 uid（真实/生效/保存任一匹配）。 */
+bool proc_can_signal(const proc_t *from, const proc_t *to)
+{
+    if (to == 0) return false;
+    if (from == 0) return true;               /* 内核上下文 */
+    if (from == to) return true;
+    if (from->euid == 0U) return true;        /* root */
+    if (from->uid == to->uid || from->euid == to->uid) return true;
+    if (from->uid == to->suid || from->euid == to->suid) return true;
+    return false;
 }
 
 void proc_console_int(void)

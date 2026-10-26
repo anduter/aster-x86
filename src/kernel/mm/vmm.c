@@ -864,6 +864,14 @@ int vmm_cow_fault(uint32_t addr)
 }
 
 /* ==================== vmalloc ==================== */
+/* vmalloc 区是全局共享的内核虚拟区间（所有进程的 PDPT[3] 指向同一份页表），
+ * vm_bitmap/映射/释放因此是跨 CPU 共享状态。旧实现完全无锁：两颗 CPU 同时
+ * vmalloc 会从 vm_find_free() 拿到同一段 start_page，各自把不同的物理页映射
+ * 到同一个虚拟地址（后者覆盖前者的 PTE），随后两次 vfree 还会重复释放/清位图，
+ * 表现为块头校验失败、PMM double free、以及两个调用者互相踩数据。
+ * audit-smp 用两个内核线程并发 vmalloc/vfree 复现（audit: mm vmalloc concurrent）。 */
+static spinlock_t vm_lock = SPINLOCK_INIT;
+
 static int vm_find_free(size_t count)
 {
     size_t found = 0;
@@ -883,14 +891,26 @@ static int vm_find_free(size_t count)
 
 void* vmalloc(size_t size)
 {
+    size_t need;
+    size_t pages;
+    int start_page;
+    uintptr_t virt;
+    uint32_t flags;
+    vblock_t* blk;
+
     if (size == 0) return 0;
 
-    size_t need  = size + sizeof(vblock_t);
-    size_t pages = (need + 0xFFF) >> PAGE_SHIFT;
-    int start_page = vm_find_free(pages);
-    if (start_page < 0) return 0;
+    need  = size + sizeof(vblock_t);
+    pages = (need + 0xFFF) >> PAGE_SHIFT;
 
-    uintptr_t virt = VMALLOC_BASE + ((uintptr_t)start_page << PAGE_SHIFT);
+    flags = spin_lock_irqsave(&vm_lock);
+    start_page = vm_find_free(pages);
+    if (start_page < 0) {
+        spin_unlock_irqrestore(&vm_lock, flags);
+        return 0;
+    }
+
+    virt = VMALLOC_BASE + ((uintptr_t)start_page << PAGE_SHIFT);
 
     for (size_t i = 0; i < pages; i++) {
         void* phys = alloc_page();
@@ -901,12 +921,13 @@ void* vmalloc(size_t size)
                 if (p) free_page((void*)p);
                 vmm_unmap_page(v);
             }
+            spin_unlock_irqrestore(&vm_lock, flags);
             return 0;
         }
         vmm_map_page(virt + (i << PAGE_SHIFT), (uintptr_t)phys, PTE_PRESENT | PTE_WRITE);
     }
 
-    vblock_t* blk = (vblock_t*)virt;
+    blk = (vblock_t*)virt;
     blk->magic    = VBLOCK_MAGIC;
     blk->pages    = (uint32_t)pages;
     blk->size     = (uint32_t)size;
@@ -915,38 +936,54 @@ void* vmalloc(size_t size)
     for (size_t i = 0; i < pages; i++) {
         vm_bitmap[(start_page + i) >> 3] |= (1 << ((start_page + i) & 7));
     }
+    spin_unlock_irqrestore(&vm_lock, flags);
 
     return (void*)(virt + sizeof(vblock_t));
 }
 
 void vfree(void* addr)
 {
+    uintptr_t ptr;
+    vblock_t* blk;
+    uintptr_t virt;
+    size_t start_page;
+    size_t pages;
+    const char *warn = 0;
+    uintptr_t warn_addr = 0;
+    uint32_t flags;
+
     if (!addr) return;
 
-    uintptr_t ptr = (uintptr_t)addr;
+    ptr = (uintptr_t)addr;
+    flags = spin_lock_irqsave(&vm_lock);
+
     if (ptr < (uintptr_t)VMALLOC_BASE + sizeof(vblock_t)) {
-        vmm_warn("vfree on a non-vmalloc pointer", ptr);
-        return;
+        warn = "vfree on a non-vmalloc pointer";
+        warn_addr = ptr;
+        goto out;
     }
 
-    vblock_t* blk = (vblock_t*)(ptr - sizeof(vblock_t));
+    blk = (vblock_t*)(ptr - sizeof(vblock_t));
 
     if (blk->magic != VBLOCK_MAGIC || blk->checksum != vm_checksum(blk)) {
-        vmm_warn("vfree on a corrupt block header", (uintptr_t)blk);
-        return;
+        warn = "vfree on a corrupt block header";
+        warn_addr = (uintptr_t)blk;
+        goto out;
     }
 
-    uintptr_t virt = (uintptr_t)blk;
-    size_t start_page = (virt - VMALLOC_BASE) >> PAGE_SHIFT;
-    size_t pages = blk->pages;
+    virt = (uintptr_t)blk;
+    start_page = (virt - VMALLOC_BASE) >> PAGE_SHIFT;
+    pages = blk->pages;
 
     if (start_page + pages > vm_total_pages) {
-        vmm_warn("vfree block out of vmalloc range", virt);
-        return;
+        warn = "vfree block out of vmalloc range";
+        warn_addr = virt;
+        goto out;
     }
     if (!(vm_bitmap[start_page >> 3] & (1 << (start_page & 7)))) {
-        vmm_warn("vfree double free", virt);
-        return;
+        warn = "vfree double free";
+        warn_addr = virt;
+        goto out;
     }
 
     blk->magic = 0;
@@ -959,4 +996,8 @@ void vfree(void* addr)
         vmm_unmap_page(v);
         vm_bitmap[(start_page + i) >> 3] &= ~(1 << ((start_page + i) & 7));
     }
+
+out:
+    spin_unlock_irqrestore(&vm_lock, flags);
+    if (warn != 0) vmm_warn(warn, warn_addr);
 }

@@ -20,6 +20,10 @@
  * ============================================================================= */
 #include "proc.h"
 #include "proc_internal.h"
+#include "proc_slot.h"
+#include "proc_sync.h"
+#include "proc_sec.h"
+#include "audit_smp.h"
 #include "include/proc.h"
 #include "include/kernel.h"
 #include "include/mm.h"           /* vmm_kernel_dir/vmm_current_dir：idle CR3 断言 */
@@ -344,13 +348,16 @@ void sched_wake(proc_t *p)
     rq_lock_all(&rq_flags);
     flags = spin_lock_irqsave(&sched_lock);
     prio_default_locked(p);
-    if (p->state != PROC_ZOMBIE && p->state != PROC_RUNNING) {
+    if (p->state == PROC_FREE || p->state == PROC_ZOMBIE) {
+        /* 已回收/正在退出：绝不能把空闲槽位改成 READY 再入队
+         * （proc_wakeup 的无锁预检查可能刚好在回收窗口里看到旧状态）。 */
+        p->wake_pending = false;
+    } else if (p->state == PROC_BLOCKED) {
         /* 目标还停在本 CPU 上，或已经 current=next 但内核栈还没切完
          * （proc_in_switch）：都不能现在入队，否则另一颗 CPU 会拿着同一份
          * 内核栈/esp 并发执行。记 pending，等安全点由
          * sched_deliver_pending() 补投。 */
-        if (p->state == PROC_BLOCKED &&
-            (proc_still_on_cpu(p) || proc_in_switch(p))) {
+        if (proc_still_on_cpu(p) || proc_in_switch(p)) {
             p->wake_pending = true;
         } else {
             p->state = PROC_READY;
@@ -358,11 +365,51 @@ void sched_wake(proc_t *p)
             rq_link_locked(cpu, p);
             enqueued = true;
         }
+    } else {
+        /* READY/RUNNING：进程已经可运行（或正在别的 CPU 上跑）。这里只记
+         * 一个 wake latch，交给它的下一次 proc_block() 在锁内消费。
+         *
+         * 不能像旧实现那样直接置 READY 再“从所有队列摘掉、重新入队”：
+         * 那会把正在别的 CPU 上运行的进程迁移到本 CPU —— 与 sched_tick 的
+         * “先把 cur 置 READY 再选”窗口叠加时，同一份内核栈可能在两颗 CPU
+         * 上同时执行。latch 对已经 READY 的进程等价（它本来就会跑），对
+         * RUNNING 的进程则把“检查条件之后、真正睡眠之前”到达的唤醒保存
+         * 下来，消除 lost wakeup。 */
+        p->wake_pending = true;
     }
     spin_unlock_irqrestore(&sched_lock, flags);
     rq_unlock_all(rq_flags);
 
     if (enqueued && cpu != smp_cpu_id()) sched_kick(cpu);
+}
+
+/* proc_block() 的“检查 latch + 置 BLOCKED”临界区。sched_lock 是 sched.c 的
+ * 私有锁，process.c 通过这个入口完成与 sched_wake() 的串行化；返回 true 表示
+ * 已有唤醒 pending（调用方不要睡，重新检查条件即可）。调用方必须已关中断。 */
+bool sched_block_begin(proc_t *p, unsigned int chan)
+{
+    uint32_t flags = spin_lock_irqsave(&sched_lock);
+    bool woke = false;
+
+    if (p->wake_pending) {
+        p->wake_pending = false;
+        woke = true;
+    } else {
+        p->wait_chan = chan;
+        p->state = PROC_BLOCKED;
+    }
+    spin_unlock_irqrestore(&sched_lock, flags);
+    return woke;
+}
+
+void sched_clear_wake(proc_t *p)
+{
+    uint32_t flags;
+
+    if (p == 0) return;
+    flags = spin_lock_irqsave(&sched_lock);
+    p->wake_pending = false;
+    spin_unlock_irqrestore(&sched_lock, flags);
 }
 
 /* 进程退出/回收时把它从所有 runqueue 摘掉 */
@@ -392,7 +439,8 @@ void sched_clear_slot(proc_t *p)
     rq_lock_all(&rq_flags);
     flags = spin_lock_irqsave(&sched_lock);
     rq_unlink_all_locked(p);
-    memset(p, 0, sizeof(*p));
+    proc_slot_clear(p);             /* memset 也在 slot 锁里：并发 allocator 不会
+                                     * 看到“state 已清零、其余字段半清零”的槽位 */
     spin_unlock_irqrestore(&sched_lock, flags);
     rq_unlock_all(rq_flags);
 }
@@ -616,6 +664,25 @@ void sched_tick(void)
     proc_t *cur = proc_current();
     proc_t *next;
 
+    /* audit-smp 诊断断言：RUNNING 进程必须仍挂在本 CPU 的 runqueue 位图里
+     * （sched_next 选中时不会摘位）。BLOCKED 的 current 是 proc_block 的
+     * “无活可跑、sti;hlt 等唤醒”窗口，那时它本来就已 dequeue，不算违规。
+     * 若 RUNNING 却不在位图里，时间片到期后它会被置 READY 但永远选不到，
+     * 表现为静默饿死；这里直接把现场钉住。 */
+    if (cur != 0 && cur >= proc_table && cur < proc_table + PROC_MAX &&
+        cur->state == PROC_RUNNING) {
+        uint32_t c = smp_cpu_id();
+
+        if (c < SMP_MAX_CPUS && (per_cpu[c].runq_mask & proc_bit(cur)) == 0U) {
+            kprintf("sched: RUNNING pid %u missing from cpu%u runq "
+                    "(state=%u mask=%x)\n", (unsigned int)cur->pid,
+                    (unsigned int)c, (unsigned int)cur->state,
+                    (unsigned int)per_cpu[c].runq_mask);
+            panic("sched: RUNNING pid %u not linked on cpu%u",
+                  (unsigned int)cur->pid, (unsigned int)c);
+        }
+    }
+
     /* AP 看门狗（只在 BSP tick 里跑）：每颗在线 AP 的 LAPIC tick 连续 ~3s
      * 不推进，说明它卡死在关中断/自旋/中断风暴里。此时 BSP 可能一切正常，
      * 现有 NMI watchdog 只看 timer_ticks+syscall_count，不会报警；这里用
@@ -768,6 +835,14 @@ void sched_start(void)
 {
     /* 锁拆分自检：确认每 CPU runqueue 锁/位图独立、顺序可获取。 */
     sched_locks_selftest();
+
+    /* 权限边界自检（sigreturn 帧 / kill uid / uaccess 窗口）：纯函数，不需要
+     * 调度器，放在选第一个进程之前跑，失败也不会被后续调度掩盖。 */
+    audit_priv_selftest();
+
+    /* SMP 并发/竞态自检：必须在选第一个进程之前注册并放置测试线程
+     * （否则“刚 spawn 就被调度”会和写优先级/亲和形成第二个竞态）。 */
+    audit_smp_selftest_start();
 
     /* 优先级/aging 自检线程必须在选第一个进程之前入队（全部固定在 BSP）。 */
     sched_selftest_start();
