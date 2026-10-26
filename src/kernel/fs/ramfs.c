@@ -231,6 +231,12 @@ static fs_volume_t *path_volume(const char *path, const char **rel)
     char name[FS_DRIVE_MAX];
     uint32_t n;
 
+    /* 所有调用方都用 rel 继续解析；先在入口清空，保证任何提前返回
+     * （空路径 / ":/x" / 盘符过长 / 未知卷）都不会把未初始化指针交给
+     * resolve_in_volume() 去解引用（fs_listdir 曾因此读到栈上垃圾指针，
+     * 栈内容不合适时会在内核态缺页/oops）。 */
+    if (rel != 0) *rel = "";
+
     if (path == 0) return 0;
     if (path[0] == '\0') return 0;              /* 模块层 */
 
@@ -1399,6 +1405,7 @@ static int listdir_impl(const char *path, uint32_t index,
     }
 
     vol = path_volume(path, &rel);
+    if (vol == 0) return E_NOENT;
     {
         int rr = resolve_in_volume(vol, rel, c, 1, 0, rpath, sizeof(rpath));
         if (rr != E_OK) return rr;
@@ -2095,6 +2102,13 @@ static int mount_disk_fail(void)
     memset(nodes, 0, sizeof(nodes));
     memset(volumes, 0, sizeof(volumes));
     memset(handles, 0, sizeof(handles));
+
+    /* 必须保留 fs_init() 的"默认卷"不变量：清成完全空表后，启动流程
+     * 再也没有 system:，安装器无法写 /bin，整机只能降级到内核 shell，
+     * 随后 fs_sync 还会把"只有 data 卷"的半残树覆盖回镜像。
+     * 损坏镜像应表现为"挂载失败 + 空但可用的默认卷"，由上层格式化/重建。 */
+    fs_limit_current = FS_FILE_MAX;
+    (void)fs_mount_impl("system");
     return E_INVAL;
 }
 
@@ -2161,6 +2175,7 @@ int fs_mount_disk(const char *blk_name)
     /* 几何字段必须自洽且落在设备范围内。否则按 data_lba 读会越界（块层会拒绝），
      * 但那时内存树已经清空、节点建了一半；先在"还没动内存状态"时拒绝。 */
     if (blk->sector_count < min_data_lba + 1U ||
+        super.inode_count == 0U ||
         super.inode_lba != DISK_INODE_LBA ||
         super.inode_lba + inode_sect > blk->sector_count ||
         super.data_lba < min_data_lba ||
@@ -2231,8 +2246,13 @@ int fs_mount_disk(const char *blk_name)
         if (in->used == 0U) continue;
 
         /* 损坏/越界 inode：size 超过当前限额、或数据区超出设备，整次挂载失败。
-         * 不做这个检查的话，按 size 往 n->data（FS_FILE_MAX）里 memcpy 会溢出。 */
-        if (in->used > 1U || in->type > (uint32_t)FS_TYPE_LINK) {
+         * 不做这个检查的话，按 size 往 n->data（FS_FILE_MAX）里 memcpy 会溢出。
+         * 类型必须落在 FILE..LINK：type==0 的记录虽然 used=1，node_alloc() 却会把
+         * 它当成空闲槽复用；如果它已经挂在父目录里，link_child() 会把
+         * next_sibling 指回自己，目录链变成环 -> 安装/fsck/fs_sync 永久卡死。 */
+        if (in->used > 1U ||
+            in->type < (uint32_t)FS_TYPE_FILE ||
+            in->type > (uint32_t)FS_TYPE_LINK) {
             (void)mount_disk_fail();
             return E_INVAL;
         }
@@ -2323,15 +2343,29 @@ int fs_mount_disk(const char *blk_name)
         by_index[i] = n;
 
         if (in->parent == 0xFFFFFFFFU) {
-            /* 卷根：用盘上记录的卷号重建卷表 */
+            /* 卷根：用盘上记录的卷号重建卷表。
+             * 卷名同样是不可信输入：空名/带 ':'、'/'/"."/".." 或与已有卷
+             * 重名都会让 path_volume() 选错卷（启动安装器随后找不到
+             * system:，只能降级并覆盖镜像）。和 fs_mount() 用同一套规则拒绝。 */
+            char vname[FS_DRIVE_MAX];
+
             if (in->volume >= FS_MAX_VOLUMES || in->type != (uint32_t)FS_TYPE_DIR ||
                 volumes[in->volume].used) {
                 (void)mount_disk_fail();
                 return E_INVAL;
             }
+            memcpy(vname, super.volumes[in->volume], FS_DRIVE_MAX);
+            vname[FS_DRIVE_MAX - 1U] = '\0';
+            if (vname[0] == '\0' || strchr(vname, ':') != 0 ||
+                strchr(vname, '/') != 0 ||
+                strcmp(vname, ".") == 0 || strcmp(vname, "..") == 0 ||
+                volume_by_name(vname) != 0) {
+                kprintf("fs: XFS1 image has invalid volume name \"%s\"\n", vname);
+                (void)mount_disk_fail();
+                return E_INVAL;
+            }
             volumes[in->volume].used = true;
-            strncpy(volumes[in->volume].name, super.volumes[in->volume],
-                    FS_DRIVE_MAX - 1U);
+            strncpy(volumes[in->volume].name, vname, FS_DRIVE_MAX - 1U);
             volumes[in->volume].name[FS_DRIVE_MAX - 1U] = '\0';
             volumes[in->volume].root = n;
         } else if (in->parent < super.inode_count && by_index[in->parent] != 0 &&
@@ -2340,6 +2374,15 @@ int fs_mount_disk(const char *blk_name)
         } else {
             return mount_disk_fail();     /* 父节点不存在的孤儿：整次挂载失败 */
         }
+    }
+
+    /* 没有任何卷根 = 无法构成可用的文件系统：接受它会让启动流程在没有
+     * system: 的情况下继续跑（安装器失败、fs_sync 再把半残树写回盘）。
+     * 和坏 super/坏 inode 一样整次拒绝，并要求上层格式化/重建。 */
+    if (fs_volume_count() == 0U) {
+        kprintln("fs: XFS1 image has no volume root: rejected");
+        (void)mount_disk_fail();
+        return E_INVAL;
     }
 
     /* v6：磁盘上的 nlink 必须等于该 inode 的目录项数。镜像可能在上次 sync

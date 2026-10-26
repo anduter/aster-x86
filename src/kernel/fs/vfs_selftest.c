@@ -19,6 +19,9 @@
 #define SELFTEST_RAM_PATH "system:/vfs_self.txt"
 #define SELFTEST_FAT_PATH "fat:/SELFTEST.TXT"
 
+/* fs/fs_audit_selftest.c */
+void fs_audit_selftest(void);
+
 /* 错误路径自检用的临时路径（跑完都会删掉，不落盘） */
 #define EP_FULL_PATH  "system:/vfs_ep_full.txt"
 #define EP_SMALL_PATH "system:/vfs_ep_small.txt"
@@ -253,6 +256,9 @@ void fs_backend_selftest(void)
 
     /* 9. rename/move（单独文件，细节见 fs_rename_selftest.c） */
     fs_rename_selftest();
+
+    /* 10. 损坏镜像 / 路径边界 / 硬链接 nlink 审计回归 */
+    fs_audit_selftest();
 
     kprintln("fs: backend selftest ok");
 }

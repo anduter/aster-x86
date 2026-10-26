@@ -279,6 +279,7 @@ int fat16_mount(const char *blk_name, const char *drive)
     if (total_sectors == 0U) total_sectors = rd32(sb + 32);
 
     if (sector_size != 512U || sec_per_cluster == 0U ||
+        reserved == 0U ||
         fats == 0U || fat_sectors == 0U || root_entries == 0U) {
         return E_INVAL;
     }
@@ -294,6 +295,20 @@ int fat16_mount(const char *blk_name, const char *drive)
     if (clusters < 4085U || clusters > 65524U) {
         kprintf("fat16: not FAT16 (clusters=%u)\n", (unsigned int)clusters);
         return E_INVAL;
+    }
+
+    /* 第一份 FAT 必须覆盖 cluster 0..clusters+1 的表项（每项 2 字节）。
+     * 否则 fat_get() 会越过 FAT 区，把根目录/数据区当 FAT 读：簇链随机、
+     * 读到元数据扇区，读写路径都会得到不可信结果。 */
+    {
+        uint32_t need_bytes = (clusters + 2U) * 2U;
+        uint32_t need_secs = (need_bytes + sector_size - 1U) / sector_size;
+
+        if (fat_sectors < need_secs) {
+            kprintf("fat16: FAT too small (%u sectors, need %u)\n",
+                    (unsigned int)fat_sectors, (unsigned int)need_secs);
+            return E_INVAL;
+        }
     }
 
     /* 全部校验通过：这里才提交状态 */
@@ -488,6 +503,18 @@ int fat16_open(const char *rel, uint32_t flags)
             uint32_t old_chain = de.cluster_lo;
 
             if ((de.attr & 0x10U) != 0U) { handles[h].used = false; return -1; }
+
+            /* 同一目录项不能还有其他打开的句柄：截断会释放旧簇链，那些句柄
+             * 仍按旧的 first_cluster/size 读，会读到已被别的文件复用的簇
+             * （跨文件数据泄漏）。和 unlink 一样用 E_BUSY 拒绝。 */
+            for (int i = 0; i < FAT16_MAX_HANDLES; i++) {
+                if (i != h && handles[i].used &&
+                    handles[i].dir_lba == handles[h].dir_lba &&
+                    handles[i].dir_idx == handles[h].dir_idx) {
+                    handles[h].used = false;
+                    return -1;
+                }
+            }
             if (read_sector(handles[h].dir_lba, sec_buf) != 0) { handles[h].used = false; return -1; }
             wr16(sec_buf + handles[h].dir_idx * 32U + 26U, 0);
             wr32(sec_buf + handles[h].dir_idx * 32U + 28U, 0);
@@ -519,6 +546,15 @@ int fat16_open(const char *rel, uint32_t flags)
     if (r != 0) { handles[h].used = false; return -1; }
     if ((de.attr & 0x10U) != 0U) { handles[h].used = false; return -1; }
 
+    /* 非空文件的首簇必须在数据区里。目录项是磁盘上的不可信输入：
+     * cluster=0/1 会让 cluster_lba() 下溢到 FAT/根目录区，把元数据当文件内容
+     * 返回；>= cluster_count+2 则直接越界（块层拒绝，但读会误报 I/O 错误）。 */
+    if (de.size != 0U &&
+        (de.cluster_lo < 2U || de.cluster_lo >= fat.cluster_count + 2U)) {
+        handles[h].used = false;
+        return -1;
+    }
+
     memcpy(handles[h].name, de.name, 11);
     handles[h].first_cluster = de.cluster_lo;
     handles[h].cur_cluster = de.cluster_lo;
@@ -537,10 +573,18 @@ int fat16_read(int h, void *buf, uint32_t len)
     fh = &handles[h];
 
     while (done < len && fh->offset < fh->size) {
-        uint32_t cluster_off = fh->offset % (fat.sec_per_cluster * 512U);
-        uint32_t lba = cluster_lba(fh->cur_cluster) + cluster_off / 512U;
-        uint32_t within = fh->offset % 512U;
-        uint32_t n = 512U - within;
+        uint32_t cluster_off;
+        uint32_t lba;
+        uint32_t within;
+        uint32_t n;
+
+        /* 防御：任何时刻只读合法数据簇。损坏/过期的簇号不能进 cluster_lba()。 */
+        if (fh->cur_cluster < 2U || fh->cur_cluster >= fat.cluster_count + 2U) break;
+
+        cluster_off = fh->offset % (fat.sec_per_cluster * 512U);
+        lba = cluster_lba(fh->cur_cluster) + cluster_off / 512U;
+        within = fh->offset % 512U;
+        n = 512U - within;
 
         if (n > len - done) n = len - done;
         if (n > fh->size - fh->offset) n = fh->size - fh->offset;
@@ -553,7 +597,11 @@ int fat16_read(int h, void *buf, uint32_t len)
 
         if (fh->offset % (fat.sec_per_cluster * 512U) == 0U && fh->offset < fh->size) {
             uint16_t next = fat_get(fh->cur_cluster);
-            if (next < 2U) break;
+
+            /* 0/1 = 空闲/保留，>= cluster_count+2 = EOC(0xFFF8..)/坏簇(0xFFF7)/
+             * 越界簇号：都必须按"链结束"处理，只返回已读出的字节。
+             * 原实现只挡 <2，0xFFFF 会被当成下一个簇号，读越界后返回 -1。 */
+            if (next < 2U || next >= fat.cluster_count + 2U) break;
             fh->cur_cluster = next;
         }
     }

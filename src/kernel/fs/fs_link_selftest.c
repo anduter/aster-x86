@@ -76,7 +76,51 @@ static int read_expect(const char *path, const char *expect, uint32_t len)
 }
 
 /* v5 兼容：在空闲的 ram0 上写一个 v5 镜像，实际挂载它（证明旧布局可读），
- * 再从持久化盘恢复现场。v5 镜像下次 fs_sync 会写成 v6。 */
+ * 再从持久化盘恢复现场。v5 镜像下次 fs_sync 会写成 v6。
+ *
+ * 空镜像现在会因"没有卷根"被 mount 拒绝，所以手工写一个 v5 卷根，让兼容性
+ * 测试仍然覆盖 "108 字节 inode 记录 + 数据区 LBA 15" 的读取路径。 */
+typedef struct {
+    uint32_t used;
+    uint32_t type;
+    uint32_t parent;
+    uint32_t size;
+    uint32_t data_lba;
+    uint32_t volume;
+    uint32_t mtime;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    char     name[FS_NAME_MAX];
+    uint8_t  pad[3];
+} __attribute__((packed)) audit_inode_v5_t;
+
+_Static_assert(sizeof(audit_inode_v5_t) == 108, "v5 audit inode must be 108 bytes");
+
+static int write_v5_root(block_device_t *blk)
+{
+    uint8_t sec[BLK_SECTOR];
+    audit_inode_v5_t in;
+
+    if (blk == 0) return -1;
+    memset(&in, 0, sizeof(in));
+    in.used = 1U;
+    in.type = (uint32_t)FS_TYPE_DIR;
+    in.parent = 0xFFFFFFFFU;
+    in.mode = FS_MODE_DIR_DEFAULT;
+    strncpy(in.name, "system", FS_NAME_MAX - 1U);
+
+    /* v5 super：volumes[0] 在扇区偏移 44（magic 4 + 10 个 u32 字段） */
+    if (blk_read(blk, 0U, sec) != E_OK) return -1;
+    memset(sec + 44U, 0, FS_DRIVE_MAX);
+    memcpy(sec + 44U, "system", 6U);
+    if (blk_write(blk, 0U, sec) != E_OK) return -1;
+
+    memset(sec, 0, sizeof(sec));
+    memcpy(sec, &in, sizeof(in));
+    return (blk_write(blk, 1U, sec) == E_OK) ? 0 : -1;
+}
+
 static int v5_mount_compat(void)
 {
     const char *backing = fs_backing();
@@ -95,13 +139,17 @@ static int v5_mount_compat(void)
         kprintln("fs: xfs v5 format failed");
         return -1;
     }
+    if (write_v5_root(spare) != 0) {
+        kprintln("fs: xfs v5 root write failed");
+        return -1;
+    }
     if (fs_mount_disk("ram0") != E_OK) {
         kprintln("fs: xfs v5 mount FAILED");
         (void)fs_mount_disk(backing);
         return -1;
     }
-    if (fs_volume_count() != 0U) {
-        kprintln("fs: xfs v5 empty image has unexpected volumes");
+    if (fs_volume_count() != 1U) {
+        kprintln("fs: xfs v5 image volume root not restored");
         (void)fs_mount_disk(backing);
         return -1;
     }

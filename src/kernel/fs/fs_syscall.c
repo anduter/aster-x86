@@ -49,6 +49,28 @@ static void audit_deny(const char *what, const char *path)
  *   其它                -> 拼上当前进程的 cwd
  * （实现在 syscall_util.c 的 make_abs_path） */
 
+/* SYS_CHROOT 的路径 -> proc_t.cwd 复制。
+ * cwd 只有 192 字节，而用户路径可达 255 字节：旧实现的 strcpy 会写过
+ * cwd 覆盖 user_brk/fds/caps。超长时一个字节都不写，返回 E_INVAL。
+ * 做成非 static 以便 fs 审计自检直接用 canary 缓冲验证。 */
+static int fs_chroot_cwd_copy(char *dst, uint32_t dst_size, const char *path)
+{
+    uint32_t n;
+
+    if (dst == 0 || path == 0 || dst_size == 0U) return E_INVAL;
+    n = (uint32_t)strlen(path);
+    if (n + 1U > dst_size) return E_INVAL;
+    memcpy(dst, path, n + 1U);
+    return E_OK;
+}
+
+/* SYS_CHROOT 实际写 cwd 的入口（审计自检直接调用它）。 */
+int fs_chroot_set_cwd(proc_t *p, const char *path)
+{
+    if (p == 0) return E_INVAL;
+    return fs_chroot_cwd_copy(p->cwd, sizeof(p->cwd), path);
+}
+
 static int sys_open_user(uint32_t path_ptr, uint32_t flags)
 {
     char rel[256];
@@ -547,8 +569,11 @@ int fs_syscall(interrupt_frame_t *f)
             ret = -1;
             break;
         }
+        /* cwd 只有 192B：先按长度拒绝，绝不先改 root 再截断 cwd
+         * （两者不一致会被用来越过 chroot）。 */
+        if (strlen(path) + 1U > sizeof(p->cwd)) { ret = -1; break; }
         if (proc_root_set(p, path) != 0) { ret = -1; break; }
-        strcpy(p->cwd, path);
+        if (fs_chroot_set_cwd(p, path) != E_OK) { ret = -1; break; }
         ret = 0;
         break;
     }
@@ -561,22 +586,39 @@ int fs_syscall(interrupt_frame_t *f)
         (void)acct_audit_flush();
         break;
     case SYS_TIME: {
-        /* ebx=用户缓冲, ecx=长度：写入格式化的 RTC 时间 */
+        /* ebx=用户缓冲, ecx=长度：写入格式化的 RTC 时间。
+         * 旧实现完全不看 ecx，给 4B 缓冲也会写 20B（写穿用户缓冲）。 */
         char tbuf[24];
+        uint32_t max = f->ecx;
+        uint32_t ncopy;
         int n = rtc_format(rtc_now(), tbuf, sizeof(tbuf));
 
-        if (n <= 0) { ret = -1; break; }
-        ret = (copy_to_user((void *)(uintptr_t)f->ebx, tbuf, (uint32_t)n + 1U) == E_OK) ? 0 : -1;
+        if (n <= 0 || max == 0U) { ret = -1; break; }
+        ncopy = (uint32_t)n + 1U;
+        if (ncopy > max) {
+            ncopy = max;                /* 截断，但最后一个字节保持 NUL */
+            tbuf[ncopy - 1U] = '\0';
+        }
+        ret = (copy_to_user((void *)(uintptr_t)f->ebx, tbuf, ncopy) == E_OK) ? 0 : -1;
         break;
     }
     case SYS_FSCK: {
-        /* ebx=用户缓冲, ecx=长度：做一致性检查并返回错误数 */
+        /* ebx=用户缓冲, ecx=长度：做一致性检查并返回错误数。
+         * 坏用户指针必须返回 -1：旧实现忽略 copy_to_user 返回值，用户拿到
+         * "错误数"但缓冲根本没写（且可能写进内核地址）。 */
         char report[96];
-        int errs = fs_check(report, sizeof(report));
+        int errs;
 
-        if (f->ebx != 0U) {
-            (void)copy_to_user((void *)(uintptr_t)f->ebx, report,
-                               (uint32_t)strlen(report) + 1U);
+        if (f->ebx != 0U && !user_range_ok(f->ebx, sizeof(report))) {
+            ret = -1;
+            break;
+        }
+        errs = fs_check(report, sizeof(report));
+        if (f->ebx != 0U &&
+            copy_to_user((void *)(uintptr_t)f->ebx, report,
+                         (uint32_t)strlen(report) + 1U) != E_OK) {
+            ret = -1;
+            break;
         }
         ret = errs;
         break;
