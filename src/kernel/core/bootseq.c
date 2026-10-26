@@ -433,6 +433,11 @@ static void step_programs(void)
     /* 组件模型回归：只在测试构建里跑（会安装/卸载组件，生产启动不应做这些）。
      * 断言行由 build.ps1 收集；测试脚本会等 "pkg: selftest done" 再注入按键。 */
     if (boot_test_build()) {
+        /* TCP 健壮性必须在 proc 线程里跑：syscall 上下文是关中断的，timer_ticks
+         * 不走，RTO 永远等不到（曾直接触发 NMI watchdog panic）。 */
+        if (proc_spawn("tcptest") == 0) {
+            kprintln("proc: tcptest spawn failed");
+        }
         if (proc_spawn("pkgtest") == 0) {
             kprintln("proc: pkgtest spawn failed");
         }

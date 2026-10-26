@@ -429,25 +429,35 @@ if ($Test -or $Shot) {
 
     $tcpEcho = $null
     if ($Test) {
+        # 流式回显：阶段 4c 的大传输（16KB）需要"收多少回多少"，不能只读一次 64B。
+        # 每个连接循环 read -> write 直到对端 FIN（Read 返回 0）或总字节上限。
         $tcpEcho = Start-Job -ArgumentList $tcpLog, $EchoPort -ScriptBlock {
             param($log, $EchoPort)
             "listen" | Set-Content -Path $log -Encoding ASCII
             $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $EchoPort)
             try {
                 $l.Start()
-                $deadline = (Get-Date).AddSeconds(120)
+                $deadline = (Get-Date).AddSeconds(180)
                 $i = 0
                 while ((Get-Date) -lt $deadline -and $i -lt 8) {
-                    if (-not $l.Pending()) { Start-Sleep -Milliseconds 100; continue }
+                    if (-not $l.Pending()) { Start-Sleep -Milliseconds 50; continue }
                     $c = $l.AcceptTcpClient()
-                    $c.ReceiveTimeout = 2000
+                    $c.ReceiveTimeout = 1000   # 短连接（3B 回显）靠空闲超时收尾
                     "accept $i" | Add-Content -Path $log -Encoding ASCII
                     $s = $c.GetStream()
-                    $buf = New-Object byte[] 64
-                    $n = $s.Read($buf, 0, $buf.Length)
-                    "read $n" | Add-Content -Path $log -Encoding ASCII
-                    if ($n -gt 0) { $s.Write($buf, 0, $n); $s.Flush() }
-                    $c.Close()
+                    $buf = New-Object byte[] 1500
+                    $total = 0
+                    try {
+                        while ($total -lt 262144) {
+                            $n = $s.Read($buf, 0, $buf.Length)
+                            if ($n -le 0) { break }
+                            $s.Write($buf, 0, $n)
+                            $s.Flush()
+                            $total += $n
+                        }
+                    } catch { }
+                    "conn $i echoed $total" | Add-Content -Path $log -Encoding ASCII
+                    try { $c.Close() } catch { }
                     $i++
                 }
             } catch { "error $_" | Add-Content -Path $log -Encoding ASCII } finally { $l.Stop() }
@@ -805,6 +815,16 @@ if ($Test -or $Shot) {
             @{ Name = 'shell readlink';            Ok = ($out -match 'ushell: readlink ok') },
             @{ Name = 'shell lstat 报链接类型';    Ok = ($out -match 'ushell: lstat link type ok') },
             @{ Name = '用户态 link 回归通过';      Ok = ($out -match 'ushell: linktest PASS') }
+
+            # ---- TCP 健壮性（阶段 4c） ----
+            @{ Name = 'TCP 握手 SYN/SYN-ACK/ACK';  Ok = ($out -match 'net: tcp handshake ok \(SYN/SYN-ACK/ACK\)') },
+            @{ Name = 'TCP 乱序重组';              Ok = ($out -match 'net: tcp out-of-order reassembly ok') },
+            @{ Name = 'TCP 坏校验和丢弃';          Ok = ($out -match 'net: tcp checksum rejects corrupt ok') },
+            @{ Name = 'TCP RST 关闭连接';          Ok = ($out -match 'net: tcp RST closes connection ok') },
+            @{ Name = 'TCP 大传输 + 丢包重传';     Ok = ($out -match 'net: tcp large transfer ok \(16384 bytes, retrans=[1-9]\d*') },
+            @{ Name = 'TCP RTT/RTO 生效';          Ok = ($out -match 'net: tcp rto ok \(srtt=\d+ticks rto=\d+ticks\)') },
+            @{ Name = 'TCP FIN/TIME_WAIT';         Ok = ($out -match 'net: tcp FIN/TIME_WAIT ok') },
+            @{ Name = 'TCP 健壮性自检通过';        Ok = ($out -match 'net: tcp selftest PASS') }
         )
 
         T 'checks begin'

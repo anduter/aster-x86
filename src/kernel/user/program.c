@@ -12,6 +12,7 @@
 #include "include/apps.h"
 #include "include/userland.h"
 #include "include/pkg.h"
+#include "include/net.h"
 
 static program_t programs[PROG_MAX];
 static uint32_t  count;
@@ -68,6 +69,16 @@ static void prog_shell_entry(void)
     }
 }
 
+static void prog_tcptest_entry(void)
+{
+    /* 必须在 proc 线程里跑：syscall 上下文可能是关中断的，timer_ticks 不走，
+     * RTO/重传会永远等不到超时（曾经把 NMI watchdog 直接触发）。 */
+    if (net_tcp_robust_selftest() != 0) {
+        kprintln("net: tcp robust selftest failed");
+    }
+}
+
+
 void prog_init(void)
 {
     count = 0;
@@ -87,6 +98,7 @@ void prog_init(void)
     /* 组件模型：_pkgd 安装服务；pkgtest 是它的回归驱动（启动后自动跑一次） */
     prog_register("pkgd",      1, "component package service (_pkgd)", pkgd_entry);
     prog_register("pkgtest",   1, "component model regression (pkg)", pkg_selftest_entry);
+    prog_register("tcptest",   1, "TCP robustness regression (4c)", prog_tcptest_entry);
 
     /* heartbeat 是验证 AP 调度/计时器的探针，亲和到 AP；其余程序按负载放置。 */
     (void)prog_set_flags("heartbeat", PROG_F_PIN_AP);

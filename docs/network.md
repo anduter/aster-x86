@@ -201,3 +201,51 @@ powershell -File tools/net-probe.ps1 -ReuseLog -AllowDegraded -Log serial-a.log
 见仓库根目录的提交说明与 `logs-session-net.log` / `serial-net.log`。
 回归要求：连续两次 `tools\session-run.ps1 -Name net -Test` 均为
 `=== TEST PASS (97/97) ===`。
+
+## 阶段 4c：TCP 健壮性（`src/kernel/net/tcp.c`）
+
+旧实现只是"发 SYN / 发一次数据 / 等回显"的单次探测，没有状态机、没有 RTO、
+不能处理丢包/乱序。阶段 4c 新增一个独立的 TCP 客户端引擎，机制逐项可回归：
+
+| 机制 | 实现 |
+| --- | --- |
+| 序列号/确认号 | `snd_una` / `snd_nxt` / `rcv_nxt`；纯 ACK 不推进 `snd_nxt` |
+| MSS / 窗口 | MSS=536，通告窗口 2048（接收缓冲 2048） |
+| 校验和 | 伪首部 + 16 位反码和；坏校验和直接丢并计数（`bad_checksum`） |
+| RTT / RTO | RFC6298 简版：srtt/rttvar，RTO 钳在 10..200 ticks（100Hz → 100ms..2s） |
+| 重传 + 退避 | 超时重传，RTO 翻倍（上限 2s）；重传过的段不做 RTT 采样（Karn） |
+| 快速重传 | 3 个重复 ACK 立即重传，`ssthresh` 减半 |
+| 乱序重组 | 4 个乱序段缓存，缺口补齐后按序交付；缺口期间回重复 ACK |
+| FIN / RST / TIME_WAIT | 四次挥手（简化）、FIN 后 2*MSL=500ms 的 TIME_WAIT；收到 RST 立即关闭 |
+| 基本拥塞 | 慢启动 cwnd 翻倍、超时 ssthresh 减半、cwnd 回 1 MSS |
+| 丢包注入 | `loss_every=N`：每第 N 个数据段本地丢弃，强制触发重传（QEMU slirp 是用户态网关，宿主侧造不出真丢包） |
+
+### 为什么放在 proc 线程里跑
+
+syscall 上下文里中断是关着的，`timer_ticks()` 不前进，RTO/退避永远等不到超时
+（第一次尝试直接把 NMI watchdog 触发了 panic）。所以 TCP 健壮性回归挂在
+`tcptest` 程序线程（`bootseq` 在测试构建里 spawn），和 `pkgtest` 一样由
+build.ps1 收集串口断言。
+
+### 回归（8 项）
+
+```
+net: tcp handshake ok (SYN/SYN-ACK/ACK)
+net: tcp out-of-order reassembly ok
+net: tcp checksum rejects corrupt ok
+net: tcp RST closes connection ok
+net: tcp large transfer ok (16384 bytes, retrans=6, timeouts=6, dropped=6)
+net: tcp rto ok (srtt=1ticks rto=10ticks)
+net: tcp FIN/TIME_WAIT ok
+net: tcp selftest PASS
+```
+
+宿主侧回显服务（build.ps1 的 TCP job）从"读 64B 回一次"改成**流式回显**
+（read→write 循环，直到对端 FIN 或 256KB 上限），才能支撑 16KB 往返。
+
+### 限制（诚实记录）
+
+- 发送是同步收发（一次一个 512B 段在途），窗口/cwnd 更多是状态与回归证据；
+  真正的流水线发送、SACK、窗口缩放、拥塞恢复（CUBIC/Reno 完整版）没做；
+- 不做分片/重组（IP 层）、不做 ARP 解析（目的 MAC 固定用网关，测试对端是 10.0.2.2）；
+- 只有客户端，没有 listen/accept；用户态仍只有 `SYS_TCP_TEST` 这一条触发路径。

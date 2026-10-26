@@ -103,3 +103,21 @@
   1. 硬链接不跨重启；
   2. `fs_stat_t.nlink` 未暴露到 ABI（stat 结构仍是 24B，避免 ABI 变更）；
   3. 软链接目标不支持跨卷；目录硬链接按 POSIX 禁止。
+
+## 阶段 4c：TCP 健壮性
+
+- 状态：**完成**
+- 新文件 `src/kernel/net/tcp.c`：序列号/ACK、MSS/窗口、校验和、RTT/RTO
+  （RFC6298 简版）、超时重传 + 指数退避、3 次重复 ACK 快重传、乱序重组、
+  FIN/RST/TIME_WAIT、慢启动 cwnd。丢包用 `loss_every=N` 在发送侧注入。
+- `net.c` 导出 `net_ip_send` / `net_rx_frame` / IP 指针；`net.h` 声明。
+- 回归放在 `tcptest` 程序线程（测试构建 spawn）：syscall 上下文关中断、
+  timer 不前进，RTO 会等到 NMI watchdog panic——这一点已写进 docs/network.md。
+- 宿主回显服务改成流式（16KB 往返）；build.ps1 的注入等待同时等
+  `pkg: selftest done` 与 `net: tcp selftest PASS`。
+- 检查项：**174 → 182**。
+- 测试证据：`=== TEST PASS (182/182) ===`（`serial-tcp3.log`）：
+  握手 / 乱序 / 坏校验和 / RST / 16KB + 6 次丢包重传 / RTO / FIN+TIME_WAIT / PASS。
+- 遗留：
+  1. 同步收发（在途 1 段），没有流水线/SACK/窗口缩放；
+  2. 无 IP 分片重组、无 ARP 解析（目的 MAC 用网关）、只有客户端侧。

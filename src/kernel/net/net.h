@@ -28,7 +28,21 @@ int net_udp_recv(uint8_t src_ip[4], uint16_t *src_port,
 int net_udp_recv_port(uint16_t local_port, uint8_t src_ip[4], uint16_t *src_port,
                       void *buf, uint32_t max_len, uint32_t spins, int allow_loopback);
 
+
+int net_tcp_echo_test(void);
+
+/* ---- 阶段 4c：tcp.c 用的发送/收包原语 ---- */
+/* 以太网+IPv4 封装并发送（目的 MAC 用网关 MAC）；返回 0 / -1 */
+int net_ip_send(const uint8_t dst_ip[4], uint8_t proto,
+                const uint8_t *payload, uint32_t len);
+/* 从网卡收一帧（非阻塞）；返回长度 / <=0 表示没有 */
+int net_rx_frame(uint8_t *buf, uint32_t max);
+const uint8_t *net_local_ip_ptr(void);
+const uint8_t *net_gw_ip_ptr(void);
+
 /* 最小 TCP echo client 自检（SYN/SYN-ACK/ACK/data）。 */
 int net_tcp_echo_test(void);
+/* 阶段 4c：TCP 健壮性自检（RTO/重传/乱序/FIN/TIME_WAIT/校验和/大传输） */
+int net_tcp_robust_selftest(void);
 
 #endif

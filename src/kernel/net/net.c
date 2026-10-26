@@ -551,6 +551,50 @@ static int net_tcp_recv(uint16_t src_port, uint32_t spins, uint8_t *flags,
     return -1;
 }
 
+/* =============================================================================
+ * 供 net/tcp.c 使用的最小发送/收包原语（阶段 4c）
+ *
+ * 只做 IPv4 + 以太网的封装（目的 MAC 用网关 MAC：现有自检的对端都是网关
+ * 10.0.2.2）；不做分片、不做 ARP（启动自检已经拿到 gw_mac）。
+ * ========================================================================== */
+int net_ip_send(const uint8_t dst_ip[4], uint8_t proto,
+                const uint8_t *payload, uint32_t len)
+{
+    static uint8_t f[1600];
+    uint8_t *ip = f + 14;
+    uint32_t total = 20U + len;
+
+    if (dst_ip == 0 || payload == 0 || total > 1480U) return -1;
+    if ((gw_mac[0] | gw_mac[1] | gw_mac[2] | gw_mac[3] | gw_mac[4] | gw_mac[5]) == 0) {
+        return -1;
+    }
+
+    memset(f, 0, 14U + total);
+    memcpy(f, gw_mac, 6);
+    e1000_mac(f + 6);
+    f[12] = 0x08; f[13] = 0x00;
+
+    ip[0] = 0x45;
+    wr16(ip + 2, (uint16_t)total);
+    wr16(ip + 4, ++ip_id);
+    ip[8] = 64;
+    ip[9] = proto;
+    memcpy(ip + 12, local_ip, 4);
+    memcpy(ip + 16, dst_ip, 4);
+    wr16(ip + 10, checksum(ip, 20));
+    memcpy(ip + 20, payload, len);
+
+    return (e1000_send_frame(f, 14U + total) == E_OK) ? 0 : -1;
+}
+
+int net_rx_frame(uint8_t *buf, uint32_t max)
+{
+    if (buf == 0) return -1;
+    return e1000_rx_poll(buf, max);
+}
+
+const uint8_t *net_local_ip_ptr(void) { return local_ip; }
+const uint8_t *net_gw_ip_ptr(void) { return gw_ip; }
 int net_tcp_echo_test(void)
 {
     uint32_t ack = 0;
