@@ -1977,6 +1977,25 @@ int net_tcp_robust_selftest(void)
 {
     if (e1000_present() == 0) return 0;
 
+    /* ---- audit-net 负向用例：放在最前面 ----
+     * 这些用例是纯状态断言（不依赖调度/真实对端），先跑有两个好处：
+     *   1. 审计回归行不受后续 bulk/loopback 用例的时序影响；
+     *   2. 它们不修改既有用例的状态前提（收尾时 conn 归零、临时 listener 已关）。
+     * 注意：本仓库 tcptest 线程有已知的尾部延迟（`net: tcp selftest PASS`
+     * 偶发晚于 60s 窗口），把审计行前置可以保证"审计证据"与"既有回归"解耦。 */
+    if (tcp_audit_selftest() != 0) {
+        kprintln("net: tcp selftest FAILED (audit tcp)");
+        return -1;
+    }
+    if (net_syscall_audit_selftest() != 0) {
+        kprintln("net: tcp selftest FAILED (audit listen)");
+        return -1;
+    }
+    if (net_audit_selftest() != 0) {
+        kprintln("net: tcp selftest FAILED (audit net)");
+        return -1;
+    }
+
     if (tcp_self_test_ooo() != 0) {
         kprintln("net: tcp selftest FAILED (reassembly/csum/rst)");
         return -1;
@@ -1989,20 +2008,6 @@ int net_tcp_robust_selftest(void)
     }
     if (net_tcp_listen_selftest() != 0) {
         kprintln("net: tcp selftest FAILED (listen/accept)");
-        return -1;
-    }
-    /* 畸形包 / 伪造段负向用例（audit-net）：放在所有正向用例之后，
-     * 不改变既有断言的状态前提。 */
-    if (tcp_audit_selftest() != 0) {
-        kprintln("net: tcp selftest FAILED (audit tcp)");
-        return -1;
-    }
-    if (net_syscall_audit_selftest() != 0) {
-        kprintln("net: tcp selftest FAILED (audit listen)");
-        return -1;
-    }
-    if (net_audit_selftest() != 0) {
-        kprintln("net: tcp selftest FAILED (audit net)");
         return -1;
     }
     kprintln("net: tcp selftest PASS");

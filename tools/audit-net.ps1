@@ -68,9 +68,11 @@ $netLines = @(
     'net: ping ok',
     'net: tcp handshake ok',
     'net: tcp large transfer ok',
-    'net: tcp listen/accept selftest PASS',
-    'net: tcp selftest PASS'
+    'net: tcp listen/accept selftest PASS'
 )
+
+# tcptest 尾部：仓库既有 flake（见文件头注释）。单独判定，只有它缺失时整轮重试。
+$tailLines = @('net: tcp selftest PASS')
 
 function Invoke-AuditRun([int]$attempt) {
     $serialAbs = Join-Path $root $SerialLog
@@ -92,7 +94,9 @@ function Invoke-AuditRun([int]$attempt) {
 
     $serialText = ''
     if (Test-Path $serialAbs) { $serialText = [string](Get-Content $serialAbs -Raw) }
-    return @{ Exit = $p.ExitCode; Text = $serialText; Log = $buildLog }
+    $buildText = ''
+    if (Test-Path $buildLog) { $buildText = [string](Get-Content $buildLog -Raw) }
+    return @{ Exit = $p.ExitCode; Text = $serialText; Build = $buildText; Log = $buildLog }
 }
 
 function Show-Lines([string]$text, [string[]]$lines, [string]$title) {
@@ -126,30 +130,35 @@ do {
 
     $missAudit = @(Show-Lines $run.Text $auditLines 'net: audit 回归行')
     $missNet = @(Show-Lines $run.Text $netLines '既有 net 正向断言')
-    $fullOk = $run.Text.Contains('=== TEST PASS (225/225) ===')
+    $missTail = @(Show-Lines $run.Text $tailLines 'tcptest 尾部（已知 flake，单独判定）')
+    # 225 项断言行在 build.ps1 的 stdout（build-*.log），不在串口日志里
+    $fullOk = $run.Build.Contains('=== TEST PASS (225/225) ===')
     if ($NoFull) { $fullOk = $true }
 
-    $finalMiss = @($missAudit) + @($missNet)
+    $finalMiss = @($missAudit) + @($missNet) + @($missTail)
     $finalExit = $run.Exit
 
     Write-Host ''
     if ($fullOk) {
-        $m = [regex]::Match($run.Text, '=== TEST PASS \((\d+)/(\d+)\) ===')
+        $m = [regex]::Match($run.Build, '=== TEST PASS \((\d+)/(\d+)\) ===')
         if ($m.Success) {
             Write-Host ("--- 全量检查：{0}/{1} PASS ---" -f $m.Groups[1].Value, $m.Groups[2].Value) -ForegroundColor Green
         } else {
             Write-Host '--- 全量检查：跳过（-NoFull） ---' -ForegroundColor DarkGray
         }
     } else {
-        Write-Host '--- 全量检查：没有 TEST PASS 行（可能只是已知的 tcptest 尾部延迟） ---' -ForegroundColor Yellow
+        $failedChecks = @([regex]::Matches($run.Build, '\[FAIL\] ([^\r\n]+)') | ForEach-Object { $_.Groups[1].Value.Trim() })
+        Write-Host '--- 全量检查：没有 TEST PASS 行 ---' -ForegroundColor Yellow
+        foreach ($fc in $failedChecks) { Write-Host ("  [FAIL] {0}" -f $fc) -ForegroundColor Red }
     }
 
-    $onlyFlakyTail = ($finalMiss.Count -eq 0) -and (-not $fullOk) -and
-                     ($run.Text.Contains('net: audit net ok')) -and
-                     (-not $run.Text.Contains('net: tcp selftest PASS'))
+    # 只有"既有 tcptest 尾部"缺失（审计行与其它正向行全在）时才重试：
+    # 这是仓库已知的尾部延迟/卡住，与本会话 net 改动无关（基线同样复现）。
+    $onlyFlakyTail = ($missAudit.Count -eq 0) -and ($missNet.Count -eq 0) -and
+                     ($missTail.Count -eq 1) -and (-not $fullOk)
     if ($onlyFlakyTail -and $attempt -lt $Retries) {
         Write-Host ''
-        Write-Host ("[retry] 只有 'net: tcp selftest PASS' 落在 60s 窗口之外（仓库已知 flake：基线同样复现），整轮重跑 {0}/{1}" -f ($attempt + 1), $Retries) -ForegroundColor Yellow
+        Write-Host ("[retry] 只有 tcptest 尾部（'net: tcp selftest PASS'）缺失 = 仓库已知 flake，整轮重跑 {0}/{1}" -f ($attempt + 1), $Retries) -ForegroundColor Yellow
         continue
     }
     break
