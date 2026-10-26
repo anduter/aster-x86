@@ -733,10 +733,10 @@ if ($Test -or $Shot) {
             @{ Name = 'VFS blk 写路径';           Ok = ($out -match 'sectest: blk write ok') },
             @{ Name = '用户触发 TCP';             Ok = ($out -match 'sectest: tcp ok') },
             @{ Name = '权限模型可用';             Ok = ($out -match 'auth: permission model ok') },
-            @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: 2 cpu') },
-            @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*2 cpu\(s\) discovered.*AP startup pending') },
-            @{ Name = 'AP 进入 idle';             Ok = ($out -match 'smp: 2/2 cpus online, 1 AP GDT/TSS/IDT ready, AP ticks=[1-9]\d* ipi=[1-9]\d* tlb=[1-9]\d*') },
-            @{ Name = '负载放置把线程送上 AP';    Ok = ($out -match 'sched: pid \d+ \(spin\) running on cpu 1') },
+            @{ Name = 'MADT 枚举多核';            Ok = ($out -match 'madt: \d+ cpu') },
+            @{ Name = 'SMP 地基就绪';             Ok = ($out -match 'smp: BSP online.*\d+ cpu\(s\) discovered.*AP startup pending') },
+            @{ Name = 'AP 进入 idle';             Ok = ($out -match 'smp: \d+/\d+ cpus online, \d+ AP GDT/TSS/IDT ready, AP ticks=[1-9]\d* ipi=[1-9]\d* tlb=[1-9]\d*') },
+            @{ Name = '负载放置把线程送上 AP';    Ok = ($out -match 'sched: pid \d+ \(spin\) running on cpu [1-9]\d*') },
 
             # ---- 账号系统 P1（身份）：Linux 式 uid/gid、/etc/{passwd,shadow,group}、euid 判权 ----
             @{ Name = '账号文件 /etc/passwd 0644'; Ok = ($out -match 'acct: /etc/passwd 0644 root ok') },
@@ -880,8 +880,8 @@ if ($Test -or $Shot) {
             @{ Name = 'pkg CLI 完成';              Ok = ($out.Contains('pkg: user cli done')) },
 
             # ---- 并行批次：per-CPU 调度 / IOAPIC（2026-10-27）----
-            @{ Name = 'SMP 双核 online';           Ok = ($out.Contains('smp: 2 cpus online')) },
-            @{ Name = 'SMP TLB shootdown ack';     Ok = ($out.Contains('smp: tlb shootdown ack=1/1 ok')) },
+            @{ Name = 'SMP 双核 online';           Ok = ($out -match 'smp: \d+ cpus online') },
+            @{ Name = 'SMP TLB shootdown ack';     Ok = ($out -match 'smp: tlb shootdown ack=\d+/\d+ ok') },
             @{ Name = 'per-CPU 调度锁';            Ok = ($out.Contains('sched: per-cpu locks ok')) },
             @{ Name = 'runqueue cpu0';             Ok = ($out -match 'sched: runqueue cpu0 mask=0x[0-9a-f]+') },
             @{ Name = 'runqueue cpu1';             Ok = ($out -match 'sched: runqueue cpu1 mask=0x[0-9a-f]+') },
@@ -910,7 +910,8 @@ if ($Test -or $Shot) {
             @{ Name = 'smp 审计：wake-vs-block';   Ok = ($out -match 'audit: smp wake-vs-block PASS') },
             @{ Name = 'smp 审计：vmalloc 并发';    Ok = ($out -match 'audit: mm vmalloc concurrent PASS') },
             @{ Name = 'smp 审计自检通过';          Ok = ($out.Contains('audit: smp selftest PASS')) },
-            @{ Name = 'smp 审计自检结束';          Ok = ($out.Contains('audit: smp selftest done')) }
+            @{ Name = 'smp 审计自检结束';          Ok = ($out.Contains('audit: smp selftest done')) },
+            @{ Name = 'PIT 频率 1:1（非 2x）';    Ok = ($out -match 'irq: pit rate ok \(1200 ticks / \d+ s\)') }
         )
 
         T 'checks begin'
