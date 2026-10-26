@@ -16,6 +16,7 @@
 #include "fs.h"
 #include "include/kernel.h"
 #include "include/fs.h"
+#include "include/dev.h"
 
 #define LK_DIR      "system:/tmp"
 #define LK_A        "system:/tmp/lk-a"
@@ -26,6 +27,12 @@
 #define LK_LOOP_B   "system:/tmp/lk-loop-b"
 #define LK_NOFOLLOW "system:/tmp/lk-nofollow"
 #define LK_BYPASS   "system:/tmp/lk-bypass"
+
+/* XFS1 v6 持久化回归用（独立名字，避免和阶段 4b 的临时文件冲突） */
+#define V6_A        "system:/tmp/xfs6-a"
+#define V6_B        "system:/tmp/xfs6-b"
+#define V6_DATA     "v6-persist"
+#define V6_DATA2    "V6-PERSIST"
 
 static int lk_fail(int step)
 {
@@ -54,6 +61,167 @@ static void unlink_all(void)
     (void)fs_unlink_as(LK_LOOP_B, 0U, 0U);
     (void)fs_unlink_as(LK_NOFOLLOW, 0U, 0U);
     (void)fs_unlink_as(LK_BYPASS, 0U, 0U);
+}
+
+static int read_expect(const char *path, const char *expect, uint32_t len)
+{
+    char buf[64];
+    uint32_t h = fs_open_as(path, FS_OPEN_READ, 0U, 0U);
+    int n;
+
+    if (h == 0U) return -1;
+    n = fs_read(h, buf, sizeof(buf));
+    fs_close(h);
+    return (n == (int)len && memcmp(buf, expect, len) == 0) ? 0 : -1;
+}
+
+/* v5 兼容：在空闲的 ram0 上写一个 v5 镜像，实际挂载它（证明旧布局可读），
+ * 再从持久化盘恢复现场。v5 镜像下次 fs_sync 会写成 v6。 */
+static int v5_mount_compat(void)
+{
+    const char *backing = fs_backing();
+    block_device_t *spare;
+    fs_stat_t st;
+
+    if (backing == 0 || backing[0] == '\0') return 0;
+    spare = blk_lookup("ram0");
+    if (spare == 0 || strcmp(backing, "ram0") == 0) return 0;
+
+    if (fs_sync(backing) != E_OK) {
+        kprintln("fs: xfs v5 compat sync failed");
+        return -1;
+    }
+    if (fs_format_disk_version("ram0", 5U) != E_OK) {
+        kprintln("fs: xfs v5 format failed");
+        return -1;
+    }
+    if (fs_mount_disk("ram0") != E_OK) {
+        kprintln("fs: xfs v5 mount FAILED");
+        return -1;
+    }
+    if (fs_volume_count() != 0U) {
+        kprintln("fs: xfs v5 empty image has unexpected volumes");
+        return -1;
+    }
+    /* 恢复真实卷；v5 -> v6 的升级由后面的 fs_sync 完成 */
+    if (fs_mount_disk(backing) != E_OK) {
+        kprintln("fs: xfs remount after v5 compat FAILED");
+        return -1;
+    }
+    if (fs_stat("system:/bin/shell", &st) != E_OK || st.size == 0U) {
+        kprintln("fs: xfs remount lost system:/bin/shell");
+        return -1;
+    }
+    kprintln("fs: xfs v5 image mount compat ok");
+    return 0;
+}
+
+/* v6 核心回归：link -> sync -> 清空内存 -> 重新挂载，两个名字仍指向同一
+ * inode；删一个名字另一个可读；nlink 正确；fsck 能修正被破坏的 nlink。 */
+static int v6_persist(void)
+{
+    const char *backing = fs_backing();
+    fs_stat_t st;
+    char report[128];
+
+    if (backing == 0 || backing[0] == '\0') {
+        kprintln("fs: xfs v6 hardlink persisted skip (no backing device)");
+        return 0;
+    }
+
+    (void)fs_unlink_as(V6_A, 0U, 0U);
+    (void)fs_unlink_as(V6_B, 0U, 0U);
+
+    if (write_file(V6_A, V6_DATA, (uint32_t)strlen(V6_DATA)) != 0) {
+        kprintln("fs: xfs v6 persist write failed");
+        return -1;
+    }
+    if (fs_link_as(V6_A, V6_B, 0U, 0U) != E_OK) {
+        kprintln("fs: xfs v6 persist link failed");
+        return -1;
+    }
+    if (fs_stat(V6_B, &st) != E_OK || st.nlink != 2U || st.size != 10U) {
+        kprintln("fs: xfs v6 persist nlink before sync FAILED");
+        return -1;
+    }
+
+    if (fs_sync(backing) != E_OK) {
+        kprintln("fs: xfs v6 persist sync failed");
+        return -1;
+    }
+
+    /* 模拟重启：内存树清空，从盘重建 */
+    fs_init();
+    if (fs_mount_disk(backing) != E_OK) {
+        kprintln("fs: xfs v6 persist mount FAILED");
+        return -1;
+    }
+    if (fs_stat(V6_A, &st) != E_OK || st.nlink != 2U || st.size != 10U ||
+        fs_stat(V6_B, &st) != E_OK || st.nlink != 2U || st.size != 10U) {
+        kprintln("fs: xfs v6 hardlink relation lost after remount");
+        return -1;
+    }
+    if (read_expect(V6_A, V6_DATA, 10U) != 0 ||
+        read_expect(V6_B, V6_DATA, 10U) != 0) {
+        kprintln("fs: xfs v6 persisted data mismatch after remount");
+        return -1;
+    }
+
+    /* 通过一个名字写，另一个名字必须看到（同一 inode，不是两份拷贝） */
+    if (write_file(V6_B, V6_DATA2, 10U) != 0 ||
+        read_expect(V6_A, V6_DATA2, 10U) != 0) {
+        kprintln("fs: xfs v6 shared data via link FAILED");
+        return -1;
+    }
+
+    /* 删一个名字，另一个仍可读，nlink 回到 1 */
+    if (fs_unlink_as(V6_A, 0U, 0U) != E_OK ||
+        fs_stat(V6_B, &st) != E_OK || st.nlink != 1U ||
+        read_expect(V6_B, V6_DATA2, 10U) != 0) {
+        kprintln("fs: xfs v6 unlink one name FAILED");
+        return -1;
+    }
+
+    /* 再走一次 sync/remount，确认“唯一名字 + nlink=1”也持久化 */
+    if (fs_sync(backing) != E_OK) return -1;
+    fs_init();
+    if (fs_mount_disk(backing) != E_OK) {
+        kprintln("fs: xfs v6 second mount FAILED");
+        return -1;
+    }
+    if (fs_stat(V6_B, &st) != E_OK || st.nlink != 1U ||
+        read_expect(V6_B, V6_DATA2, 10U) != 0) {
+        kprintln("fs: xfs v6 second remount FAILED");
+        return -1;
+    }
+
+    /* fsck：正常状态 0 错误 */
+    if (fs_check(report, sizeof(report)) != 0) {
+        kprintln("fs: xfs v6 fsck reports errors on healthy tree");
+        return -1;
+    }
+
+    /* 注入损坏：nlink 改成 7。fsck 必须发现并按目录项数修回 1。 */
+    if (fs_test_corrupt_nlink(V6_B, 7U) != E_OK) {
+        kprintln("fs: xfs v6 nlink fault injection failed");
+        return -1;
+    }
+    if (fs_check(report, sizeof(report)) <= 0) {
+        kprintln("fs: xfs v6 fsck missed corrupt nlink");
+        return -1;
+    }
+    if (fs_stat(V6_B, &st) != E_OK || st.nlink != 1U) {
+        kprintln("fs: xfs v6 fsck did not repair nlink");
+        return -1;
+    }
+    if (fs_check(report, sizeof(report)) != 0) {
+        kprintln("fs: xfs v6 fsck not clean after repair");
+        return -1;
+    }
+
+    (void)fs_unlink_as(V6_B, 0U, 0U);
+    kprintln("fs: xfs v6 hardlink persisted ok");
+    return 0;
 }
 
 void fs_link_selftest(void)
@@ -178,6 +346,11 @@ void fs_link_selftest(void)
         }
         kprintln("fs: symlink into system path denied ok");
     }
+
+    /* XFS1 v6：先释放前面用过的临时节点，再做 v5 兼容挂载与硬链接持久化 */
+    unlink_all();
+    if (v5_mount_compat() != 0) { (void)lk_fail(26); return; }
+    if (v6_persist() != 0) { (void)lk_fail(27); return; }
 
     unlink_all();
     /* 不删 /tmp 本身：标准目录，其它自检（SIP）还要用 */

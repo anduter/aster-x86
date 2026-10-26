@@ -8,7 +8,7 @@
 #define FS_PATH_MAX     256
 #define FS_FILE_MAX     65536 /* 单个文件最大字节数（64KB；shell/程序不再受 40KB 限制） */
 #define FS_FILE_MAX_LEGACY 40960 /* XFS1 v4 镜像的单文件上限（旧镜像兼容） */
-#define FS_DISK_VERSION 5u    /* XFS1 super 版本：v5 = 64KB 限额 + 容量字段 */
+#define FS_DISK_VERSION 6u    /* XFS1 super 版本：v6 = inode 持久化 inode_id/nlink */
 #define FS_MAX_NODES    64    /* 节点池（文件 + 目录，所有卷共用） */
 #define FS_MAX_OPEN     32    /* 同时打开的文件句柄数 */
 #define FS_MAX_VOLUMES  4     /* 最多挂载几个卷（C: D: ...） */
@@ -160,6 +160,9 @@ int fs_listdir(const char *path, uint32_t index,
 
 /* ---- 持久化：把整棵文件树序列化到块设备 / 从块设备恢复 ---- */
 int fs_format_disk(const char *blk_name);
+/* 用指定 XFS1 版本格式化（自检/兼容测试用）：5 = v5 旧布局，6 = 当前布局。
+ * 普通 mkfs 走 fs_format_disk()，总是写 v6。 */
+int fs_format_disk_version(const char *blk_name, uint32_t version);
 int fs_sync(const char *blk_name);
 int fs_mount_disk(const char *blk_name);
 
@@ -168,8 +171,14 @@ void        fs_set_backing(const char *name);
 const char *fs_backing(void);
 int         fs_sync_backing(void);
 
-/* 一致性检查：返回错误数，report 写一行摘要（nodes/files/dirs/errors） */
+/* 一致性检查：返回发现的问题数，report 写一行摘要（nodes/files/dirs/errors/fixed）。
+ * nlink 与目录项不一致时按实际目录项数修复（fsck 语义）；结构损坏只报告。
+ * 挂载 v6 镜像时也会做同样的计数校验，count 不符按目录项数修正。 */
 int fs_check(char *report, uint32_t max);
+
+/* 自检专用故障注入：把 path 的 inode nlink 改成指定值，模拟目录项计数损坏。
+ * 仅 fs 自检使用；返回 E_OK / E_NOENT。 */
+int fs_test_corrupt_nlink(const char *path, uint32_t nlink);
 
 /* =============================================================================
  * SIP-lite：系统路径运行时只读（实现在 fs/sip.c）
@@ -202,8 +211,12 @@ unsigned int fs_node_count(void);
  *
  * 硬链接：目标必须是普通文件（目录/符号链接禁止）、必须同卷；非 root 只能给
  * 自己拥有的文件建链接。nlink 记在数据宿主节点上，fs_stat_t.nlink 可读。
- * 运行时语义完整（stat/read/write/rename/unlink 都对同一个 inode 生效）；
- * XFS1 v5 不持久化"链接关系"，sync/remount 后每个目录项变成独立文件（文档已注明）。
+ * 运行时语义完整（stat/read/write/rename/unlink 都对同一个 inode 生效）。
+ *
+ * XFS1 v6 起持久化硬链接：每个磁盘 inode 记录带 inode_id + nlink，同一 inode
+ * 的多个目录项共享 inode_id（数据只写一份）；mount 时按 inode_id 重建 canon
+ * 链。v5/v4 旧镜像仍可挂载（每个目录项按独立 inode 恢复），下次 fs_sync 写作
+ * v6。fsck 会按目录项数校验并修复 nlink。
  *
  * 符号链接：目标可以是卷内绝对路径（'/' 开头）或相对父目录的路径；带 "卷:"
  * 前缀的目标一律 E_INVAL（跨卷软链接不做）。跟随跳数上限 FS_LINK_MAX_HOPS。

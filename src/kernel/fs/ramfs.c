@@ -1282,6 +1282,20 @@ static void ino_promote(fs_node_t *ino)
         }
     }
 }
+
+/* 删除目录项前维护 inode 引用计数：普通文件宿主且还有其它链接时，先把
+ * 数据/元数据搬到存活链接上；删的是硬链接目录项时只减宿主计数。 */
+static void drop_inode_ref(fs_node_t *node)
+{
+    fs_node_t *ino = ino_of(node);
+
+    if (node->type == FS_TYPE_DIR) return;
+    if (ino != node) {
+        if (ino->nlink > 0U) ino->nlink--;
+    } else if (ino->nlink > 1U) {
+        ino_promote(ino);
+    }
+}
 static int unlink_impl(const char *path, const fs_cred_t *c)
 {
     char rpath[FS_PATH_MAX];
@@ -1515,9 +1529,13 @@ static int ramfs_rename_impl(const char *oldrel, const char *newrel,
         } else if (node->type == FS_TYPE_DIR) {
             return E_EXIST;                                  /* 目录不能顶掉文件 */
         }
-        if (target->type == FS_TYPE_FILE && node_is_open(target)) return E_BUSY;
+        if (target->type == FS_TYPE_FILE &&
+            (node_is_open(target) || node_is_open(ino_of(target)))) {
+            return E_BUSY;
+        }
         if (!may_unlink_in(ndir, target, c)) return E_ACCES;  /* sticky 目标目录 */
 
+        drop_inode_ref(target);            /* 硬链接目标被覆盖：维护 nlink/canon */
         unlink_child(ndir, target);
         memset(target, 0, sizeof(*target));
     }
@@ -1576,8 +1594,6 @@ int fs_sync_backing(void)
 
 /* ==================== 一致性检查（fsck） ==================== */
 
-/* 检查：类型合法、大小不越界、孩子指针的 parent 回指正确、没有环。
- * 返回错误数；report 里写一行摘要。 */
 /* 已用节点数（诊断用） */
 unsigned int fs_node_count(void)
 {
@@ -1587,9 +1603,65 @@ unsigned int fs_node_count(void)
         if (nodes[i].type != FS_TYPE_NONE) n++;
     }
     return n;
-}int fs_check(char *report, uint32_t max)
-{    uint32_t node_count = 0, file_count = 0, dir_count = 0, errors = 0;
+}
 
+/* canon 指针必须落在节点池里；不能拿坏指针去 ino_of() 解引用。 */
+static bool node_ptr_in_pool(const fs_node_t *p)
+{
+    return p >= &nodes[0] && p < &nodes[FS_MAX_NODES];
+}
+
+/* 统计有多少个目录项（含宿主自己）指向 host。调用方先保证 host/canon 合法。 */
+static uint32_t nlink_count(const fs_node_t *host)
+{
+    uint32_t count = 0;
+
+    for (uint32_t i = 0; i < FS_MAX_NODES; i++) {
+        fs_node_t *n = &nodes[i];
+
+        if (n->type != FS_TYPE_FILE) continue;
+        if (n->canon != 0) {
+            if (!node_ptr_in_pool(n->canon)) continue;
+            if (n->canon != host) continue;
+        } else if (n != host) {
+            continue;
+        }
+        count++;
+    }
+    return count;
+}
+
+/* 按目录项数修正所有文件宿主的 nlink；返回修正的 inode 数。
+ * fs_sync 落盘前调用，避免把错误计数持久化。 */
+static uint32_t nlink_repair_all(void)
+{
+    uint32_t repairs = 0;
+
+    for (uint32_t i = 0; i < FS_MAX_NODES; i++) {
+        fs_node_t *n = &nodes[i];
+
+        if (n->type != FS_TYPE_FILE || n->canon != 0) continue;
+        {
+            uint32_t count = nlink_count(n);
+
+            if (n->nlink != count) {
+                n->nlink = count;
+                repairs++;
+            }
+        }
+    }
+    return repairs;
+}
+
+/* 检查：类型合法、大小不越界、canon/nlink 与目录项一致、孩子指针的 parent
+ * 回指正确、没有环。nlink 不一致按实际目录项数修复（fsck 语义）；结构损坏
+ * （坏 canon、孤儿、环）只报告，不改指针。返回发现的问题数。 */
+int fs_check(char *report, uint32_t max)
+{
+    uint32_t node_count = 0, file_count = 0, dir_count = 0;
+    uint32_t errors = 0, repairs = 0;
+
+    /* 第一遍：结构 + 各类型字段约束 */
     for (uint32_t i = 0; i < FS_MAX_NODES; i++) {
         fs_node_t *n = &nodes[i];
 
@@ -1598,20 +1670,60 @@ unsigned int fs_node_count(void)
 
         if (n->type == FS_TYPE_FILE || n->type == FS_TYPE_LINK) {
             file_count++;
-            if (ino_of(n)->size > fs_limit_current) errors++;
-            if (n->canon != 0 &&
-                (n->canon < &nodes[0] || n->canon >= &nodes[FS_MAX_NODES])) {
+
+            if (n->type == FS_TYPE_FILE) {
+                if (n->canon != 0) {
+                    /* 硬链接目录项：canon 必须是池内普通文件宿主，且不能成链 */
+                    if (!node_ptr_in_pool(n->canon) || n->canon == n ||
+                        n->canon->type != FS_TYPE_FILE || n->canon->canon != 0) {
+                        errors++;
+                    }
+                    if (n->nlink != 0U) {      /* 计数只记在宿主上 */
+                        errors++;
+                        n->nlink = 0U;
+                        repairs++;
+                    }
+                } else if (n->nlink == 0U) {
+                    errors++;
+                    n->nlink = 1U;
+                    repairs++;
+                }
+            } else {                           /* 符号链接没有硬链接 */
+                if (n->canon != 0) {
+                    errors++;
+                    n->canon = 0;
+                    repairs++;
+                }
+                if (n->nlink != 1U) {
+                    errors++;
+                    n->nlink = 1U;
+                    repairs++;
+                }
+            }
+
+            if ((n->canon == 0 || node_ptr_in_pool(n->canon)) &&
+                ino_of(n)->size > fs_limit_current) {
                 errors++;
             }
         } else if (n->type == FS_TYPE_DIR) {
             dir_count++;
             if (n->size != 0U) errors++;
+            if (n->canon != 0) errors++;       /* 目录不能是硬链接 */
+            if (n->nlink != 1U) {
+                errors++;
+                n->nlink = 1U;
+                repairs++;
+            }
         } else {
             errors++;
         }
 
         /* 子节点必须回指自己 */
         for (fs_node_t *c = n->first_child; c != 0; c = c->next_sibling) {
+            if (!node_ptr_in_pool(c)) {
+                errors++;
+                break;
+            }
             if (c->parent != n) errors++;
             if (c == n) errors++;
         }
@@ -1620,38 +1732,98 @@ unsigned int fs_node_count(void)
         {
             fs_node_t *p = n->parent;
             uint32_t depth = 0;
-            while (p != 0 && depth < 64U) { p = p->parent; depth++; }
-            if (depth >= 64U) errors++;
+            while (p != 0 && node_ptr_in_pool(p) && depth < FS_MAX_NODES) {
+                p = p->parent;
+                depth++;
+            }
+            if (depth >= FS_MAX_NODES || (p != 0 && !node_ptr_in_pool(p))) errors++;
+        }
+    }
+
+    /* 第二遍：nlink 与目录项数（fsck 的核心一致性检查） */
+    for (uint32_t i = 0; i < FS_MAX_NODES; i++) {
+        fs_node_t *n = &nodes[i];
+
+        if (n->type != FS_TYPE_FILE || n->canon != 0) continue;
+        {
+            uint32_t count = nlink_count(n);
+
+            if (n->nlink != count) {
+                errors++;
+                n->nlink = count;
+                repairs++;
+            }
         }
     }
 
     if (report != 0 && max > 0U) {
-        char tmp[96];
-        ksnprintf(tmp, sizeof(tmp), "nodes=%u files=%u dirs=%u errors=%u",
+        char tmp[128];
+        ksnprintf(tmp, sizeof(tmp), "nodes=%u files=%u dirs=%u errors=%u fixed=%u",
                   (unsigned int)node_count, (unsigned int)file_count,
-                  (unsigned int)dir_count, (unsigned int)errors);
+                  (unsigned int)dir_count, (unsigned int)errors,
+                  (unsigned int)repairs);
         strncpy(report, tmp, max - 1U);
         report[max - 1U] = '\0';
     }
     return (int)errors;
 }
 
+/* 自检专用故障注入：只改 inode 的 nlink，不碰目录项，让 fsck 有机会修复。 */
+int fs_test_corrupt_nlink(const char *path, uint32_t nlink)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    char rpath[FS_PATH_MAX];
+    fs_volume_t *vol;
+    const char *rel;
+    fs_node_t *n;
+
+    if (path == 0) {
+        spin_unlock_irqrestore(&fs_lock, fl);
+        return E_INVAL;
+    }
+    vol = path_volume(path, &rel);
+    if (vol == 0 || resolve_in_volume(vol, rel, 0, 0, 0,
+                                      rpath, sizeof(rpath)) != E_OK) {
+        spin_unlock_irqrestore(&fs_lock, fl);
+        return E_NOENT;
+    }
+    n = walk_rel_ex(vol, rpath, 0, 0);
+    if (n == 0) {
+        spin_unlock_irqrestore(&fs_lock, fl);
+        return E_NOENT;
+    }
+    ino_of(n)->nlink = nlink;
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return E_OK;
+}
+
+
 /* 磁盘布局（扇区 512 字节）：
  *   0        超级块（512 字节，disk_super_t 用 pad 撑满一个扇区）
- *   1..14    inode 表（64 × 108 字节）
- *   15..     数据区
+ *   1..15    inode 表（v6：64 × 116 = 7424 字节 → 15 扇区）
+ *   16..     数据区
  *
- * v5（当前）：super 增加 max_file / data_bytes；单文件上限 64KB。
- * v4（旧镜像）：没有这两个字段，挂载时按 FS_FILE_MAX_LEGACY 限流，
- * 下一次 fs_sync 自动升级成 v5（文件仍在数据区，布局不变，无需迁移数据）。
+ * 版本：
+ *   v6（当前）：inode 记录增加 inode_id / nlink，多个目录项可指向同一 inode；
+ *               inode 表 15 扇区，数据区从 LBA 16 开始。
+ *   v5（旧）：  inode 记录 108 字节，无 inode_id/nlink（每个目录项独立文件）；
+ *               数据区从 LBA 15 开始。仍可挂载，下次 fs_sync 升 v6。
+ *   v4（更旧）：布局同 v5，但没有 max_file/data_bytes 字段，按 40KB 限流，
+ *               下次 sync 升 v6。
  */
 #define DISK_MAGIC       "XFS1"
 #define DISK_VERSION     FS_DISK_VERSION
-#define DISK_VERSION_LEGACY 4U
+#define DISK_VERSION_V6  6U
+#define DISK_VERSION_V5  5U
+#define DISK_VERSION_V4  4U
 #define DISK_INODE_MAX   64U
 #define DISK_INODE_LBA   1U
-#define DISK_INODE_SECT  14U   /* 64 × 108 = 6912 字节 → 14 扇区 */
-#define DISK_DATA_LBA    (DISK_INODE_LBA + DISK_INODE_SECT)
+/* v5/v4：64 × 108 = 6912 → 14 扇区；v6：64 × 116 = 7424 → 15 扇区 */
+#define DISK_INODE_SECT_V5 14U
+#define DISK_INODE_SECT_V6 15U
+#define DISK_INODE_SECT    DISK_INODE_SECT_V6
+#define DISK_DATA_LBA_V5  (DISK_INODE_LBA + DISK_INODE_SECT_V5)   /* 15 */
+#define DISK_DATA_LBA     (DISK_INODE_LBA + DISK_INODE_SECT)      /* 16 */
 
 typedef struct {
     char     magic[4];
@@ -1663,20 +1835,21 @@ typedef struct {
     uint32_t inode_lba;
     uint32_t data_lba;
     uint32_t volume_count;
-    uint32_t max_file;       /* v5：单文件上限（v4 镜像没有，按 legacy 处理） */
-    uint32_t data_bytes;     /* v5：数据区可用字节数（容量自检用） */
+    uint32_t max_file;       /* v5+：单文件上限（v4 镜像没有，按 legacy 处理） */
+    uint32_t data_bytes;     /* v5+：数据区可用字节数（容量自检用） */
     char     volumes[FS_MAX_VOLUMES][FS_DRIVE_MAX];
     uint8_t  pad[340];       /* 撑满 512 字节扇区：全部字段写完仍是 512B */
 } disk_super_t;
 
 /* 当前挂载卷的单文件上限：新盘 = FS_FILE_MAX；v4 旧镜像先按 40960 限流，
- * fs_sync 升级到 v5 后放开。fs_write/fsck 都用它，而不是硬编码宏。 */
+ * fs_sync 升级到 v6 后放开。fs_write/fsck 都用它，而不是硬编码宏。 */
 static void set_file_limit(uint32_t limit)
 {
     if (limit == 0U || limit > FS_FILE_MAX) limit = FS_FILE_MAX;
     fs_limit_current = limit;
 }
 
+/* v5/v4 的 108 字节 inode 记录（只读兼容路径；写盘一律用下面的 v6 结构） */
 typedef struct {
     uint32_t used;
     uint32_t type;
@@ -1690,10 +1863,39 @@ typedef struct {
     uint32_t gid;         /* 属组 */
     char     name[FS_NAME_MAX];
     uint8_t  pad[3];      /* 对齐到 4 字节：40 + 65 + 3 = 108 */
+} disk_inode_v5_t;
+
+/* v6：同一 inode 的每个目录项各一条记录（name/parent 不同），inode_id 相同、
+ * nlink 相同，数据只写一份（第一条的 data_lba 有效，其余复用同一 lba）。 */
+typedef struct {
+    uint32_t used;
+    uint32_t type;
+    uint32_t parent;      /* 父 inode 下标；卷根为 0xFFFFFFFF */
+    uint32_t size;
+    uint32_t data_lba;
+    uint32_t volume;
+    uint32_t mtime;       /* 最后修改时间（epoch 秒） */
+    uint32_t mode;        /* 权限位 */
+    uint32_t uid;         /* 属主 */
+    uint32_t gid;         /* 属组 */
+    uint32_t inode_id;    /* v6：inode 编号（>=1，同一硬链接组共享） */
+    uint32_t nlink;       /* v6：该 inode 的目录项数（>=1） */
+    char     name[FS_NAME_MAX];
+    uint8_t  pad[3];      /* 对齐到 4 字节：48 + 65 + 3 = 116 */
 } disk_inode_t;
+
+_Static_assert(sizeof(disk_inode_v5_t) == 108, "XFS1 v5 inode must stay 108 bytes");
+_Static_assert(sizeof(disk_inode_t) == 116, "XFS1 v6 inode must be 116 bytes");
+_Static_assert(sizeof(disk_super_t) == BLK_SECTOR, "XFS1 superblock must fit one sector");
 
 static disk_inode_t dump_inodes[DISK_INODE_MAX];
 static uint32_t     dump_count;
+
+/* dump 期间按 inode 宿主记账：id=0 表示还没分配；ids 从 1 开始递增。
+ * lba 记录数据只写了一份的位置，后续硬链接目录项复用同一个数据位置。 */
+static uint32_t     dump_ino_id[FS_MAX_NODES];
+static uint32_t     dump_ino_lba[FS_MAX_NODES];
+static uint32_t     dump_next_ino;
 
 /* 深度优先遍历：父节点一定先于子节点编号 */
 static int dump_tree(fs_node_t *n, uint32_t parent, uint32_t vol,
@@ -1701,46 +1903,59 @@ static int dump_tree(fs_node_t *n, uint32_t parent, uint32_t vol,
 {
     disk_inode_t *in;
     uint32_t idx;
+    fs_node_t *ino;
+    uint32_t ino_idx;
 
     if (dump_count >= DISK_INODE_MAX) return E_FULL;
 
     idx = dump_count++;
     in = &dump_inodes[idx];
-    {
-        /* 硬链接的目录项自己不带数据：序列化用宿主节点的内容。
-         * 链接关系不落盘（见 fs.h 说明），remount 后每个名字是独立文件。 */
-        fs_node_t *ino = ino_of(n);
+    ino = ino_of(n);                     /* 硬链接统一落到数据宿主 */
+    ino_idx = (uint32_t)(ino - nodes);
 
-        memset(in, 0, sizeof(*in));
-        in->used = 1U;
-        in->type = (uint32_t)ino->type;
-        in->parent = parent;
-        in->size = ino->size;
-        in->volume = vol;
-        in->mtime = ino->mtime;
-        in->mode = ino->mode;
-        in->uid = ino->uid;
-        in->gid = ino->gid;
-    }
+    memset(in, 0, sizeof(*in));
+    in->used = 1U;
+    in->type = (uint32_t)ino->type;
+    in->parent = parent;
+    in->size = ino->size;
+    in->volume = vol;
+    in->mtime = ino->mtime;
+    in->mode = ino->mode;
+    in->uid = ino->uid;
+    in->gid = ino->gid;
+    in->nlink = (ino->type == FS_TYPE_FILE) ? ino->nlink : 1U;
     strncpy(in->name, n->name, FS_NAME_MAX - 1U);
     in->name[FS_NAME_MAX - 1U] = '\0';
 
-    if ((n->type == FS_TYPE_FILE || n->type == FS_TYPE_LINK) && n->size > 0U) {
-        uint32_t sectors = (n->size + BLK_SECTOR - 1U) / BLK_SECTOR;
-        static uint8_t buf[BLK_SECTOR];
+    /* 同一 inode 的第一个目录项分配 inode_id 并写数据；其余目录项只引用它。
+     * 这样即使硬链接名字比宿主名字先被遍历到，数据也不会重复写/丢失。 */
+    if (ino_idx < FS_MAX_NODES) {
+        if (dump_ino_id[ino_idx] == 0U) {
+            dump_ino_id[ino_idx] = ++dump_next_ino;
 
-        if (*lba + sectors > blk->sector_count) return E_NOSPC;
-        in->data_lba = *lba;
+            if ((ino->type == FS_TYPE_FILE || ino->type == FS_TYPE_LINK) &&
+                ino->size > 0U) {
+                uint32_t sectors = (ino->size + BLK_SECTOR - 1U) / BLK_SECTOR;
+                static uint8_t buf[BLK_SECTOR];
 
-        for (uint32_t s = 0; s < sectors; s++) {
-            uint32_t off = s * BLK_SECTOR;
-            uint32_t nbytes = ino_of(n)->size - off;
-            if (nbytes > BLK_SECTOR) nbytes = BLK_SECTOR;
-            memset(buf, 0, sizeof(buf));
-            memcpy(buf, ino_of(n)->data + off, nbytes);
-            if (blk_write(blk, *lba + s, buf) != E_OK) return E_INVAL;
+                if (*lba + sectors > blk->sector_count) return E_NOSPC;
+                dump_ino_lba[ino_idx] = *lba;
+
+                for (uint32_t s = 0; s < sectors; s++) {
+                    uint32_t off = s * BLK_SECTOR;
+                    uint32_t nbytes = ino->size - off;
+                    if (nbytes > BLK_SECTOR) nbytes = BLK_SECTOR;
+                    memset(buf, 0, sizeof(buf));
+                    memcpy(buf, ino->data + off, nbytes);
+                    if (blk_write(blk, *lba + s, buf) != E_OK) return E_INVAL;
+                }
+                *lba += sectors;
+            }
         }
-        *lba += sectors;
+        in->inode_id = dump_ino_id[ino_idx];
+        in->data_lba = dump_ino_lba[ino_idx];
+    } else {
+        return E_INVAL;
     }
 
     for (fs_node_t *c = n->first_child; c != 0; c = c->next_sibling) {
@@ -1750,40 +1965,60 @@ static int dump_tree(fs_node_t *n, uint32_t parent, uint32_t vol,
     return E_OK;
 }
 
-int fs_format_disk(const char *blk_name)
+int fs_format_disk_version(const char *blk_name, uint32_t version)
 {
     block_device_t *blk = blk_lookup(blk_name);
     disk_super_t super;
     uint8_t zero[BLK_SECTOR];
+    uint32_t inode_size;
+    uint32_t inode_sect;
+    uint32_t data_lba;
 
     if (blk == 0) return E_NOENT;
+    if (version == DISK_VERSION_V6) {
+        inode_size = (uint32_t)sizeof(disk_inode_t);
+        inode_sect = DISK_INODE_SECT_V6;
+        data_lba = DISK_DATA_LBA;
+    } else if (version == DISK_VERSION_V5) {
+        inode_size = (uint32_t)sizeof(disk_inode_v5_t);
+        inode_sect = DISK_INODE_SECT_V5;
+        data_lba = DISK_DATA_LBA_V5;
+    } else {
+        return E_INVAL;
+    }
+
     /* 设备至少要能放下超级块 + inode 表 + 一个数据扇区，否则格式不完整。 */
-    if (blk->sector_count < DISK_DATA_LBA + 1U) return E_NOSPC;
+    if (blk->sector_count < data_lba + 1U) return E_NOSPC;
 
     memset(&super, 0, sizeof(super));
     super.magic[0] = 'X'; super.magic[1] = 'F'; super.magic[2] = 'S'; super.magic[3] = '1';
-    super.version = DISK_VERSION;
+    super.version = version;
     super.sector_size = BLK_SECTOR;
     super.sector_count = blk->sector_count;
     super.inode_count = DISK_INODE_MAX;
-    super.inode_size = (uint32_t)sizeof(disk_inode_t);
+    super.inode_size = inode_size;
     super.inode_lba = DISK_INODE_LBA;
-    super.data_lba = DISK_DATA_LBA;
+    super.data_lba = data_lba;
     super.volume_count = 0U;
     super.max_file = FS_FILE_MAX;
-    super.data_bytes = (blk->sector_count - DISK_DATA_LBA) * BLK_SECTOR;
+    super.data_bytes = (blk->sector_count - data_lba) * BLK_SECTOR;
 
     if (blk_write(blk, 0U, &super) != E_OK) return E_INVAL;
     set_file_limit(FS_FILE_MAX);   /* 新格式 = 64KB 上限 */
     kprintf("fs: formatted %s as XFS1 v%u (file limit %u bytes, data %u KB)\n",
-            blk->name, (unsigned int)DISK_VERSION,
+            blk->name, (unsigned int)version,
             (unsigned int)fs_limit_current, (unsigned int)(super.data_bytes >> 10));
 
     memset(zero, 0, sizeof(zero));
-    for (uint32_t s = 0; s < DISK_INODE_SECT; s++) {
+    for (uint32_t s = 0; s < inode_sect; s++) {
         if (blk_write(blk, DISK_INODE_LBA + s, zero) != E_OK) return E_INVAL;
     }
     return E_OK;
+}
+
+int fs_format_disk(const char *blk_name)
+{
+    return fs_format_disk_version(blk_name, DISK_VERSION);
 }
 
 int fs_sync(const char *blk_name)
@@ -1792,12 +2027,20 @@ int fs_sync(const char *blk_name)
     static disk_super_t super;
     static uint8_t inode_buf[DISK_INODE_SECT * BLK_SECTOR];
     uint32_t data_lba = DISK_DATA_LBA;
+    uint32_t repairs = 0;
 
     if (blk == 0) return E_NOENT;
     if (blk->sector_count < DISK_DATA_LBA + 1U) return E_NOSPC;
 
     dump_count = 0;
+    dump_next_ino = 0;
     memset(dump_inodes, 0, sizeof(dump_inodes));
+    memset(dump_ino_id, 0, sizeof(dump_ino_id));
+    memset(dump_ino_lba, 0, sizeof(dump_ino_lba));
+
+    /* 落盘前先按目录项数修一遍 nlink，避免内存里的计数错误被永久写进镜像。
+     * 正常路径下 nlink 已经正确，这里不改任何节点。 */
+    repairs = nlink_repair_all();
 
     /* 每个驱动器根各序列化一遍（卷根 parent = 0xFFFFFFFF） */
     for (uint32_t v = 0; v < FS_MAX_VOLUMES; v++) {
@@ -1808,7 +2051,7 @@ int fs_sync(const char *blk_name)
 
     memset(&super, 0, sizeof(super));
     super.magic[0] = 'X'; super.magic[1] = 'F'; super.magic[2] = 'S'; super.magic[3] = '1';
-    super.version = DISK_VERSION;
+    super.version = DISK_VERSION_V6;
     super.sector_size = BLK_SECTOR;
     super.sector_count = blk->sector_count;
     super.inode_count = DISK_INODE_MAX;
@@ -1824,18 +2067,22 @@ int fs_sync(const char *blk_name)
         }
     }
 
-    /* 写到盘上的就是 v5：v4 旧镜像在第一次 sync 时自动升级（数据区布局不变） */
+    /* 写到盘上的就是 v6：v5/v4 旧镜像在第一次 sync 时自动升级。 */
     set_file_limit(FS_FILE_MAX);
 
     memset(inode_buf, 0, sizeof(inode_buf));
     memcpy(inode_buf, dump_inodes, dump_count * sizeof(disk_inode_t));
-    for (uint32_t s = 0; s < DISK_INODE_SECT; s++) {
+    for (uint32_t s = 0; s < DISK_INODE_SECT_V6; s++) {
         if (blk_write(blk, DISK_INODE_LBA + s, inode_buf + s * BLK_SECTOR) != E_OK) {
             return E_INVAL;
         }
     }
 
-    return blk_write(blk, 0U, &super);
+    if (blk_write(blk, 0U, &super) != E_OK) return E_INVAL;
+    if (repairs != 0U) {
+        kprintf("fs: XFS1 v6 synced with %u nlink repair(s)\n", (unsigned int)repairs);
+    }
+    return E_OK;
 }
 
 /* 从盘恢复失败时把内存树清回一致的空状态。
@@ -1855,10 +2102,19 @@ int fs_mount_disk(const char *blk_name)
 {
     block_device_t *blk = blk_lookup(blk_name);
     static disk_super_t super;
-    static uint8_t inode_buf[DISK_INODE_SECT * BLK_SECTOR];
+    static uint8_t inode_buf[DISK_INODE_SECT_V6 * BLK_SECTOR];
     static fs_node_t *by_index[DISK_INODE_MAX];
+    /* v6：by_id[inode_id-1] 是该 inode 的宿主节点，group_count 是已见目录项数 */
+    static fs_node_t *by_id[DISK_INODE_MAX];
+    static uint32_t group_count[DISK_INODE_MAX];
+    disk_inode_v5_t *old_inodes;
     disk_inode_t *inodes;
     uint32_t limit;
+    uint32_t version;
+    uint32_t inode_sect;
+    uint32_t min_data_lba;
+    uint32_t read_sect;
+    uint32_t repairs = 0;
 
     if (blk == 0) return E_NOENT;
     if (blk_read(blk, 0U, &super) != E_OK) return E_INVAL;
@@ -1866,44 +2122,61 @@ int fs_mount_disk(const char *blk_name)
         super.magic[2] != 'S' || super.magic[3] != '1') {
         return E_INVAL;               /* 不是本文件系统的盘 */
     }
-    if (super.inode_count > DISK_INODE_MAX ||
-        super.inode_size != sizeof(disk_inode_t)) {
+    if (super.sector_size != BLK_SECTOR || super.inode_count > DISK_INODE_MAX) {
         return E_INVAL;
     }
 
     /* 版本策略：
-     *   v5（当前）：max_file 必须在 [legacy, 64KB] 之间，否则镜像不可信；
-     *   v4（旧镜像）：数据区布局相同，按 40960 限流挂载，下次 sync 自动升级；
+     *   v6（当前）：inode 记录 116 字节（inode_id + nlink），数据区 LBA 16；
+     *   v5（旧）：  108 字节记录、数据区 LBA 15；挂载后第一次 sync 升 v6；
+     *   v4（更旧）：布局同 v5，但没有 max_file/data_bytes，按 40960 限流；
      *   其它：拒绝（不能拿错布局的镜像当本文件系统用）。
      * 真正应用限额放在几何校验之后：几何不成立时不能改全局状态。 */
-    if (super.version == DISK_VERSION_LEGACY) {
+    version = super.version;
+    if (version == DISK_VERSION_V4) {
         limit = FS_FILE_MAX_LEGACY;
-    } else if (super.version == DISK_VERSION) {
+        inode_sect = DISK_INODE_SECT_V5;
+        min_data_lba = DISK_DATA_LBA_V5;
+        if (super.inode_size != (uint32_t)sizeof(disk_inode_v5_t)) return E_INVAL;
+    } else if (version == DISK_VERSION_V5) {
         if (super.max_file < FS_FILE_MAX_LEGACY || super.max_file > FS_FILE_MAX) {
             return E_INVAL;
         }
         limit = super.max_file;
+        inode_sect = DISK_INODE_SECT_V5;
+        min_data_lba = DISK_DATA_LBA_V5;
+        if (super.inode_size != (uint32_t)sizeof(disk_inode_v5_t)) return E_INVAL;
+    } else if (version == DISK_VERSION_V6) {
+        if (super.max_file < FS_FILE_MAX_LEGACY || super.max_file > FS_FILE_MAX) {
+            return E_INVAL;
+        }
+        limit = super.max_file;
+        inode_sect = DISK_INODE_SECT_V6;
+        min_data_lba = DISK_DATA_LBA;
+        if (super.inode_size != (uint32_t)sizeof(disk_inode_t)) return E_INVAL;
     } else {
         return E_INVAL;
     }
 
     /* 几何字段必须自洽且落在设备范围内。否则按 data_lba 读会越界（块层会拒绝），
      * 但那时内存树已经清空、节点建了一半；先在"还没动内存状态"时拒绝。 */
-    if (blk->sector_count < DISK_DATA_LBA ||
+    if (blk->sector_count < min_data_lba + 1U ||
         super.inode_lba != DISK_INODE_LBA ||
-        super.inode_lba + DISK_INODE_SECT > blk->sector_count ||
-        super.data_lba < DISK_DATA_LBA ||
-        super.data_lba >= blk->sector_count) {
+        super.inode_lba + inode_sect > blk->sector_count ||
+        super.data_lba < min_data_lba ||
+        super.data_lba >= blk->sector_count ||
+        super.inode_count * super.inode_size > inode_sect * BLK_SECTOR) {
         return E_INVAL;
     }
-    /* v5 的容量字段必须落在设备范围内（v4 没有这个字段，按布局推算） */
-    if (super.version == DISK_VERSION && super.data_bytes != 0U &&
-        super.data_lba * BLK_SECTOR + super.data_bytes > blk->sector_count * BLK_SECTOR) {
+    /* v5/v6 的容量字段必须落在设备范围内（v4 没有这个字段，按布局推算） */
+    if (version != DISK_VERSION_V4 && super.data_bytes != 0U &&
+        (uint64_t)super.data_lba * BLK_SECTOR + super.data_bytes >
+        (uint64_t)blk->sector_count * BLK_SECTOR) {
         return E_INVAL;
     }
 
     set_file_limit(limit);
-    if (super.version == DISK_VERSION_LEGACY) {
+    if (version == DISK_VERSION_V4) {
         kprintf("fs: XFS1 v4 legacy image mounted, file limit %u bytes (upgrade on sync)\n",
                 (unsigned int)fs_limit_current);
     }
@@ -1913,18 +2186,47 @@ int fs_mount_disk(const char *blk_name)
     memset(volumes, 0, sizeof(volumes));
     memset(handles, 0, sizeof(handles));
     memset(by_index, 0, sizeof(by_index));
+    memset(by_id, 0, sizeof(by_id));
+    memset(group_count, 0, sizeof(group_count));
 
+    read_sect = inode_sect;
     memset(inode_buf, 0, sizeof(inode_buf));
-    for (uint32_t s = 0; s < DISK_INODE_SECT; s++) {
+    for (uint32_t s = 0; s < read_sect; s++) {
         if (blk_read(blk, super.inode_lba + s, inode_buf + s * BLK_SECTOR) != E_OK) {
             return mount_disk_fail();
         }
     }
     inodes = (disk_inode_t *)inode_buf;
+    old_inodes = (disk_inode_v5_t *)inode_buf;
 
     for (uint32_t i = 0; i < super.inode_count; i++) {
-        disk_inode_t *in = &inodes[i];
+        disk_inode_t cur;
+        disk_inode_t *in = &cur;
+        fs_node_t *host = 0;
         fs_node_t *n;
+        uint32_t inode_id = i + 1U;
+
+        /* 统一成 v6 视角：v5/v4 每条记录都是独立 inode（nlink=1）。 */
+        if (version == DISK_VERSION_V6) {
+            cur = inodes[i];
+        } else {
+            disk_inode_v5_t *o = &old_inodes[i];
+
+            memset(&cur, 0, sizeof(cur));
+            cur.used = o->used;
+            cur.type = o->type;
+            cur.parent = o->parent;
+            cur.size = o->size;
+            cur.data_lba = o->data_lba;
+            cur.volume = o->volume;
+            cur.mtime = o->mtime;
+            cur.mode = o->mode;
+            cur.uid = o->uid;
+            cur.gid = o->gid;
+            memcpy(cur.name, o->name, sizeof(cur.name));
+            cur.inode_id = inode_id;
+            cur.nlink = 1U;
+        }
 
         if (in->used == 0U) continue;
 
@@ -1940,12 +2242,25 @@ int fs_mount_disk(const char *blk_name)
                 return E_INVAL;
             }
             if (in->size > 0U &&
-                (uint64_t)in->data_lba +
-                    (uint64_t)((in->size + BLK_SECTOR - 1U) / BLK_SECTOR) >
-                (uint64_t)blk->sector_count) {
+                ((uint64_t)in->data_lba +
+                     (uint64_t)((in->size + BLK_SECTOR - 1U) / BLK_SECTOR) >
+                 (uint64_t)blk->sector_count ||
+                 in->data_lba < super.data_lba)) {
                 (void)mount_disk_fail();
                 return E_INVAL;
             }
+        } else if (in->type == (uint32_t)FS_TYPE_DIR && in->size != 0U) {
+            (void)mount_disk_fail();
+            return E_INVAL;
+        }
+
+        if (version == DISK_VERSION_V6) {
+            inode_id = in->inode_id;
+            if (inode_id == 0U || inode_id > DISK_INODE_MAX) {
+                (void)mount_disk_fail();
+                return E_INVAL;
+            }
+            host = by_id[inode_id - 1U];
         }
 
         n = node_alloc();
@@ -1954,51 +2269,101 @@ int fs_mount_disk(const char *blk_name)
             return E_FULL;
         }
 
-        n->type = (fs_type_t)in->type;
-        n->nlink = 1;
-        n->canon = 0;
-        n->size = in->size;
-        n->mtime = in->mtime;
-        n->mode = in->mode;
-        n->uid = in->uid;
-        n->gid = in->gid;
         strncpy(n->name, in->name, FS_NAME_MAX - 1U);
         n->name[FS_NAME_MAX - 1U] = '\0';
 
-        if ((n->type == FS_TYPE_FILE || n->type == FS_TYPE_LINK) && n->size > 0U) {
-            uint32_t sectors = (n->size + BLK_SECTOR - 1U) / BLK_SECTOR;
-            for (uint32_t s = 0; s < sectors; s++) {
-                uint8_t buf[BLK_SECTOR];
-                uint32_t off = s * BLK_SECTOR;
-                uint32_t nbytes = n->size - off;
-                if (nbytes > BLK_SECTOR) nbytes = BLK_SECTOR;
-                if (blk_read(blk, in->data_lba + s, buf) != E_OK) {
-                    return mount_disk_fail();
+        if (host == 0) {
+            /* 该 inode 的第一个目录项：建立数据宿主 */
+            n->type = (fs_type_t)in->type;
+            n->canon = 0;
+            n->nlink = (in->type == (uint32_t)FS_TYPE_FILE) ? in->nlink : 1U;
+            n->size = in->size;
+            n->mtime = in->mtime;
+            n->mode = in->mode;
+            n->uid = in->uid;
+            n->gid = in->gid;
+
+            if ((n->type == FS_TYPE_FILE || n->type == FS_TYPE_LINK) && n->size > 0U) {
+                uint32_t sectors = (n->size + BLK_SECTOR - 1U) / BLK_SECTOR;
+                for (uint32_t s = 0; s < sectors; s++) {
+                    uint8_t buf[BLK_SECTOR];
+                    uint32_t off = s * BLK_SECTOR;
+                    uint32_t nbytes = n->size - off;
+                    if (nbytes > BLK_SECTOR) nbytes = BLK_SECTOR;
+                    if (blk_read(blk, in->data_lba + s, buf) != E_OK) {
+                        return mount_disk_fail();
+                    }
+                    memcpy(n->data + off, buf, nbytes);
                 }
-                memcpy(n->data + off, buf, nbytes);
             }
+
+            if (version == DISK_VERSION_V6) {
+                by_id[inode_id - 1U] = n;
+                group_count[inode_id - 1U] = 1U;
+            }
+        } else {
+            /* 同一 inode 的后续目录项：类型/大小/属主必须与宿主一致 */
+            if (in->type != (uint32_t)FS_TYPE_FILE || host->type != FS_TYPE_FILE ||
+                in->size != host->size || in->mode != host->mode ||
+                in->uid != host->uid || in->gid != host->gid) {
+                (void)mount_disk_fail();
+                return E_INVAL;
+            }
+            n->type = FS_TYPE_FILE;
+            n->canon = host;
+            n->nlink = 0;                 /* 计数只记在宿主上 */
+            n->size = 0;                  /* 元数据/数据都走 ino_of() */
+            n->mtime = in->mtime;
+            n->mode = in->mode;
+            n->uid = in->uid;
+            n->gid = in->gid;
+            group_count[inode_id - 1U]++;
         }
 
         by_index[i] = n;
 
         if (in->parent == 0xFFFFFFFFU) {
             /* 卷根：用盘上记录的卷号重建卷表 */
-            if (in->volume < FS_MAX_VOLUMES) {
-                volumes[in->volume].used = true;
-                strncpy(volumes[in->volume].name, super.volumes[in->volume],
-                        FS_DRIVE_MAX - 1U);
-                volumes[in->volume].name[FS_DRIVE_MAX - 1U] = '\0';
-                volumes[in->volume].root = n;
+            if (in->volume >= FS_MAX_VOLUMES || in->type != (uint32_t)FS_TYPE_DIR ||
+                volumes[in->volume].used) {
+                (void)mount_disk_fail();
+                return E_INVAL;
             }
-        } else if (in->parent < DISK_INODE_MAX && by_index[in->parent] != 0) {
+            volumes[in->volume].used = true;
+            strncpy(volumes[in->volume].name, super.volumes[in->volume],
+                    FS_DRIVE_MAX - 1U);
+            volumes[in->volume].name[FS_DRIVE_MAX - 1U] = '\0';
+            volumes[in->volume].root = n;
+        } else if (in->parent < super.inode_count && by_index[in->parent] != 0 &&
+                   by_index[in->parent]->type == FS_TYPE_DIR) {
             link_child(by_index[in->parent], n);
         } else {
             return mount_disk_fail();     /* 父节点不存在的孤儿：整次挂载失败 */
         }
     }
 
-    kprintf("fs: XFS1 v%u mounted, file limit %u bytes\n",
-            (unsigned int)super.version, (unsigned int)fs_limit_current);
+    /* v6：磁盘上的 nlink 必须等于该 inode 的目录项数。镜像可能在上次 sync
+     * 中途掉电留下过期计数；计数是可由目录项推导的，这里直接修正并报告，
+     * 结构性问题（坏 inode/孤儿）仍然整次拒绝。 */
+    if (version == DISK_VERSION_V6) {
+        for (uint32_t id = 0; id < DISK_INODE_MAX; id++) {
+            fs_node_t *h = by_id[id];
+
+            if (h == 0 || h->type != FS_TYPE_FILE) continue;
+            if (group_count[id] != h->nlink) {
+                h->nlink = group_count[id];
+                repairs++;
+            }
+        }
+        if (repairs != 0U) {
+            kprintf("fs: XFS1 v6 nlink repaired on mount (%u inode(s), counted from dir entries)\n",
+                    (unsigned int)repairs);
+        }
+    }
+
+    kprintf("fs: XFS1 v%u mounted, file limit %u bytes%s\n",
+            (unsigned int)version, (unsigned int)fs_limit_current,
+            (version == DISK_VERSION_V6) ? " (nlink persisted)" : "");
     return E_OK;
 }
 
