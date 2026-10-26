@@ -24,6 +24,7 @@
 #include "include/kernel.h"
 #include "include/proc.h"
 #include "include/dev.h"
+#include "net_internal.h"
 #include "net_syscall.h"
 
 #define TCP_FIN     0x01U
@@ -273,20 +274,22 @@ static int tcp_parse_frame(const uint8_t *f, uint32_t len, tcp_seg_t *out)
 {
     const uint8_t *ip;
     const uint8_t *tcp;
+    int ihl_i;
     uint32_t ihl;
     uint32_t tlen;
     uint32_t off;
 
     if (len < 14U + 20U + 20U || rd16(f + 12) != 0x0800U) return -1;
     ip = f + 14;
-    if ((ip[0] >> 4) != 4U || ip[9] != 6U) return -1;
-    ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
-    if (ihl < 20U || 14U + ihl + 20U > len) return -1;
+    /* 版本 / IHL / 首部校验和 / 总长一致 / 拒绝分片：统一走 net_ipv4_validate() */
+    ihl_i = net_ipv4_validate(ip, len - 14U);
+    if (ihl_i < 0) return -1;
+    ihl = (uint32_t)ihl_i;
+    if (ip[9] != 6U) return -1;
     if (memcmp(ip + 16, net_local_ip_ptr(), 4) != 0) return -1;   /* 只收发给本机的 */
-    tcp = ip + ihl;
-
     tlen = (uint32_t)rd16(ip + 2);
-    if (tlen < ihl + 20U || 14U + tlen > len) return -1;
+    if (tlen < ihl + 20U) return -1;              /* TCP 头必须完整落在 IP 总长内 */
+    tcp = ip + ihl;
     off = (uint32_t)(tcp[12] >> 4) * 4U;
     if (off < 20U || ihl + off > tlen) return -1;
 
@@ -311,13 +314,15 @@ static int tcp_parse_frame(const uint8_t *f, uint32_t len, tcp_seg_t *out)
 /* -------------------------------------------------------------------------
  * 客户端：收到的数据按序交给应用缓冲；乱序段进 ooo 队列
  * ------------------------------------------------------------------------- */
-static void tcp_deliver(const uint8_t *data, uint32_t len)
+/* 收到的数据按序交给应用缓冲；返回真正拷进去的字节数（缓冲满时会被截短） */
+static uint32_t tcp_deliver(const uint8_t *data, uint32_t len)
 {
     uint32_t room = TCP_RECV_MAX - conn.rlen;
 
     if (len > room) len = room;
     memcpy(conn.rbuf + conn.rlen, data, len);
     conn.rlen += len;
+    return len;
 }
 
 /* 把 ooo 队列里能从 rcv_nxt 接上的段按序交付 */
@@ -402,19 +407,31 @@ static int tcp_input(const tcp_seg_t *s)
     }
 
     if ((s->flags & TCP_SYN) != 0U) {
-        conn.rcv_nxt = s->seq + 1U;
-        conn.snd_una = s->ack;
-        conn.state = 2;                     /* ESTABLISHED */
-        (void)tcp_xmit(conn.snd_nxt, conn.rcv_nxt, TCP_ACK, 0, 0);
-        return 0;
+        /* audit-net：只接受"对本次 SYN 的正确 SYN-ACK"。
+         * 以前任何带 SYN 的段（不要求 ACK、不校验 ack）都会把连接推进到
+         * ESTABLISHED 并直接改写 rcv_nxt/snd_una：同 4 元组的一个伪造 SYN
+         * 就能重置接收序号，之后攻击者用自己选的 seq 发数据，内核会当正常
+         * 数据交给应用（数据注入 / 状态机崩溃）。 */
+        if (conn.state == 1 && (s->flags & TCP_ACK) != 0U &&
+            s->ack == conn.iss + 1U) {
+            conn.rcv_nxt = s->seq + 1U;
+            conn.snd_una = s->ack;
+            conn.state = 2;                 /* ESTABLISHED */
+            (void)tcp_xmit(conn.snd_nxt, conn.rcv_nxt, TCP_ACK, 0, 0);
+        }
+        return 0;                           /* 其余 SYN：忽略，不重置任何状态 */
     }
 
     if ((s->flags & TCP_ACK) != 0U) tcp_ack_received(s->ack);
 
     if (s->len != 0U) {
         if (s->seq == conn.rcv_nxt) {
-            tcp_deliver(s->data, s->len);
-            conn.rcv_nxt += s->len;
+            /* audit-net：只按"真正交给应用缓冲的字节数"推进 rcv_nxt。
+             * 以前按 s->len 推进，缓冲满时多出来的尾巴被静默丢掉却仍被 ACK，
+             * 应用侧从此永久缺这一段（流被破坏，且对端不会再重传）。 */
+            uint32_t got = tcp_deliver(s->data, s->len);
+
+            conn.rcv_nxt += got;
             tcp_drain_ooo();
             (void)tcp_xmit(conn.snd_nxt, conn.rcv_nxt, TCP_ACK, 0, 0);
         } else if ((int32_t)(s->seq - conn.rcv_nxt) < 0) {
@@ -597,6 +614,27 @@ static int tcp_srv_input(tcp_srv_t *c, const tcp_seg_t *s)
     return 0;
 }
 
+/* audit-net：ISS 不可预测。原来是从 0x50000 起步、每次 +0x1000 递增，攻击者
+ * 只要猜中本地端口就能"盲完成"三次握手（服务端 accept 出一个幽灵连接，
+ * 之后应用写进去的数据全发给攻击者）。用 TSC + ticks + 栈地址熵混合。 */
+static uint32_t tcp_iss_mix(void)
+{
+    uint32_t lo;
+    uint32_t hi;
+    uint32_t x;
+
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    x = lo ^ (hi << 16) ^ tcp_iss_next;
+    x ^= timer_ticks() * 0x9E3779B9U;
+    x ^= (uint32_t)(uintptr_t)&lo;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    if (x == 0U) x = 0x9E3779B9U;
+    tcp_iss_next = x + 0x1000U;
+    return x;
+}
+
 /* 收到新 SYN：进 SYN 队列（backlog 满就丢弃并计数），回 SYN-ACK */
 static void tcp_listen_syn(tcp_sock_t *l, const tcp_seg_t *s)
 {
@@ -630,8 +668,7 @@ static void tcp_listen_syn(tcp_sock_t *l, const tcp_seg_t *s)
     memcpy(h->peer_ip, s->src_ip, 4);
     h->peer_port = s->src_port;
     h->rcv_nxt = s->seq + 1U;
-    h->iss = tcp_iss_next;
-    tcp_iss_next += 0x1000U;
+    h->iss = tcp_iss_mix();
     h->snd_nxt = h->iss + 1U;
     h->created = timer_ticks();
     l->syn_count++;
@@ -649,6 +686,10 @@ static bool tcp_listen_complete(tcp_sock_t *l, const tcp_seg_t *s)
         if (!h->used) continue;
         if (h->peer_port != s->src_port || memcmp(h->peer_ip, s->src_ip, 4) != 0) continue;
         if (s->ack != h->iss + 1U) return false;
+        /* audit-net：还要求最后一个 ACK 的序号正好是"对端 SYN 的下一个字节"。
+         * 以前只校验 ack：任何猜中 ISS 的人凭空发一个 ACK 就能完成握手，
+         * 服务端 accept 出一个没有任何真实对端的连接（盲注入/幽灵连接）。 */
+        if (s->seq != h->rcv_nxt) return false;
 
         if (l->accept_count >= l->backlog) {   /* 完成队列也满：丢掉这次 ACK */
             l->overflow++;
@@ -793,7 +834,7 @@ static void tcp_reset_state(uint16_t lport, const uint8_t peer_ip[4], uint16_t p
     conn.lport = lport;
     conn.peer_port = peer_port;
     if (peer_ip != 0) memcpy(conn.peer_ip, peer_ip, 4);
-    conn.iss = 0x30000U + (uint32_t)(timer_ticks() & 0xFFFFU);
+    conn.iss = tcp_iss_mix();                /* 客户端 ISS 也不可预测 */
     conn.snd_una = conn.iss;
     conn.snd_nxt = conn.iss + 1U;
     conn.rto = TCP_RTO_INIT;
@@ -1187,10 +1228,31 @@ void net_tcp_sock_gc(void)
         tcp_sock_t *s = &socks[i];
 
         if (!s->used || s->owner_pid <= 0) continue;
+        if (s->owner_fd < 0) {
+            /* SYS_LISTEN 兜底创建的"进程持有但没有 fd"的监听 socket：
+             * 进程还在就保留，进程一退出就回收。以前这种 socket 的 owner_pid=0，
+             * GC 永远跳过 -> 任何用户进程都能永久占住端口和 socket 槽（DoS）。 */
+            if (proc_find((uint32_t)s->owner_pid) == 0) {
+                (void)net_tcp_sock_close((int)i);
+            }
+            continue;
+        }
         if (!tcp_fd_alive(s->owner_pid, s->owner_fd, NET_TCP_HDL_LISTEN, (int)i)) {
             (void)net_tcp_sock_close((int)i);
         }
     }
+}
+
+/* 某进程持有的"没有 fd 的监听 socket"数量（net_syscall.c 的兜底路径限 1 个用） */
+int net_tcp_pid_orphan_listeners(int pid)
+{
+    int n = 0;
+
+    if (pid <= 0) return 0;
+    for (uint32_t i = 0; i < TCP_SOCK_MAX; i++) {
+        if (socks[i].used && socks[i].owner_pid == pid && socks[i].owner_fd < 0) n++;
+    }
+    return n;
 }
 
 /* =============================================================================
@@ -1248,6 +1310,7 @@ static int tcp_self_test_ooo(void)
         memcpy(ip + 12, net_gw_ip_ptr(), 4);   /* src = 对端 */
         memcpy(ip + 16, net_local_ip_ptr(), 4);
         wr16(ip + 10, 0);
+        wr16(ip + 10, fold_sum(csum_add(ip, 20U)));  /* IP 头合法；TCP 校验和故意错 */
         wr16(tcp + 0, c->peer_port);
         wr16(tcp + 2, c->lport);
         wr32(tcp + 4, c->rcv_nxt + 200U);
@@ -1280,9 +1343,10 @@ static int tcp_self_test_ooo(void)
 #define TCP_TEST_SYS_CLIENT_PORT  15065U
 
 /* 把一帧“外部对端 -> 本机”的 TCP 段塞进本地回环队列（走完整解析/校验和） */
-static void tcp_test_inject(const uint8_t src_ip[4], uint16_t sport, uint16_t dport,
-                            uint32_t seq, uint32_t ack, uint8_t flags,
-                            const uint8_t *data, uint32_t len)
+static void tcp_test_inject_ex(const uint8_t src_ip[4], uint16_t sport, uint16_t dport,
+                               uint32_t seq, uint32_t ack, uint8_t flags,
+                               const uint8_t *data, uint32_t len,
+                               uint16_t frag, int bad_ip_csum)
 {
     uint8_t f[14U + 20U + 20U + TCP_MSS];
     uint8_t *ip = f + 14;
@@ -1300,6 +1364,7 @@ static void tcp_test_inject(const uint8_t src_ip[4], uint16_t sport, uint16_t dp
     ip[0] = 0x45;
     wr16(ip + 2, (uint16_t)total);
     wr16(ip + 4, 0x4000U);
+    wr16(ip + 6, frag);
     ip[8] = 64;
     ip[9] = 6;
     memcpy(ip + 12, src_ip, 4);
@@ -1315,9 +1380,20 @@ static void tcp_test_inject(const uint8_t src_ip[4], uint16_t sport, uint16_t dp
     if (len != 0U && data != 0) memcpy(tcp + 20, data, len);
     wr16(tcp + 16, 0);
     wr16(tcp + 16, tcp_csum(src_ip, net_local_ip_ptr(), tcp, 20U + len));
+    /* IPv4 首部校验和：以前这里固定写 0（等价于"坏校验和"），
+     * 补上真值后 net_ipv4_validate() 才能对注入帧做正向校验。 */
     wr16(ip + 10, 0);
+    wr16(ip + 10, (uint16_t)(fold_sum(csum_add(ip, 20U)) ^
+                             (bad_ip_csum ? 0xFFFFU : 0U)));
 
     (void)net_loopback_push(f, 14U + total);
+}
+
+static void tcp_test_inject(const uint8_t src_ip[4], uint16_t sport, uint16_t dport,
+                            uint32_t seq, uint32_t ack, uint8_t flags,
+                            const uint8_t *data, uint32_t len)
+{
+    tcp_test_inject_ex(src_ip, sport, dport, seq, ack, flags, data, len, 0x4000U, 0);
 }
 
 /* 本机回环上的 listen -> connect -> 收发 -> 关闭，外加 backlog/TIME_WAIT 负向用例 */
@@ -1699,6 +1775,189 @@ out:
     return fail;
 }
 
+/* =============================================================================
+ * 畸形包 / 伪造段负向自检（audit-net 回归行）
+ *
+ * 覆盖四类"看起来能收包、实际上被攻击者利用"的缺陷：
+ *   1. 伪造 SYN 不得改写已建立连接的 rcv_nxt/snd_una；
+ *   2. 接收缓冲满时，超出部分不得被 ACK（否则应用永久缺字节）；
+ *   3. 半开握手的最后一个 ACK 必须 seq 正确（不能只猜中 ISS 就完成握手）；
+ *   4. IPv4 首部校验和错 / MF 分片 / 片偏移非 0 的段不得进状态机。
+ * 每类都带一个正向对照，避免"全部拒绝"的假通过。
+ * ========================================================================== */
+#define TCP_AUDIT_HS_PORT   15070U
+#define TCP_AUDIT_IP_PORT   15072U
+
+static int tcp_audit_selftest(void)
+{
+    tcp_conn_t *c = &conn;
+    tcp_seg_t s;
+    uint8_t buf[100];
+    uint8_t peer[4];
+    int lsock;
+
+    if (e1000_present() == 0) return 0;
+
+    /* ---- 1) 伪造 SYN：不得重置已建立连接 ---- */
+    memset(c, 0, sizeof(*c));
+    c->synthetic = true;
+    c->state = 2;
+    c->iss = 0x12340000U;
+    c->snd_una = 0x12340001U;
+    c->snd_nxt = 0x12340001U;
+    c->rcv_nxt = 2000U;
+    c->lport = 15071U;
+    c->peer_port = NET_ECHO_PORT;
+    memcpy(c->peer_ip, net_gw_ip_ptr(), 4);
+
+    memset(&s, 0, sizeof(s));
+    s.seq = 0x7777U;
+    s.ack = 0U;
+    s.flags = TCP_SYN;
+    (void)tcp_input(&s);
+    if (c->state != 2 || c->rcv_nxt != 2000U) {
+        kprintln("net: audit tcp forged SYN reset the connection");
+        return -1;
+    }
+    s.flags = TCP_SYN | TCP_ACK;
+    s.ack = 0x1234U;                    /* 不是 iss+1 */
+    (void)tcp_input(&s);
+    if (c->state != 2 || c->rcv_nxt != 2000U) {
+        kprintln("net: audit tcp SYN with wrong ack accepted");
+        return -1;
+    }
+    kprintln("net: audit tcp forged SYN ignored ok");
+
+    /* ---- 2) 接收缓冲满：rcv_nxt 只能按"真正交付"的字节数推进 ---- */
+    memset(c, 0, sizeof(*c));
+    c->synthetic = true;
+    c->state = 2;
+    c->rcv_nxt = 3000U;
+    c->snd_una = 0x5000U;
+    c->snd_nxt = 0x5000U;
+    c->rlen = TCP_RECV_MAX - 16U;
+    memset(c->rbuf, 'X', c->rlen);
+    memset(buf, 'Y', sizeof(buf));
+    memset(&s, 0, sizeof(s));
+    s.seq = 3000U;
+    s.ack = 0x5000U;
+    s.flags = TCP_ACK;
+    s.data = buf;
+    s.len = (uint32_t)sizeof(buf);
+    (void)tcp_input(&s);
+    if (c->rlen != TCP_RECV_MAX || c->rcv_nxt != 3016U) {
+        kprintf("net: audit tcp rcv accounting wrong (rlen=%u rcv_nxt=%u)\n",
+                (unsigned int)c->rlen, (unsigned int)c->rcv_nxt);
+        return -1;
+    }
+    kprintln("net: audit tcp receive accounting ok (partial segment not over-ACKed)");
+
+    /* ---- 3) 半开握手：最后一个 ACK 的 seq 必须正确 ---- */
+    /* 前两个用例是 synthetic（不真收发包）；这里要真的走一遍 loopback 解析，
+     * 所以先清掉 synthetic 并排空可能残留的回环帧。 */
+    memset(c, 0, sizeof(*c));
+    tcp_drain();
+    lsock = net_tcp_listen_port(TCP_AUDIT_HS_PORT, 2U);
+    if (lsock < 0) {
+        kprintln("net: audit tcp listen failed (hs)");
+        return -1;
+    }
+    {
+        tcp_sock_t *l = sock_get(lsock);
+        uint32_t iss;
+
+        if (l == 0) {
+            net_tcp_sock_close(lsock);
+            return -1;
+        }
+        memcpy(peer, net_local_ip_ptr(), 4);
+        tcp_test_inject(peer, 41001U, TCP_AUDIT_HS_PORT, 5000U, 0U, TCP_SYN, 0, 0);
+        tcp_drain();
+        if (l->syn_count != 1U) {
+            kprintln("net: audit tcp half-open SYN not queued");
+            net_tcp_sock_close(lsock);
+            return -1;
+        }
+        iss = l->synq[0].iss;
+        /* 3a) seq 错的 ACK：不能完成握手 */
+        tcp_test_inject(peer, 41001U, TCP_AUDIT_HS_PORT, 5001U + 7U, iss + 1U,
+                        TCP_ACK, 0, 0);
+        tcp_drain();
+        if (l->accept_count != 0U) {
+            kprintln("net: audit tcp blind handshake accepted");
+            net_tcp_sock_close(lsock);
+            return -1;
+        }
+        /* 3b) 正向对照：seq/ack 都对，必须完成 */
+        tcp_test_inject(peer, 41001U, TCP_AUDIT_HS_PORT, 5001U, iss + 1U,
+                        TCP_ACK, 0, 0);
+        tcp_drain();
+        if (l->accept_count != 1U) {
+            kprintln("net: audit tcp correct ACK did not complete handshake");
+            net_tcp_sock_close(lsock);
+            return -1;
+        }
+        /* 完成队列里已经有一条可 accept 的连接。accept/close 的完整链路已由
+         * tcp_self_test_listen 覆盖；这里不再引入 proc_sleep_ticks，审计用例
+         * 尽量不依赖调度时序（关闭监听会把未取走的完成连接回 RST）。 */
+        net_tcp_sock_close(lsock);
+    }
+    kprintln("net: audit tcp handshake seq validated ok");
+
+    /* ---- 4) 坏 IP 校验和 / 分片：段不得进状态机 ---- */
+    lsock = net_tcp_listen_port(TCP_AUDIT_IP_PORT, 2U);
+    if (lsock < 0) {
+        kprintln("net: audit tcp listen failed (ip)");
+        return -1;
+    }
+    {
+        tcp_sock_t *l = sock_get(lsock);
+        uint32_t bad = 0;
+
+        if (l == 0) {
+            net_tcp_sock_close(lsock);
+            return -1;
+        }
+        memcpy(peer, net_local_ip_ptr(), 4);
+        /* 坏 IPv4 首部校验和 */
+        tcp_test_inject_ex(peer, 41002U, TCP_AUDIT_IP_PORT, 6000U, 0U, TCP_SYN,
+                           0, 0, 0x4000U, 1);
+        tcp_drain();
+        if (l->syn_count != 0U) bad++;
+        /* MF 分片 */
+        tcp_test_inject_ex(peer, 41002U, TCP_AUDIT_IP_PORT, 6000U, 0U, TCP_SYN,
+                           0, 0, 0x2000U, 0);
+        tcp_drain();
+        if (l->syn_count != 0U) bad++;
+        /* 非 0 片偏移 */
+        tcp_test_inject_ex(peer, 41002U, TCP_AUDIT_IP_PORT, 6000U, 0U, TCP_SYN,
+                           0, 0, 0x0003U, 0);
+        tcp_drain();
+        if (l->syn_count != 0U) bad++;
+        if (bad != 0U) {
+            kprintf("net: audit tcp ip ingress accepted malformed (bad=%u)\n",
+                    (unsigned int)bad);
+            net_tcp_sock_close(lsock);
+            return -1;
+        }
+        /* 正向对照：合法帧必须进 SYN 队列 */
+        tcp_test_inject_ex(peer, 41002U, TCP_AUDIT_IP_PORT, 6000U, 0U, TCP_SYN,
+                           0, 0, 0x4000U, 0);
+        tcp_drain();
+        if (l->syn_count != 1U) {
+            kprintln("net: audit tcp valid SYN rejected (over-strict)");
+            net_tcp_sock_close(lsock);
+            return -1;
+        }
+        net_tcp_sock_close(lsock);
+    }
+    kprintln("net: audit tcp ip ingress rejects malformed ok (bad=3)");
+
+    memset(c, 0, sizeof(*c));            /* 收尾：不把审计状态留给后续用例 */
+    kprintln("net: audit tcp ok");
+    return 0;
+}
+
 int net_tcp_listen_selftest(void)
 {
     if (e1000_present() == 0) return 0;
@@ -1730,6 +1989,20 @@ int net_tcp_robust_selftest(void)
     }
     if (net_tcp_listen_selftest() != 0) {
         kprintln("net: tcp selftest FAILED (listen/accept)");
+        return -1;
+    }
+    /* 畸形包 / 伪造段负向用例（audit-net）：放在所有正向用例之后，
+     * 不改变既有断言的状态前提。 */
+    if (tcp_audit_selftest() != 0) {
+        kprintln("net: tcp selftest FAILED (audit tcp)");
+        return -1;
+    }
+    if (net_syscall_audit_selftest() != 0) {
+        kprintln("net: tcp selftest FAILED (audit listen)");
+        return -1;
+    }
+    if (net_audit_selftest() != 0) {
+        kprintln("net: tcp selftest FAILED (audit net)");
         return -1;
     }
     kprintln("net: tcp selftest PASS");

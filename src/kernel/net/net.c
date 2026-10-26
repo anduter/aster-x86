@@ -9,10 +9,8 @@
  * ============================================================================= */
 #include "net.h"
 #include "net_boot.h"
+#include "net_internal.h"
 #include "include/dev.h"
-#include "include/kernel.h"
-#include "include/kernel.h"
-#include "include/kernel.h"
 #include "include/kernel.h"
 
 #define NET_RX_MAX 2048U
@@ -86,6 +84,62 @@ static uint16_t checksum(const uint8_t *p, uint32_t n)
     return (uint16_t)~sum;
 }
 
+/* =============================================================================
+ * 收包静态校验（audit-net）
+ *
+ * 之前每个解析入口各自做"len 够不够 / ihl 合不合法"，但都漏了三件事：
+ *   1. IPv4 首部校验和从来不验（坏头直接进状态机）；
+ *   2. MF / 片偏移从来不验（本栈没有重组，第一个分片会被当成完整报文，
+ *      UDP 会把半截 payload 交付给应用，TCP 会把片里的字节当段数据）；
+ *   3. UDP 声明长度和帧长不一致时不丢弃（截断后照样交付），非 0 校验和
+ *      也从来不验（坏 payload 静默进应用）。
+ * 统一到下面三个原语，所有 IPv4/UDP 入口共用。
+ * ========================================================================== */
+uint16_t net_ip_checksum(const uint8_t *ip, uint32_t ihl)
+{
+    return checksum(ip, ihl);
+}
+
+int net_ipv4_validate(const uint8_t *ip, uint32_t avail)
+{
+    uint32_t ihl;
+    uint32_t tlen;
+
+    if (ip == 0 || avail < 20U) return -1;
+    if ((ip[0] >> 4) != 4U) return -1;
+    ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
+    if (ihl < 20U || ihl > avail) return -1;
+    /* MF(0x2000) 或片偏移(0x1FFF) 非 0：整帧丢弃（不重组，绝不当完整报文解析）。
+     * DF(0x4000) 不在此掩码内，带 DF 的报文正常处理。 */
+    if ((rd16(ip + 6) & 0x3FFFU) != 0U) return -1;
+    tlen = rd16(ip + 2);
+    if (tlen < ihl || tlen > avail) return -1;
+    if (checksum(ip, ihl) != 0U) return -1;      /* 首部校验和错 */
+    return (int)ihl;
+}
+
+int net_udp_validate(const uint8_t *ip, const uint8_t *udp, uint32_t avail,
+                     uint32_t *ulen)
+{
+    uint32_t n;
+    uint32_t sum;
+    uint32_t i;
+
+    if (ip == 0 || udp == 0 || avail < 8U) return -1;
+    n = rd16(udp + 4);                       /* UDP 长度（含 8 字节头） */
+    if (n < 8U || n > avail) return -1;      /* 声明长度必须整段落在帧内 */
+    if (rd16(udp + 6) != 0U) {               /* 0 = 未计算（IPv4 允许） */
+        sum = (uint32_t)rd16(ip + 12) + (uint32_t)rd16(ip + 14) +
+              (uint32_t)rd16(ip + 16) + (uint32_t)rd16(ip + 18) + 17U + n;
+        for (i = 0; i + 1U < n; i += 2U) sum += rd16(udp + i);
+        if ((n & 1U) != 0U) sum += (uint16_t)udp[n - 1U] << 8;
+        while ((sum >> 16) != 0U) sum = (sum & 0xFFFFU) + (sum >> 16);
+        if ((uint16_t)~sum != 0U) return -1; /* 校验和错：坏 payload 不交付 */
+    }
+    if (ulen != 0) *ulen = n;
+    return 0;
+}
+
 static void net_arp_request(void)
 {
     uint8_t f[60];
@@ -107,9 +161,25 @@ static void net_arp_request(void)
 
 static int net_parse_arp(const uint8_t *f, uint32_t len)
 {
+    uint32_t i;
+
     if (len < 42U || rd16(f + 12) != 0x0806U) return 0;
-    if (rd16(f + 20) != 2U) return 0;       /* reply */
-    if (rd16(f + 28) != 0x0A00U) return 0;  /* 10.0.2.2 粗校验 */
+    if (rd16(f + 14) != 1U || rd16(f + 16) != 0x0800U) return 0; /* Ethernet/IPv4 */
+    if (f[18] != 6U || f[19] != 4U) return 0;                    /* hlen/plen */
+    if (rd16(f + 20) != 2U) return 0;                            /* reply */
+    /* 只接受"网关本人对我们这次请求的回答"：
+     *   sender IP == gw_ip（以前只比 10.0.x 两个字节，任意 10.0.x.x 主机
+     *   发一个 reply 就能把 gw_mac 改成自己的 MAC -> 全流量被劫持）；
+     *   target IP == 本机地址（reply 必须是回给我们的）。 */
+    if (memcmp(f + 28, gw_ip, 4) != 0) return 0;
+    if (memcmp(f + 38, local_ip, 4) != 0) return 0;
+    /* 发送者 MAC 必须是单播且非 0（广播/组播 MAC 不能进网关表） */
+    if ((f[22] & 0x01U) != 0U) return 0;
+    for (i = 0; i < 6U; i++) {
+        if (f[22U + i] != 0U) break;
+    }
+    if (i == 6U) return 0;
+
     memcpy(gw_mac, f + 22, 6);
     kprintf("net: ARP reply gw=%02x:%02x:%02x:%02x:%02x:%02x\n",
             gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]);
@@ -149,15 +219,23 @@ static int net_parse_icmp(const uint8_t *f, uint32_t len)
 {
     const uint8_t *ip;
     const uint8_t *icmp;
+    int ihl_i;
     uint32_t ihl;
+    uint32_t tlen;
 
     if (len < 42U || rd16(f + 12) != 0x0800U) return 0;
     ip = f + 14;
-    if ((ip[0] >> 4) != 4U || ip[9] != 1U) return 0;
-    ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
-    if (ihl < 20U || 14U + ihl + 8U > len) return 0;
+    ihl_i = net_ipv4_validate(ip, len - 14U);
+    if (ihl_i < 0) return 0;
+    ihl = (uint32_t)ihl_i;
+    if (ip[9] != 1U) return 0;
+    if (memcmp(ip + 12, gw_ip, 4) != 0) return 0;      /* 只认网关的 echo reply */
+    if (memcmp(ip + 16, local_ip, 4) != 0) return 0;
+    tlen = rd16(ip + 2);
+    if (tlen < ihl + 8U) return 0;
     icmp = ip + ihl;
     if (icmp[0] != 0U) return 0;
+    if (checksum(icmp, tlen - ihl) != 0U) return 0;    /* ICMP 校验和 */
     kprintf("net: ICMP echo reply seq=%u\n", (unsigned int)rd16(icmp + 6));
     return 1;
 }
@@ -294,6 +372,34 @@ static int udp_q_take(uint16_t local_port, net_udp_dgram_t *out)
 }
 
 /* RX 环的唯一消费者：把当前能收到的 UDP 帧解到软件队列（调用者持锁） */
+static uint32_t udp_bad_frames;      /* 校验失败被丢弃的 UDP 帧（自检/诊断用） */
+
+/* 解析一个 IPv4/UDP 帧并按其目的端口入队（调用者持 udp_lock）。
+ * 返回 0 = 已入队；-1 = 丢弃（版本/IHL/校验和/分片/长度任何一项不合法）。 */
+static int net_udp_rx_frame(const uint8_t *f, uint32_t len)
+{
+    const uint8_t *ip;
+    const uint8_t *udp;
+    int ihl_i;
+    uint32_t ihl;
+    uint32_t ulen;
+    uint32_t plen;
+
+    if (len < 14U + 20U + 8U || rd16(f + 12) != 0x0800U) return -1;
+    ip = f + 14;
+    ihl_i = net_ipv4_validate(ip, len - 14U);
+    if (ihl_i < 0) return -1;
+    ihl = (uint32_t)ihl_i;
+    if (ip[9] != 17U) return -1;
+    if (memcmp(ip + 16, local_ip, 4) != 0) return -1;  /* 只收发给本机的 */
+    udp = ip + ihl;
+    if (net_udp_validate(ip, udp, len - 14U - ihl, &ulen) != 0) return -1;
+    plen = ulen - 8U;
+    if (plen > NET_UDP_PAYLOAD_MAX) plen = NET_UDP_PAYLOAD_MAX;
+    udp_q_push(ip + 12, rd16(udp + 0), rd16(udp + 2), udp + 8, plen);
+    return 0;
+}
+
 static void udp_drain_locked(void)
 {
     uint8_t f[NET_RX_MAX];
@@ -301,28 +407,9 @@ static void udp_drain_locked(void)
 
     for (i = 0; i < NET_UDP_QMAX; i++) {
         int len = e1000_rx_poll(f, sizeof(f));
-        const uint8_t *ip;
-        const uint8_t *udp;
-        uint32_t ihl;
-        uint32_t ulen;
-        uint32_t plen;
-        uint32_t avail;
 
         if (len <= 0) break;
-        if ((uint32_t)len < 14U + 20U + 8U || rd16(f + 12) != 0x0800U) continue;
-        ip = f + 14;
-        if ((ip[0] >> 4) != 4U || ip[9] != 17U) continue;
-        ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
-        if (ihl < 20U || 14U + ihl + 8U > (uint32_t)len) continue;
-        if (memcmp(ip + 16, local_ip, 4) != 0) continue;  /* 只收发给本机的 */
-        udp = ip + ihl;
-        ulen = rd16(udp + 4);
-        if (ulen < 8U) continue;                          /* 非法长度 */
-        plen = ulen - 8U;
-        avail = (uint32_t)len - 14U - ihl - 8U;
-        if (plen > avail) plen = avail;
-        if (plen > NET_UDP_PAYLOAD_MAX) plen = NET_UDP_PAYLOAD_MAX;
-        udp_q_push(ip + 12, rd16(udp + 0), rd16(udp + 2), udp + 8, plen);
+        if (net_udp_rx_frame(f, (uint32_t)len) != 0) udp_bad_frames++;
     }
 }
 
@@ -522,28 +609,30 @@ static int net_tcp_recv(uint16_t src_port, uint32_t spins, uint8_t *flags,
         int len = e1000_rx_poll(f, sizeof(f));
         const uint8_t *ip;
         const uint8_t *tcp;
+        int ihl_i;
         uint32_t ihl;
+        uint32_t tlen;
         uint32_t off;
         uint32_t plen;
 
         if (len <= 0) continue;
         if ((uint32_t)len < 14U + 20U + 20U || rd16(f + 12) != 0x0800U) continue;
         ip = f + 14;
-        if ((ip[0] >> 4) != 4U || ip[9] != 6U) continue;
-        ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
-        if (14U + ihl + 20U > (uint32_t)len) continue;
+        ihl_i = net_ipv4_validate(ip, (uint32_t)len - 14U);
+        if (ihl_i < 0) continue;
+        ihl = (uint32_t)ihl_i;
+        if (ip[9] != 6U) continue;
+        if (memcmp(ip + 12, gw_ip, 4) != 0) continue;   /* 只认网关这个对端 */
+        tlen = rd16(ip + 2);
+        if (tlen < ihl + 20U) continue;                 /* TCP 头要完整 */
         tcp = ip + ihl;
         if (rd16(tcp + 0) != NET_TCP_PORT || rd16(tcp + 2) != src_port) continue;
+        off = (uint32_t)(tcp[12] >> 4) * 4U;
+        if (off < 20U || ihl + off > tlen) continue;
         *flags = tcp[13];
         *seq = ((uint32_t)rd16(tcp + 4) << 16) | rd16(tcp + 6);
         *ack = ((uint32_t)rd16(tcp + 8) << 16) | rd16(tcp + 10);
-        off = (uint32_t)(tcp[12] >> 4) * 4U;
-        if (off < 20U || 14U + ihl + off > (uint32_t)len) continue;
-        {
-            uint32_t iplen = rd16(ip + 2);
-            if (iplen < ihl + off || 14U + iplen > (uint32_t)len) continue;
-            plen = iplen - ihl - off;
-        }
+        plen = tlen - ihl - off;
         if (plen > max_len) plen = max_len;
         if (data != 0 && plen != 0U) memcpy(data, tcp + off, plen);
         return (int)plen;
@@ -780,4 +869,151 @@ void net_init(void)
 
     /* ethtool 式统计：驱动内部计数，一行给测试脚本断言（不新增 syscall）。 */
     e1000_stats_print();
+}
+
+/* =============================================================================
+ * 畸形包负向自检（audit-net 回归行）
+ *
+ * 这些用例不是"能收包"的正向证明，而是"坏包必须被丢掉"的负向证明：
+ *   - ARP：非网关 sender 发来的 reply 不能改写 gw_mac（防流量劫持）；
+ *   - UDP：坏 IP 首部校验和 / MF 分片 / 片偏移 / 声明长度超出帧 / 坏 UDP
+ *     校验和，全部不得入队；对照组（合法帧）必须入队，防止"全部拒绝"的
+ *     假通过。
+ * 期望串口输出：
+ *   net: audit arp spoof rejected ok
+ *   net: audit udp ingress rejects malformed ok (bad=5)
+ *   net: audit net ok (udp+arp)
+ * ========================================================================== */
+static uint16_t udp_audit_csum(const uint8_t *ip, const uint8_t *udp, uint32_t ulen)
+{
+    uint32_t sum;
+    uint32_t i;
+
+    sum = (uint32_t)rd16(ip + 12) + (uint32_t)rd16(ip + 14) +
+          (uint32_t)rd16(ip + 16) + (uint32_t)rd16(ip + 18) + 17U + ulen;
+    for (i = 0; i + 1U < ulen; i += 2U) sum += rd16(udp + i);
+    if ((ulen & 1U) != 0U) sum += (uint16_t)udp[ulen - 1U] << 8;
+    while ((sum >> 16) != 0U) sum = (sum & 0xFFFFU) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
+/* 组一个"对端 -> 本机"的 UDP 帧。csum_mode: 0=0（不计算）1=正确 2=故意错。 */
+static uint32_t udp_audit_build(uint8_t *f, uint32_t plen, uint16_t frag,
+                                int bad_ip_csum, int csum_mode)
+{
+    uint8_t *ip = f + 14;
+    uint8_t *udp = ip + 20;
+    uint32_t total = 20U + 8U + plen;
+    uint32_t i;
+
+    memset(f, 0, 14U + total);
+    memcpy(f, gw_mac, 6);
+    memcpy(f + 6, gw_mac, 6);
+    f[12] = 0x08; f[13] = 0x00;
+
+    ip[0] = 0x45;
+    wr16(ip + 2, (uint16_t)total);
+    wr16(ip + 4, 0x1234U);
+    wr16(ip + 6, frag);
+    ip[8] = 64;
+    ip[9] = 17;
+    memcpy(ip + 12, gw_ip, 4);           /* 源：网关 */
+    memcpy(ip + 16, local_ip, 4);        /* 宿：本机 */
+    wr16(ip + 10, (uint16_t)(checksum(ip, 20U) ^ (bad_ip_csum ? 0xFFFFU : 0U)));
+
+    wr16(udp + 0, 40100U);
+    wr16(udp + 2, NET_UDP_PORT);
+    wr16(udp + 4, (uint16_t)(8U + plen));
+    wr16(udp + 6, 0);
+    for (i = 0; i < plen; i++) udp[8U + i] = (uint8_t)('a' + (i % 26U));
+    if (csum_mode != 0) {
+        uint16_t c = udp_audit_csum(ip, udp, 8U + plen);
+
+        wr16(udp + 6, (csum_mode == 2) ? (uint16_t)(c ^ 0x0101U) : c);
+    }
+    return 14U + total;
+}
+
+int net_audit_selftest(void)
+{
+    uint8_t f[14U + 20U + 8U + 64];
+    uint8_t mac[6];
+    uint8_t saved_mac[6];
+    uint32_t accepted;
+    uint32_t rejected;
+    uint32_t n;
+
+    if (!e1000_present()) return 0;
+
+    /* ---- ARP 欺骗：sender 不是网关 -> 必须被拒 ---- */
+    net_gw_mac_get(saved_mac);
+    memset(f, 0, 42U);
+    memset(f, 0xFF, 6);                          /* 目的：广播 */
+    e1000_mac(f + 6);
+    f[12] = 0x08; f[13] = 0x06;
+    wr16(f + 14, 1U); wr16(f + 16, 0x0800U);
+    f[18] = 6; f[19] = 4;
+    wr16(f + 20, 2U);                            /* reply */
+    mac[0] = 0x02; mac[1] = 0x00; mac[2] = 0x00;
+    mac[3] = 0x00; mac[4] = 0x00; mac[5] = 0x66; /* 攻击者 MAC */
+    memcpy(f + 22, mac, 6);
+    {   /* sender IP = 10.0.9.9（不是网关），target IP = 本机 */
+        static const uint8_t evil_ip[4] = { 10, 0, 9, 9 };
+
+        memcpy(f + 28, evil_ip, 4);
+        memcpy(f + 38, local_ip, 4);
+    }
+    if (net_parse_arp(f, 42U) != 0) {
+        kprintln("net: audit arp spoof NOT rejected");
+        return -1;
+    }
+    net_gw_mac_get(mac);
+    if (memcmp(mac, saved_mac, 6) != 0) {
+        kprintln("net: audit arp spoof changed gw_mac");
+        return -1;
+    }
+    kprintln("net: audit arp spoof rejected ok");
+
+    /* ---- UDP 入口：坏包必须丢弃，好包必须收下 ---- */
+    {
+        uint32_t flags = spin_lock_irqsave(&udp_lock);
+
+        accepted = 0;
+        rejected = 0;
+
+        /* 对照 1：合法帧（校验和为 0 = 未计算）必须入队 */
+        n = udp_audit_build(f, 8U, 0U, 0, 0);
+        if (net_udp_rx_frame(f, n) == 0) accepted++;
+        /* 坏 IP 首部校验和 */
+        n = udp_audit_build(f, 8U, 0U, 1, 0);
+        if (net_udp_rx_frame(f, n) != 0) rejected++;
+        /* MF 分片 */
+        n = udp_audit_build(f, 8U, 0x2000U, 0, 0);
+        if (net_udp_rx_frame(f, n) != 0) rejected++;
+        /* 非 0 片偏移 */
+        n = udp_audit_build(f, 8U, 0x0005U, 0, 0);
+        if (net_udp_rx_frame(f, n) != 0) rejected++;
+        /* UDP 声明长度超出帧（声明 300，实际只有 8 字节 payload） */
+        n = udp_audit_build(f, 8U, 0U, 0, 0);
+        wr16(f + 14 + 20 + 4, 300U);
+        if (net_udp_rx_frame(f, n) != 0) rejected++;
+        /* 非 0 但错误的 UDP 校验和（坏 payload 不得进应用） */
+        n = udp_audit_build(f, 8U, 0U, 0, 2);
+        if (net_udp_rx_frame(f, n) != 0) rejected++;
+        /* 对照 2：非 0 且正确的 UDP 校验和必须收下 */
+        n = udp_audit_build(f, 8U, 0U, 0, 1);
+        if (net_udp_rx_frame(f, n) == 0) accepted++;
+
+        spin_unlock_irqrestore(&udp_lock, flags);
+    }
+
+    if (accepted != 2U || rejected != 5U) {
+        kprintf("net: audit udp ingress FAILED (accepted=%u rejected=%u)\n",
+                (unsigned int)accepted, (unsigned int)rejected);
+        return -1;
+    }
+    kprintf("net: audit udp ingress rejects malformed ok (rejected=%u)\n",
+            (unsigned int)rejected);
+    kprintln("net: audit net ok (udp+arp)");
+    return 0;
 }

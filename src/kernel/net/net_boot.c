@@ -17,6 +17,7 @@
  *   - 报文构造只覆盖这个内核需要的字段，不做通用协议栈。
  * ============================================================================= */
 #include "net_boot.h"
+#include "net_internal.h"
 #include "include/dev.h"
 #include "include/kernel.h"
 
@@ -242,24 +243,23 @@ typedef struct {
 static int nb_parse_udp(const uint8_t *f, uint32_t len, nb_udp_view_t *v)
 {
     const uint8_t *ip;
+    int ihl_i;
     uint32_t ihl;
     uint32_t ulen;
-    uint32_t avail;
 
     if (len < 14U + 20U + 8U || nb_rd16(f + 12) != 0x0800U) return -1;
     ip = f + 14;
-    if ((ip[0] >> 4) != 4U || ip[9] != 17U) return -1;
-    ihl = (uint32_t)(ip[0] & 0x0FU) * 4U;
-    if (ihl < 20U || 14U + ihl + 8U > len) return -1;
+    ihl_i = net_ipv4_validate(ip, len - 14U);
+    if (ihl_i < 0) return -1;
+    ihl = (uint32_t)ihl_i;
+    if (ip[9] != 17U) return -1;
 
     v->src_ip = ip + 12;
     v->udp = ip + ihl;
+    /* 长度/校验和校验放在读端口之前：ihl 可以到 60，帧可能只到 IP 头 */
+    if (net_udp_validate(ip, v->udp, len - 14U - ihl, &ulen) != 0) return -1;
     v->sport = nb_rd16(v->udp + 0);
     v->dport = nb_rd16(v->udp + 2);
-    ulen = nb_rd16(v->udp + 4);
-    if (ulen < 8U) return -1;
-    avail = len - 14U - ihl;
-    if (ulen > avail) ulen = avail;
     v->payload = v->udp + 8;
     v->plen = ulen - 8U;
     return 0;
@@ -835,19 +835,25 @@ static int nb_ping_one(uint16_t seq, uint32_t *rtt_x10)
         int len;
         const uint8_t *rip;
         const uint8_t *ric;
+        int ihl_i;
         uint32_t ihl;
+        uint32_t tlen;
 
         if ((spins & 31U) == 0U && !nb_deadline_ok(deadline)) break;
         len = e1000_rx_poll(frame, sizeof(frame));
         if (len <= 0) continue;
         if ((uint32_t)len < 14U + 20U + 8U || nb_rd16(frame + 12) != 0x0800U) continue;
         rip = frame + 14;
-        if ((rip[0] >> 4) != 4U || rip[9] != 1U) continue;
-        ihl = (uint32_t)(rip[0] & 0x0FU) * 4U;
-        if (ihl < 20U || 14U + ihl + 8U > (uint32_t)len) continue;
+        ihl_i = net_ipv4_validate(rip, (uint32_t)len - 14U);
+        if (ihl_i < 0) continue;
+        ihl = (uint32_t)ihl_i;
+        if (rip[9] != 1U) continue;
         if (memcmp(rip + 12, gw, 4) != 0) continue;
+        tlen = nb_rd16(rip + 2);
+        if (tlen < ihl + 8U) continue;
         ric = rip + ihl;
         if (ric[0] != 0U || ric[1] != 0U) continue;
+        if (nb_sum16(ric, tlen - ihl) != 0U) continue;        /* ICMP 校验和 */
         if (nb_rd16(ric + 4) != NB_PING_ID || nb_rd16(ric + 6) != seq) continue;
 
         {

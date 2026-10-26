@@ -23,6 +23,7 @@
 #include "include/proc.h"
 #include "include/net.h"
 #include "include/kernel.h"
+#include "net_internal.h"
 #include "net_syscall.h"
 #include "../proc/trap/syscall_internal.h"
 
@@ -104,10 +105,15 @@ static int tcp_sys_listen(proc_t *p, uint32_t port_arg, uint32_t backlog_arg)
 
     net_tcp_sock_gc();
 
-    /* 绑定本进程已分配但未绑定的 TCP socket；没有就建一个内核持有的 */
+    /* 绑定本进程已分配但未绑定的 TCP socket；没有就建一个进程持有的监听 socket */
     sock = tcp_unbound_sock_of_proc(p);
     if (sock < 0) {
-        sock = net_tcp_socket(0);
+        /* audit-net：兜底 listener 以前用 net_tcp_socket(0)（owner_pid=0），
+         * GC 永远不回收 -> 普通进程可以反复 SYS_LISTEN 永久占满 8 个 socket
+         * 槽和任意端口（拒绝服务）。现在记在调用者 pid 名下、每进程最多 1 个，
+         * 进程退出时由 net_tcp_sock_gc() 回收。 */
+        if (net_tcp_pid_orphan_listeners((int)p->pid) != 0) return -1;
+        sock = net_tcp_socket((int)p->pid);
         if (sock < 0) return -1;
         if (net_tcp_listen(sock, (uint16_t)port_arg, backlog_arg) != 0) {
             (void)net_tcp_sock_close(sock);
@@ -318,4 +324,64 @@ int net_syscall(interrupt_frame_t *f)
         return -1000;
     }
     return ret;
+}
+
+/* =============================================================================
+ * V6 回归：SYS_LISTEN 兜底 listener 的归属 / 每进程上限（audit-net）
+ *
+ * 旧实现用 net_tcp_socket(0) 建兜底 listener（owner_pid=0），GC 永远跳过它，
+ * 于是普通进程可以反复 SYS_LISTEN 永久占住端口与 socket 槽。这里断言两件事：
+ *   1. 兜底 listener 记在当前进程 pid 名下、且没有 fd（GC 才能按"进程退出"回收）；
+ *   2. 每进程最多 1 个这种 listener，第二个端口必须被拒。
+ * 期望串口输出：net: audit listen socket owned by pid ok
+ * ========================================================================== */
+#define NET_AUDIT_ORPHAN_PORT  15074U
+#define NET_AUDIT_SECOND_PORT  15076U
+
+int net_syscall_audit_selftest(void)
+{
+    proc_t *p = proc_current();
+    interrupt_frame_t f;
+    int pid;
+    int s;
+
+    if (p == 0) return 0;
+    pid = (int)p->pid;
+
+    /* 前置条件：本线程没有可绑定的 TCP fd、也没有遗留的兜底 listener。
+     * 不满足就跳过并打印原因，避免"静默通过"。 */
+    if (tcp_unbound_sock_of_proc(p) >= 0 || net_tcp_pid_orphan_listeners(pid) != 0) {
+        kprintln("net: audit listen socket SKIPPED (precondition)");
+        return 0;
+    }
+
+    memset(&f, 0, sizeof(f));
+    f.eax = (unsigned int)SYS_LISTEN;
+    f.ebx = NET_AUDIT_ORPHAN_PORT;
+    f.ecx = 2U;
+    if (net_syscall(&f) != 0) {
+        kprintln("net: audit listen socket owned by pid FAILED (listen)");
+        return -1;
+    }
+    if (net_tcp_pid_orphan_listeners(pid) != 1) {
+        kprintln("net: audit listen socket owned by pid FAILED (owner)");
+        s = net_tcp_sock_of_port(NET_AUDIT_ORPHAN_PORT);
+        if (s >= 0) (void)net_tcp_sock_close(s);
+        return -1;
+    }
+
+    f.ebx = NET_AUDIT_SECOND_PORT;
+    if (net_syscall(&f) != -1) {
+        kprintln("net: audit listen socket owned by pid FAILED (no per-pid cap)");
+        s = net_tcp_sock_of_port(NET_AUDIT_ORPHAN_PORT);
+        if (s >= 0) (void)net_tcp_sock_close(s);
+        s = net_tcp_sock_of_port(NET_AUDIT_SECOND_PORT);
+        if (s >= 0) (void)net_tcp_sock_close(s);
+        return -1;
+    }
+
+    s = net_tcp_sock_of_port(NET_AUDIT_ORPHAN_PORT);
+    if (s >= 0) (void)net_tcp_sock_close(s);
+    kprintln("net: audit listen socket owned by pid ok");
+    return 0;
 }
