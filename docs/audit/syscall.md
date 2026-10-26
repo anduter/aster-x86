@@ -3,12 +3,18 @@
 - 会话：`audit-syscall`（独立审计）
 - 基线：`38161af`（225 项检查，v0.73.0+ 并行批次）
 - 构建：`.obj-audit-sys` / `.dist-audit-sys`，QEMU QMP **4541**，串口 `obj/audit/*.log`
-- 相关提交：`e0eddab`（ring3 探针 + 回归驱动）、`2463479`（修复）
+- 本会话提交：`e0eddab`（ring3 探针 + 回归驱动）、`2463479`（misc/brk/权限门）、
+  `25b8587`+`360617a`（报告/边界套件）、`97e1d74`（DUP2 管道读端引用）、
+  `fd263f5`（LOGIN 缓冲长度）、`010343c`（两条新回归）；`e80605d`/`bbd04c5`
+  只改测试驱动（full 套件按键/结论解析）
+- 集成基线：`e80605d` 内核快照（含 audit-fs `b4d5fd9`、audit-net `e4ef7ea` 与
+  本会话全部修复；当前 HEAD `bbd04c5` 的内核源码与其相同）
 
 ## 1. 结论
 
-**找到 15 项，修复 8 项，待定 7 项**（8 项修复全部有 QEMU 动态回归；待定项均为
-本会话无权修改的模块，已给出根因/复现/建议）。
+**找到 15 项，本会话修复 10 项；其余 5 项已分派：AS-9、AS-14 的 SYS_TIME 子项、
+AS-15 已由 audit-fs 在 `b4d5fd9` 修复；AS-10、AS-11、AS-12 转交 audit-smp。**
+10 项修复都有 QEMU 动态回归（修复前失败/崩溃，修复后 PASS）。
 
 | # | 位置 | 问题 | 状态 |
 |---|------|------|------|
@@ -20,13 +26,13 @@
 | AS-6 | 同上 SYS_MOUSE | 同上，12B（可踩内核 .bss） | 已修 |
 | AS-7 | `mm/mm_syscall.c` SYS_BRK | 32 位加法回绕 + 无堆下界，brk 可落到内核地址 | 已修 |
 | AS-8 | `core/misc_syscall.c` 调试入口 | 非 root 可 panic/hang/reboot/poweroff 整机 | 已修 |
-| AS-9 | `fs/fs_syscall.c` SYS_CHROOT | `strcpy` 到 192B `cwd`，路径可达 255B → `proc_t` 溢出 | 待定（fs） |
-| AS-10 | `proc/process.c` SYS_SIGRETURN | 从用户可改的信号帧恢复 cs/eip/ss/eflags → 越权 iret | 待定（proc） |
-| AS-11 | `proc/trap/uaccess.c` | `copy_*_user` 全局缺用户窗口校验（其余模块仍可内核 R/W） | 待定（proc） |
-| AS-12 | `proc/proc_syscall.c` SYS_KILL | 任意用户可向任意 pid 发信号（可 SIGKILL root shell） | 待定（proc） |
-| AS-13 | `svc/svc_syscall.c` SYS_DUP2 | 管道读端复制不增加引用，槽位提前回收 → 跨进程串数据 | 待定（svc/fs） |
-| AS-14 | `fs/fs_syscall.c`/`security/security_syscall.c` | SYS_TIME、LOGIN_WHO/LAST/INFO 忽略调用方缓冲长度 | 待定（fs/sec） |
-| AS-15 | `fs/fs_syscall.c` SYS_FSCK | 忽略 `copy_to_user` 返回值，失败仍报成功 | 待定（fs） |
+| AS-9 | `fs/fs_syscall.c` SYS_CHROOT | `strcpy` 到 192B `cwd`，路径可达 255B → `proc_t` 溢出 | 已由 audit-fs 修（b4d5fd9） |
+| AS-10 | `proc/process.c` SYS_SIGRETURN | 从用户可改的信号帧恢复 cs/eip/ss/eflags → 越权 iret | 转交 audit-smp |
+| AS-11 | `proc/trap/uaccess.c` | `copy_*_user` 全局缺用户窗口校验（其余模块仍可内核 R/W） | 转交 audit-smp |
+| AS-12 | `proc/proc_syscall.c` SYS_KILL | 任意用户可向任意 pid 发信号（可 SIGKILL root shell） | 转交 audit-smp |
+| AS-13 | `svc/svc_syscall.c` + `fs/pipe.*` SYS_DUP2 | 管道读端复制不增加引用，槽位提前回收 → 跨进程串数据 | 已修 |
+| AS-14 | `security/security_syscall.c` LOGIN_WHO/LAST/INFO | 忽略调用方缓冲长度，80B 缓冲被写 192B | 已修（security）；SYS_TIME 由 audit-fs 修 |
+| AS-15 | `fs/fs_syscall.c` SYS_FSCK | 忽略 `copy_to_user` 返回值，失败仍报成功 | 已由 audit-fs 修（b4d5fd9） |
 
 ## 2. 攻击面与方法
 
@@ -153,9 +159,74 @@ panic requested by userland (pid 7)
 回归：`drop 1000` 后 `sys 28/27/36/38` 全部 `ret=-1` 且无 `KERNEL PANIC`；
 root 下的 `crash`/`shutdown` 命令语义不变。
 
-## 4. 待定项（本会话不直接改的路径）
+### AS-13 SYS_DUP2 管道读端引用计数（P2，svc + `fs/pipe.*`）
+
+复现（修复前，shell 命令 `duptest`）：
+
+```
+pipe(); dup2(read, 10); close(write); close(original read);
+read(10) -> -1        # 应为 0（EOF）
+```
+
+串口：`ushell: dup2 pipe read ref FAIL (last=-1)`；fork 变体同样失败
+（子进程关闭读端并退出后，父进程再读同一个管道得到 -1）。
+
+根因：读端没有引用计数。`fs/pipe.c::pipe_unref_read()` 在
+`writers==0 && count==0` 时直接释放槽位，不检查是否还有别的读 fd；dup2 复制
+`FD_KIND_PIPE_R` 不增加任何引用（`pipe_fork_inherit()` 也只给写端加引用）。
+槽位释放后被新 pipe 复用时，旧 fd 会读到**另一个进程/管道的数据**。
+
+修复（提交 `97e1d74`；`fs/pipe.h`、`fs/pipe.c` 经父会话单独授权，
+audit-fs 不碰这两个文件）：
+
+- `pipe_t` 增加 `readers`，`pipe_create()` 置 1，新增 `pipe_ref_read()`；
+- dup2 复制读端、fork 继承读 fd 时各加一个引用；close/exit 走 `pipe_unref_read()`；
+- 释放条件改为 `readers==0 && writers==0`（不再依赖 count），顺带修掉
+  “先关读端、后关写端”导致的 8 槽位泄漏；
+- `SYS_PIPE` 的分配失败 / `copy_to_user` 失败路径把读+写引用都回滚
+  （此前会泄漏 fd 与管道槽位）；
+- EOF 语义不变：仍只看 `writers==0`。
+
+回归：`duptest` 覆盖 dup2 读端 + fork 父子 close + 写端关闭后 EOF，输出
+`ushell: dup2 pipe read ref ok (last=0)`；`-Suite guard` PASS。
+
+残余（不在本会话路径）：`proc_fork()` 的 `vmm_clone_user_pages()` 失败回滚只
+释放写端，读端引用会泄漏一个（proc/process.c 属 audit-smp）；只在内存不足的
+fork 失败路径出现，建议 proc 侧补一次 `pipe_unref_read()`。
+
+### AS-14 LOGIN_WHO/LAST/INFO 忽略调用方缓冲长度（P2，security）
+
+复现（修复前，shell 命令 `loginlen`，80B 栈缓冲）：
+
+```
+SYS_LOGIN(LOGIN_INFO, buf, 0/1/8)   # 旧实现只判 a!=0，完全忽略 b
+SYS_LOGIN(LOGIN_WHO,  buf, 8)
+SYS_LOGIN(LOGIN_LAST, buf, 1)
+```
+
+旧实现把最多 192B 写进 80B 缓冲，用户栈被踩，shell 进程直接死掉：
+
+```
+ushell: login len clamp FAIL
+user: exception 14 at eip=0x20444441 err=14 cr2=0x20444441, killing thread
+proc: pid 7 (shell) exited with 142
+```
+
+修复（提交 `fd263f5`）：新增 `copy_login_out()`——`max` 必须放得下完整字符串
+（含 NUL），否则返回 `-1` 且一个字节都不写；WHO/LAST/INFO 统一走它。
+`SYS_TIME` 在 fs 路径，按分工本会话未动，已由 audit-fs 在 `b4d5fd9` 修复
+（honor `ecx`、截断 + NUL）。
+
+回归：`loginlen` 覆盖 size=0/1/8（`-1` + canary 完好）与 80B（成功且 NUL 结尾），
+输出 `ushell: login len clamp ok`。
+
+## 4. 转交项（含已由其它会话修复的条目）
 
 ### AS-9 SYS_CHROOT：`proc_t.cwd[192]` 栈外写（P0，fs）
+
+**状态：audit-fs 已在 `b4d5fd9` 修复**（超长路径直接 `-1`、`cwd` 不变，新增
+`fs_chroot_set_cwd()`；`proc_root_set` 的截断问题一并处理）。以下为原始分析，
+保留备查。
 
 `fs/fs_syscall.c`（`SYS_CHROOT` case，约 551 行）：
 `char path[FS_PATH_MAX]`（256）→ `strcpy(p->cwd, path)`，而 `proc_t.cwd` 只有
@@ -190,12 +261,13 @@ handler 在入口处 `esp+8` 就是帧起点，可随意改：
 `proc/trap/uaccess.c` 只拒绝 `ptr == 0`，不校验用户窗口；本会话只在 misc 组
 加了 `misc_user_buf()`。仍然存在同类调用的组（ring3 可内核读/写）：
 
-- fs：SYS_FREAD/FWRITE（src/dst）、LIST、DRIVES、STAT、GETCWD、TIME、FSCK、
-  READLINK、LSTAT；
+- fs：SYS_FREAD/FWRITE（src/dst）、LIST、DRIVES、STAT、GETCWD、READLINK、LSTAT；
+  SYS_TIME/FSCK 的长度/返回值已由 `b4d5fd9` 修，但“把内核地址当用户缓冲”的窗口
+  问题仍在；
 - proc：SYS_WAIT/WAITPID 的 status；
 - svc：SYS_PIPE 的 fds、SYS_INPUT_SET 的 buf；
 - security：SYS_GETGROUPS/SETGROUPS、LOGIN_AUTH/SU/PASSWD 字符串、
-  LOGIN_WHO/LAST/INFO 输出；
+  LOGIN_WHO/LAST/INFO 输出（长度已由 `fd263f5` 修，窗口仍缺）；
 - net：SYS_UDP_SEND/UDP_RECV/SENDTO/RECVFROM/ACCEPT 的 `udp_req`/addr；
 - pkg：SYS_PKG LIST 的输出缓冲。
 
@@ -212,26 +284,10 @@ ruid/euid。普通用户可 `kill <任意pid> 9` 杀掉 root shell、getty、服
 建议按 POSIX：`euid==0 || 目标 ruid/suid == 发送者 euid/ruid` 才允许；
 SIGKILL/SIGSTOP 也要走同一检查。
 
-### AS-13 SYS_DUP2 复制管道读端不增加引用（P2，svc/fs）
-
-`svc/svc_syscall.c::SYS_DUP2` 对 `FD_KIND_PIPE_W` 调 `pipe_ref_write()`，但对
-`FD_KIND_PIPE_R` 什么都不做；`fs/pipe.c::pipe_unref_read()` 在
-`writers==0 && count==0` 时直接释放槽位。于是 dup2 出来的两个读 fd 只有
-“一份”生命周期：关掉一个就可能释放管道，另一个 fd 仍指向该槽位；槽位被
-别的进程复用时，它读到的是**另一个进程的管道数据**（跨进程信息泄露）。
-建议给读端也加引用计数（`readers`），或 `pipe_unref_read` 前扫描所有进程的
-fd 表确认没有别的读端。
-
-### AS-14 忽略调用方缓冲长度（P2，fs/sec）
-
-- `SYS_TIME`（`fs/fs_syscall.c`）：ABI 是 `ebx=buf, ecx=len`，实现完全不看
-  `ecx`，总是拷贝 `strlen(tbuf)+1`（≤24B）。调用方给 4B 缓冲会被写穿。
-- `LOGIN_WHO/LAST/INFO`（`security/security_syscall.c`）：`edx=max` 只校验非 0，
-  实际写入最多 192B 的 `out[]`，小缓冲会被写穿。
-
-建议：一律 `min(需要长度, 调用方 max)`，并保留 NUL。
-
 ### AS-15 SYS_FSCK 忽略 copy_to_user 返回值（P3，fs）
+
+**状态：audit-fs 已在 `b4d5fd9` 修复**（检查 `copy_to_user` 返回值，失败返回
+错误）。以下为原始分析，保留备查。
 
 `fs/fs_syscall.c` 的 SYS_FSCK 在 `copy_to_user()` 失败时仍返回错误计数，
 用户拿到“成功”但缓冲未写；结合 AS-11 还可把报告写进内核地址。建议失败
@@ -256,13 +312,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\audit-syscall.ps1 -Sui
   -Keys "sys 48 4096 3 0`nsys 49 ...`nres`nmouse"
 ```
 
-- `guard`：18 条边界命令 + `res`/`mouse` 对照（mmap/munmap 正常与重复 munmap、
-  brk 回绕/负向越界、超大 len、mmap 长度回绕、mprotect 未映射/未对齐/len=0、
-  5 个内核目标写、SYS_WRITE 内核源），全部断言通过
+- `guard`：18 条边界 syscall + `res`/`mouse` 对照 + `loginlen`/`duptest`
+  两个专项回归（mmap/munmap 正常与重复 munmap、brk 回绕/负向越界、超大 len、
+  mmap 长度回绕、mprotect 未映射/未对齐/len=0、5 个内核目标写、SYS_WRITE 内核源、
+  LOGIN 长度钳制、dup2/fork 管道读端引用），全部断言通过
   （`[audit-syscall] suite=guard => PASS`）。
 - `priv`：`drop 1000` 后 4 个停机调用全部 `-1`（`suite=priv => PASS`）。
-- `full`：标准 225 项回归，快照上 **225/225 PASS**（第二次运行；第一次命中
-  已记录的 TCP 时序抖动，重跑通过）。
+- `full`：标准 225 项回归。集成快照 `e80605d`（含 audit-fs `b4d5fd9`、
+  audit-net `e4ef7ea` 与本会话全部修复）上 `-Suite full => PASS`，build.ps1 打出
+  `=== TEST PASS (225/225) ===`。同一快照另一次重跑命中仓库已记录的 TCP 时序抖动
+  （仅“TCP 健壮性自检通过”一项，224/225；见 b79ca12/1a6998e），重跑即过。
 - `probe`：修复前证据（`KRNL` 泄漏、brk 回绕、RESINFO/MOUSE `ret=0`）。
 
 关键串口行（修复后）：
@@ -277,6 +336,18 @@ sys: nr=37 a=8388608 b=0 c=0 ret=-1
 sys: nr=35/39/57 ... ret=-1
 res: mem  free=59238/65008 pages ...
 mouse: x=640 y=512 buttons=2
+ushell: login len clamp ok
+ushell: dup2 pipe read ref ok (last=0)
+```
+
+修复前证据（同一探针）：
+
+```
+ushell: login len clamp FAIL
+user: exception 14 at eip=0x20444441 err=14 cr2=0x20444441, killing thread
+proc: pid 7 (shell) exited with 142          # 80B 栈缓冲被 LOGIN_WHO 写穿
+
+ushell: dup2 pipe read ref FAIL (last=-1)     # 关闭原 read 后 dup 读到 -1
 ```
 
 ## 6. 覆盖范围与限制
@@ -284,14 +355,15 @@ mouse: x=640 y=512 buttons=2
 - **已覆盖**：1..79 legacy 编号的静态入口校验；7 个分发组的指针/长度/fd/flags/
   路径参数；`mm/**` 的 brk/mmap/munmap/mprotect/页表/COW/引用计数；misc 组全部
   case；沙箱 allowlist 与 `eax >= 64` 旁路检查；`mmap` 失败回滚与 `unmap` 路径。
-- **动态触达**：SYS_WRITE(1)、BRK(22)、REBOOT(27)、PANIC(28)、PCI(35)、
-  POWEROFF(36)、MOUSE(37)、HANG(38)、ETH(39)、RESINFO(40)、MMAP(48)、
-  MUNMAP(49)、BLK_READ(57)、MPROTECT(62)；含重复 munmap、长度回绕、未对齐、
-  超长 len、内核地址缓冲等边界；以及 `res`/`mouse`/`drop`/`crash` 等 shell 命令。
+- **动态触达**：SYS_WRITE(1)、BRK(22)、PIPE(25)、DUP2(26)、REBOOT(27)、
+  PANIC(28)、PCI(35)、POWEROFF(36)、MOUSE(37)、HANG(38)、ETH(39)、RESINFO(40)、
+  MMAP(48)、MUNMAP(49)、BLK_READ(57)、MPROTECT(62)、LOGIN(72)；含重复 munmap、
+  长度回绕、未对齐、超长 len、内核地址缓冲、dup2/fork 管道读端、LOGIN 小缓冲等
+  边界；以及 `res`/`mouse`/`loginlen`/`duptest`/`drop`/`crash` 等 shell 命令。
 - **未覆盖/留给对应会话**：native int 0x80 ABI、net 协议栈深度、fs 路径解析与
   FAT16、security/accounts 口令路径、pkg 安装器、SMP 并发与 TLB shootdown、
   文件映射内容语义、长时间 soak。
-- **限制**：审计期间共享树被并行会话修改，动态验证在 HEAD 快照 + 本会话补丁上
-  完成；待定项均为静态确认（复现需要跨模块改动或独立 ring3 程序，而
-  `trust_verify_shell` 不允许自编译 ELF 执行）。
-- 预算：8h 未用完；在修复 8 项后提前收尾。
+- **限制**：审计期间共享树被并行会话修改，动态验证都在 `git archive HEAD` 的
+  私有快照 + 本会话补丁上完成；最终 225 项用的是集成快照 `e80605d`
+  （含 audit-fs `b4d5fd9`、audit-net `e4ef7ea`）。转交项的细节见第 4 节。
+- 预算：8h 未用完；在修复 10 项后提前收尾。
