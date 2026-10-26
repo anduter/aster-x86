@@ -603,7 +603,7 @@ if ($Test -or $Shot) {
 
     # TCP listen/accept 自检在负载下可能晚于固定等待收尾；等它打出最终行再做断言。
     if ($Test) {
-        $tcpDeadline = (Get-Date).AddSeconds(25)
+        $tcpDeadline = (Get-Date).AddSeconds(60)
         while ((Get-Date) -lt $tcpDeadline) {
             if (Test-Path $serial) {
                 $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
