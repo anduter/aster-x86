@@ -167,20 +167,17 @@ ioapic: legacy IRQ routing done (5 irq(s) via IOAPIC, PIC fallback armed)
 ## 6. 回归结果
 
 - `powershell -NoProfile -File tools\session-run.ps1 -Name smp -Test`
-  （默认 `-smp 2`，2026-10-27）：**181/182 PASS**。
-- 唯一失败：`pkg 重装后服务重新上线`。原因是 pkg 会话未提交的组件
-  ELF-entry 改动把旧的 `pkg: reinstall service online ok` 行改成了新的
-  组件 ELF 流程；串口现场里组件服务本身已在线
-  （`component: echosvc elf service online (pid=27 port=258)`），
-  与本会话的调度/中断改动无关。此前同一轮曾出现 18 个 pkg/TCP 失败，
-  在 net/pkg 会话提交/修复后已收敛到这 1 个。
+  （默认 `-smp 2`，提交 `647f8a6` 之后复跑，2026-10-27 02:2x）：
+  **TEST PASS (182/182)**，`exit=0`，`elapsed=55.0s`。
+- 提交前的共享树中间态曾为 181/182，唯一失败是 pkg 会话未提交的组件
+  ELF-entry 改动（`pkg: reinstall service online ok` 行尚未恢复）；pkg 提交
+  `15d15b0` 后本会话复跑即 182/182，说明该失败与调度/中断改动无关。
 - 本会话改动直接相关的断言全部 PASS：SMP 2/2 online、TLB ack、per-cpu
   locks、runqueue 位图、sched priority/aging、heartbeat、fork/COW、shell 与
   文件系统回归。
 - 隔离验证：另在 `git worktree`（HEAD `79f5c66` + 本会话 9 个文件）上跑过
   同一套 `-Test`，调度/SMP/内核自检同样 PASS；该隔离树缺少其它会话未提交的
   fs 修复，`/bin/shell` 验签走内核 shell 回退，故不作为 182 计数依据。
-- 集成阶段由父会话修 pkg 冲突后重跑全量；本会话不再等待。
 
 ## 7. 遗留 / 未做
 
