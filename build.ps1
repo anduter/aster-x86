@@ -824,7 +824,57 @@ if ($Test -or $Shot) {
             @{ Name = 'TCP 大传输 + 丢包重传';     Ok = ($out -match 'net: tcp large transfer ok \(16384 bytes, retrans=[1-9]\d*') },
             @{ Name = 'TCP RTT/RTO 生效';          Ok = ($out -match 'net: tcp rto ok \(srtt=\d+ticks rto=\d+ticks\)') },
             @{ Name = 'TCP FIN/TIME_WAIT';         Ok = ($out -match 'net: tcp FIN/TIME_WAIT ok') },
-            @{ Name = 'TCP 健壮性自检通过';        Ok = ($out -match 'net: tcp selftest PASS') }
+            @{ Name = 'TCP 健壮性自检通过';        Ok = ($out -match 'net: tcp selftest PASS') },
+            # ---- 并行批次：安全/文件/内存（2026-10-27）----
+            @{ Name = 'shadow PBKDF2';             Ok = ($out.Contains('acct: pbkdf2 ok')) },
+            @{ Name = 'shadow 旧格式迁移';         Ok = ($out.Contains('acct: shadow migrate ok')) },
+            @{ Name = '审计环 128 行';             Ok = ($out.Contains('audit: ring 128 ok')) },
+            @{ Name = '审计追加刷盘';              Ok = ($out.Contains('audit: append flush ok')) },
+            @{ Name = '登录会话槽复用';            Ok = ($out.Contains('acct: session slot reuse ok')) },
+            @{ Name = 'XFS v5 镜像兼容挂载';       Ok = ($out.Contains('fs: xfs v5 image mount compat ok')) },
+            @{ Name = 'XFS v6 硬链接持久化';       Ok = ($out.Contains('fs: xfs v6 hardlink persisted ok')) },
+            @{ Name = 'XFS v6 挂载';               Ok = ($out.Contains('fs: XFS1 v6 mounted')) },
+            @{ Name = 'RSS 记账';                  Ok = ($out.Contains('mm: rss accounting ok')) },
+            @{ Name = 'ps RSS 输出';               Ok = ($out.Contains('mm: ps pid=0 name=rss-selftest')) },
+            @{ Name = '文件映射 mmap';             Ok = ($out.Contains('mm: file mmap ok')) },
+
+            # ---- 并行批次：TCP listen/accept（2026-10-27）----
+            @{ Name = 'TCP listen + 重复 bind';    Ok = ($out.Contains('net: tcp listen ok')) },
+            @{ Name = 'TCP 回环 connect';          Ok = ($out.Contains('net: tcp loopback connect ok')) },
+            @{ Name = 'TCP accept 收数据';         Ok = ($out.Contains('net: tcp accept data ok')) },
+            @{ Name = 'TCP accept 回数据';         Ok = ($out.Contains('net: tcp accept reply ok')) },
+            @{ Name = 'TCP TIME_WAIT 占端口';      Ok = ($out.Contains('net: tcp TIME_WAIT holds port ok')) },
+            @{ Name = 'TCP TIME_WAIT 后复用';      Ok = ($out.Contains('net: tcp port reuse after close ok')) },
+            @{ Name = 'TCP backlog 溢出';          Ok = ($out.Contains('net: tcp backlog overflow ok')) },
+            @{ Name = 'TCP accept 超时';           Ok = ($out.Contains('net: tcp accept timeout ok')) },
+            @{ Name = 'TCP backlog 握手';          Ok = ($out.Contains('net: tcp backlog handshake ok')) },
+            @{ Name = 'TCP listen/accept 自检';    Ok = ($out.Contains('net: tcp listen/accept selftest PASS')) },
+            @{ Name = 'TCP listen/accept syscall'; Ok = ($out.Contains('net: tcp listen/accept syscall ok')) },
+            @{ Name = 'TCP close 释放端口';        Ok = ($out.Contains('net: tcp socket fd close releases port ok')) },
+
+            # ---- 并行批次：组件 ELF / pkg CLI（2026-10-27）----
+            @{ Name = '组件 ELF entry';            Ok = ($out.Contains('pkg: elf entry ok')) },
+            @{ Name = '组件 ELF 验签';             Ok = ($out.Contains('pkg: elf entry verify ok')) },
+            @{ Name = '组件 ELF 服务在线';         Ok = ($out.Contains('pkg: elf entry service online ok')) },
+            @{ Name = '组件 ELF 篡改拒绝';         Ok = ($out.Contains('pkg: elf entry tamper rejected')) },
+            @{ Name = '组件 ELF 恢复';             Ok = ($out.Contains('pkg: elf entry restore ok')) },
+            @{ Name = '组件进程运行';              Ok = ($out -match 'pkg: component echosvc running pid=\d+') },
+            @{ Name = '组件进程停止';              Ok = ($out -match 'pkg: component echosvc stopped \(pid=\d+') },
+            @{ Name = 'pkg CLI list';              Ok = ($out.Contains('pkg: user cli list ok')) },
+            @{ Name = 'pkg CLI verify';            Ok = ($out.Contains('pkg: user cli verify ok')) },
+            @{ Name = 'pkg CLI install';           Ok = ($out.Contains('pkg: user cli install ok')) },
+            @{ Name = 'pkg CLI 越权拒绝';          Ok = ($out.Contains('pkg: user cli policy deny ok')) },
+            @{ Name = 'pkg CLI 完成';              Ok = ($out.Contains('pkg: user cli done')) },
+
+            # ---- 并行批次：per-CPU 调度 / IOAPIC（2026-10-27）----
+            @{ Name = 'SMP 双核 online';           Ok = ($out.Contains('smp: 2 cpus online')) },
+            @{ Name = 'SMP TLB shootdown ack';     Ok = ($out.Contains('smp: tlb shootdown ack=1/1 ok')) },
+            @{ Name = 'per-CPU 调度锁';            Ok = ($out.Contains('sched: per-cpu locks ok')) },
+            @{ Name = 'runqueue cpu0';             Ok = ($out -match 'sched: runqueue cpu0 mask=0x[0-9a-f]+') },
+            @{ Name = 'runqueue cpu1';             Ok = ($out -match 'sched: runqueue cpu1 mask=0x[0-9a-f]+') },
+            @{ Name = 'MADT IRQ0 override';        Ok = ($out.Contains('madt: irq0 -> gsi2')) },
+            @{ Name = 'IOAPIC irq0 路由';          Ok = ($out.Contains('ioapic: irq0 -> gsi2 apic 0 vector=0x20')) },
+            @{ Name = 'IOAPIC 全量路由';           Ok = ($out.Contains('ioapic: legacy IRQ routing done')) }
         )
 
         T 'checks begin'
