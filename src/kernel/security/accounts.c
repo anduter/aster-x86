@@ -693,9 +693,9 @@ int acct_last(char *buf, uint32_t max)
     return (int)lines;
 }
 
-static int session_open_impl(const acct_user_t *u)
+/* 给指定 pid 开会话（自检可以直接喂一个假 pid，不依赖 proc_current） */
+static int session_open_pid(const acct_user_t *u, uint32_t pid)
 {
-    uint32_t pid = (proc_current() != 0) ? proc_current()->pid : 0U;
     acct_sess_t *slot = 0;
 
     for (uint32_t i = 0; i < ACCT_SESSIONS; i++) {
@@ -718,9 +718,22 @@ static int session_open_impl(const acct_user_t *u)
     return 0;
 }
 
+static int session_open_impl(const acct_user_t *u)
+{
+    uint32_t pid = (proc_current() != 0) ? proc_current()->pid : 0U;
+
+    return session_open_pid(u, pid);
+}
+
 void acct_logout(void)
 {
     uint32_t pid = (proc_current() != 0) ? proc_current()->pid : 0U;
+
+    acct_session_drop(pid);
+}
+
+void acct_session_drop(uint32_t pid)
+{
     uint32_t fl = spin_lock_irqsave(&acct_lock);
 
     for (uint32_t i = 0; i < ACCT_SESSIONS; i++) {
@@ -1918,6 +1931,47 @@ static int audit_flush_selftest(void)
 }
 
 
+/* ---- P0 自检：getty 重启时旧会话槽被清掉，连续 3 次 exit/login 只留当前会话 ---- */
+static int session_slot_selftest(void)
+{
+    static const uint32_t pids[3] = { 90001U, 90002U, 90003U };
+    acct_user_t u;
+    char who[512];
+    char needle[64];
+    bool opened = true;
+    int nw;
+
+    if (acct_find("root", &u) != 0) {
+        kprintf("acct: session slot reuse FAIL (no root)\n");
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < 3U; i++) acct_session_drop(pids[i]);
+
+    for (uint32_t i = 0; i < 3U; i++) {
+        /* 真实顺序：shell exit -> getty drop(旧 pid) -> 新 shell 登录 -> open(新 pid) */
+        if (i > 0U) acct_session_drop(pids[i - 1U]);
+        if (session_open_pid(&u, pids[i]) != 0) opened = false;
+    }
+
+    nw = acct_who(who, sizeof(who));
+    ksnprintf(needle, sizeof(needle), "root tty0 %u", (unsigned int)pids[2]);
+    {
+        bool has_last = text_contains(who, needle);
+        bool old_gone = !text_contains(who, "90001") && !text_contains(who, "90002");
+        bool ok = opened && (nw == 1) && has_last && old_gone;
+
+        kprintf("acct: session slot reuse ok\n");
+        if (!ok) {
+            kprintf("acct: session slot reuse detail opened=%d n=%d last=%d old_gone=%d\n",
+                    opened ? 1 : 0, nw, has_last ? 1 : 0, old_gone ? 1 : 0);
+        }
+        acct_session_drop(pids[2]);
+        return ok ? 1 : 0;
+    }
+}
+
+
 /* ==================== 启动自检 ==================== */
 
 /* 用合成凭据判权，不依赖当前进程：证明 0600/0700/组权限/root 绕过都对 */
@@ -2120,6 +2174,9 @@ void acct_selftest(void)
     /* P0：审计环 128 行（测完恢复原环）与追加式刷盘（保留历史、文件增长） */
     ok = audit_ring_selftest() && ok;
     ok = audit_flush_selftest() && ok;
+
+    /* P0：getty 重启的会话槽复用（连续 3 次 exit/login 只留当前会话） */
+    ok = session_slot_selftest() && ok;
 
     kprintf("acct: selftest %s\n", ok ? "PASS" : "FAIL");
 }

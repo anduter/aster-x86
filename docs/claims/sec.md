@@ -11,6 +11,7 @@ acct: pbkdf2 ok
 acct: shadow migrate ok
 audit: ring 128 ok
 audit: append flush ok
+acct: session slot reuse ok
 ```
 
 说明：
@@ -21,6 +22,7 @@ audit: append flush ok
 | `acct: shadow migrate ok` | 把 root 的 shadow 行种回旧格式（单次 sha256），走真正的 `password_check()` 登录校验，成功后自动改写为 PBKDF2，且新摘要可校验/错口令被拒 |
 | `audit: ring 128 ok` | 审计环容量确为 128 行：压入 130 条后 `last` 仍为 128 行，最旧 2 条被覆盖，最新一条保留（测完恢复原环） |
 | `audit: append flush ok` | `acct_audit_flush()` 为追加语义：两次 flush 后文件变大，且历史记录与新增记录都在 `/var/log/audit.log` 里 |
+| `acct: session slot reuse ok` | 模拟连续 3 次 exit/重新登录：每次 getty drop 旧 pid 槽位后开新会话，`who` 只剩当前会话（`root tty0 90003`），旧 pid 不残留 |
 
 既有断言行保持不变（新格式仍固定比较 64 个十六进制字符）：
 
@@ -63,8 +65,8 @@ root:pbkdf2$sha512$10000$0123456789abcdef0123456789abcdef$<64 hex PBKDF2 output>
 
 - 父 getty `spawn` 子 getty 并 `proc_wait`；
 - 子 getty 置 `login_required` 后 `exec /bin/shell`；
-- shell `exit` 后子进程结束，父 getty 立即重新 `spawn`，tty0 回到 `login:`，
-  不再转 idle。
+- shell `exit` 后子进程结束，父 getty 先 `acct_session_drop(child_pid)` 清旧会话槽，
+  再立即重新 `spawn`，tty0 回到 `login:`，不再转 idle。
 
 该行为只在生产启动（无 `autologin=root`）可见；`-Test` 仍直接 `proc_spawn("shell")`，
 因此不新增可断言行，但生产日志会打印：

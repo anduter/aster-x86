@@ -23,6 +23,7 @@
 #include "include/dev.h"
 #include "include/userland.h"
 #include "include/apps.h"
+#include "include/security.h"
 
 #define GETTY_HOSTNAME "osteachos"
 
@@ -92,6 +93,10 @@ static void getty_supervise(void)
 
         kprintf("getty: tty0 session pid=%u ended status=%d -> respawn login\n",
                 (unsigned int)child_pid, status);
+
+        /* shell 已退出：清掉它的会话槽，避免连续 exit/login 后 who 显示旧会话、
+         * 8 个槽位被历史 pid 占满（getty 是唯一知道旧 shell pid 的地方）。 */
+        acct_session_drop(child_pid);
         console_set_status("login required");
     }
 }

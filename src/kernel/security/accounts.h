@@ -124,6 +124,9 @@ int  acct_sudo(const char *pass);
 int  acct_sudo_end(void);
 /* 当前进程退出会话（logout/shell 退出） */
 void acct_logout(void);
+/* 清掉指定 pid 的会话槽。getty 在子 shell exit、重新拉起登录前调用，
+ * 避免连续 exit/login 后 who 显示旧会话、8 个槽位被历史会话耗尽。 */
+void acct_session_drop(uint32_t pid);
 /* 会话表：写 "user tty pid home" 行，返回行数 */
 int  acct_who(char *buf, uint32_t max);
 /* 审计环：写 "event detail" 行，返回行数 */
