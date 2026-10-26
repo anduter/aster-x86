@@ -82,7 +82,7 @@ elapsed: 6.0s
 | 4 | `tools/check-deps.ps1` 0 违规 | 模块边界，规则见 `docs/modules.md` |
 | 5 | `tools/unit.ps1` 全 PASS | host 单元测试；`-NoUnit` 可跳过（仅排障） |
 | 6 | `-Full`：`build.ps1` 成功 | 产物用隔离目录 |
-| 7 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 **182/182**（131 + 组件 15 + SIP 10 + 64KB 2 + link 16 + TCP 8） |
+| 7 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 **247/247**（225 + 审计回归 22） |
 
 `-Full` 的隔离参数（结束自动清理，`-KeepArtifacts` 保留现场）：
 
@@ -94,7 +94,7 @@ elapsed: 6.0s
 CI 失败时直接把 `obj/ci/**` 上传成 artifact）。
 
 实测（2026-10-27，v0.73.0 开发线，Windows 10 + PowerShell 5.1）：`-Quick` **约 6s**（含 10 组 host 单元测试 / 520 checks：原 7 组 187 + 新增 path 79 + pmm 92 + fat16 162）；
-`-Full` **约 65s**（构建 + `-Test` ×2，各 **182/182**；本机数值随宿主负载浮动），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
+`-Full` **约 65s**（构建 + `-Test` ×2，各 **247/247**；本机数值随宿主负载浮动），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
 
 参数一览：
 
@@ -163,7 +163,7 @@ clang-tidy src/kernel/lib/string.c -- -Isrc/kernel -Isrc/kernel/include
 | 层 | 文件 | runner | 跑什么 | 为什么 |
 |---|---|---|---|---|
 | 静态 | `static.yml` | `ubuntu-latest`（托管） | BOM（`-StrictBom`）、禁用文件、`check-deps`、host 单元测试、`ci.ps1 -Quick -AllowDirty` | 只需 git + PowerShell + gcc，秒级 |
-| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 182 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
+| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 247 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
 
 **托管 runner 上不要试图构建**：那里没有 vendored 工具链、没有 QEMU，
 `tools/i686-elf` 也不会随仓库分发（见 README 的"自带交叉工具链"一节）。
