@@ -233,6 +233,65 @@ uint32_t vmm_user_flags(uint32_t virt)
 }
 
 /* =============================================================================
+ * vmm_user_page_count - 统计一个地址空间的用户常驻页数（RSS 口径）
+ *
+ * 只扫用户布局区 [USER_LAYOUT_CODE_BASE, USER_LAYOUT_CLONE_END)（每进程 5MB，
+ * 最多 3 个 2MB PDE、1536 个 PTE），计入 PRESENT|USER 的 4KB 页。
+ *
+ * 可以传非当前进程的页目录：PAE 页表物理地址都在恒等映射区，内核可直接读。
+ * 为此对 PDPT/PD/PT 的物理地址做 RAM 范围与页对齐校验——进程正在被另一颗
+ * CPU reap 时可能读到毒化值（0xAA 填充），校验不过就按 0 页处理，绝不让
+ * 诊断路径把内核读挂。
+ * ============================================================================= */
+uint32_t vmm_user_page_count(pde_t *dir)
+{
+    const uintptr_t lo = USER_LAYOUT_CODE_BASE;
+    const uintptr_t hi = USER_LAYOUT_CLONE_END;
+    const uintptr_t ram_lo = (uintptr_t)pmm.phys_base;
+    const uintptr_t ram_hi = ram_lo + ((uintptr_t)pmm.total_pages << PAGE_SHIFT);
+    uint32_t pdi_first, pdi_last, count = 0;
+    pde_t *pd;
+
+    if (dir == 0) return 0;
+    if (((uintptr_t)dir & 0xFFFU) != 0U) return 0;
+    if ((uintptr_t)dir < ram_lo || (uintptr_t)dir >= ram_hi) return 0;
+    if (!(dir[1] & PTE_PRESENT)) return 0;
+
+    pd = (pde_t *)(uintptr_t)(dir[1] & PAE_ADDR_MASK);
+    if (((uintptr_t)pd & 0xFFFU) != 0U) return 0;
+    if ((uintptr_t)pd < ram_lo || (uintptr_t)pd >= ram_hi) return 0;
+
+    pdi_first = pd_index(lo);
+    pdi_last  = pd_index(hi - 1U);
+
+    for (uint32_t pdi = pdi_first; pdi <= pdi_last; pdi++) {
+        pde_t pde = pd[pdi];
+        pte_t *pt;
+
+        if (!(pde & PTE_PRESENT)) continue;
+        if (pde & PTE_PS) continue;             /* 用户区不应出现 2MB 页 */
+        pt = (pte_t *)(uintptr_t)(pde & PAE_ADDR_MASK);
+        if (((uintptr_t)pt & 0xFFFU) != 0U) continue;
+        if ((uintptr_t)pt < ram_lo || (uintptr_t)pt >= ram_hi) continue;
+
+        for (uint32_t pti = 0; pti < 512U; pti++) {
+            pte_t pte = pt[pti];
+            uint32_t va;
+
+            if ((pte & (PTE_PRESENT | PTE_USER)) != (PTE_PRESENT | PTE_USER)) {
+                continue;
+            }
+            /* pdi/pti 是 PDPT[1]（0x40000000..0x7FFFFFFF）内的索引，要加回区基址。 */
+            va = (uint32_t)lo + (pdi << 21) + (pti << 12);
+            if (va < lo || va >= hi) continue;
+            count++;
+        }
+    }
+
+    return count;
+}
+
+/* =============================================================================
  * vmm_protect_page - 修改当前地址空间一个用户页的保护位（mprotect 底层）
  *
  * prot: VMM_PROT_READ/WRITE/EXEC 组合，0 = PROT_NONE（本实现等价只读+NX）。

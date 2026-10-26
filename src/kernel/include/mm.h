@@ -9,5 +9,7 @@
 #include "mm/memtest.h"
 #include "mm/object.h"
 #include "mm/user_layout.h"
+#include "mm/rss.h"
+#include "mm/filemap.h"
 
 #endif

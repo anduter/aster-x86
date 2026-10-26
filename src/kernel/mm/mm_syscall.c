@@ -7,12 +7,73 @@
 #include "include/kernel.h"
 #include "include/mm.h"
 #include "include/proc.h"
+#include "include/fs.h"
 #include "mm_syscall.h"
+#include "filemap.h"
 #include "../proc/trap/syscall_internal.h"
 
 /* 用户堆：布局由 user_layout.h 统一提供（0x40200000 起，1MB 上限）。 */
 #define USER_HEAP_BASE USER_LAYOUT_HEAP_BASE
 #define USER_HEAP_MAX  USER_LAYOUT_HEAP_END
+
+/* =============================================================================
+ * SYS_MMAP 参数扩展（不新增 syscall 编号、不改 include/abi.h；语义见
+ * docs/claims/mm.md）：
+ *
+ *   ebx = len（字节，内部向上取整到页）
+ *   ecx = prot | flags | (offset_pages << 16)
+ *           bits 0..7   PROT_*（复用 abi.h 的 PROT_READ/WRITE/EXEC）
+ *           bit  8      MMAP_F_FILE      文件后端（edx = fd）
+ *           bit  9      MMAP_F_PRIVATE   MAP_PRIVATE（文件映射必须置位）
+ *           bits 16..31 offset 页数（仅 MAP_FILE；0 = 文件开头）
+ *   edx = fd（仅 MAP_FILE；0 = 匿名映射，兼容旧调用）
+ *
+ * 旧匿名调用（ecx = 0 或 3、edx = 0，例如用户态 sectest 的 mmap/mprotect）
+ * 行为完全不变：prot/flags 高位都忽略，映射 RW+NX 零页。
+ * ========================================================================== */
+#define MMAP_F_FILE      0x100U
+#define MMAP_F_PRIVATE   0x200U
+#define MMAP_PROT_MASK   0x0FFU
+
+/* 文件映射的数据源：把一个进程 fd 适配成 mm_file_reader_t。
+ * fs 层句柄是顺序读，offset 由 mm_file_map() 用“读+丢弃”模拟。 */
+typedef struct {
+    uint8_t be;
+    int     handle;
+} mm_fs_reader_t;
+
+static int mm_fs_read(void *ctx, void *buf, uint32_t len)
+{
+    mm_fs_reader_t *r = (mm_fs_reader_t *)ctx;
+    int n;
+
+    if (r == 0 || len == 0U) return (len == 0U) ? 0 : -1;
+    n = fs_read_ex(r->be, r->handle, buf, len);
+    return (n < 0) ? -1 : n;
+}
+
+/* 匿名映射：保持既有行为（零页、RW+NX），失败回滚已映射部分。 */
+static int mmap_anon(uint32_t base, uint32_t len)
+{
+    for (uint32_t off = 0; off < len; off += PAGE_SIZE) {
+        void *page = pmm_alloc_page();
+
+        if (page == 0) {
+            mm_unmap_range(base, off);
+            return -1;
+        }
+        memset(page, 0, PAGE_SIZE);
+
+        if (vmm_map_user_page(base + off, (uint32_t)(uintptr_t)page,
+                              PTE_PRESENT | PTE_WRITE | PTE_USER |
+                              PTE_NOEXEC) != 0) {
+            pmm_free_pages(page, 1);
+            mm_unmap_range(base, off);
+            return -1;
+        }
+    }
+    return 0;
+}
 
 static int sys_brk_user(uint32_t inc)
 {
@@ -96,8 +157,12 @@ int mm_syscall(interrupt_frame_t *f)
         break;
     case SYS_MMAP: {
         proc_t *p = proc_current();
+        uint32_t req = f->ecx;
+        uint32_t prot = req & MMAP_PROT_MASK;
+        uint32_t flags = req & 0xFF00U;
         uint32_t len = (f->ebx + 0xFFFU) & ~0xFFFU;
         uint32_t slot = PROC_MMAP_MAX;
+        uint32_t base;
 
         if (p == 0 || len == 0U ||
             len > USER_LAYOUT_MMAP_END - USER_LAYOUT_MMAP_BASE ||
@@ -110,36 +175,46 @@ int mm_syscall(interrupt_frame_t *f)
         }
         if (slot == PROC_MMAP_MAX) { ret = -1; break; }
 
-        uint32_t base = USER_LAYOUT_MMAP_BASE + p->mmap_next;
-        for (uint32_t off = 0; off < len; off += PAGE_SIZE) {
-            void *page = pmm_alloc_page();
-            if (page == 0) {
-                for (uint32_t j = 0; j < off; j += PAGE_SIZE) {
-                    uint32_t ph = vmm_get_phys(base + j);
-                    vmm_unmap_page(base + j);
-                    if (ph != 0U) pmm_free_page((void *)(uintptr_t)ph);
-                }
+        base = USER_LAYOUT_MMAP_BASE + p->mmap_next;
+
+        if ((flags & MMAP_F_FILE) != 0U) {
+            /* 文件后端（只读 MAP_PRIVATE 起步）：fd 必须可读且是普通文件。 */
+            int fd = (int)f->edx;
+            uint32_t offset = ((req >> 16) & 0xFFFFU) << PAGE_SHIFT;
+            proc_fd_t *fdp;
+            mm_fs_reader_t reader;
+
+            if ((flags & MMAP_F_PRIVATE) == 0U) { ret = -1; break; }
+            if ((prot & ~(uint32_t)(VMM_PROT_READ | VMM_PROT_WRITE |
+                                    VMM_PROT_EXEC)) != 0U) {
                 ret = -1;
-                goto mmap_out;
+                break;
             }
-            memset(page, 0, PAGE_SIZE);
-            if (vmm_map_user_page(base + off, (uint32_t)(uintptr_t)page,
-                                  PTE_PRESENT | PTE_WRITE | PTE_USER | PTE_NOEXEC) != 0) {
-                pmm_free_page(page);
-                for (uint32_t j = 0; j < off; j += PAGE_SIZE) {
-                    uint32_t ph = vmm_get_phys(base + j);
-                    vmm_unmap_page(base + j);
-                    if (ph != 0U) pmm_free_page((void *)(uintptr_t)ph);
-                }
+            /* offset 用“顺序读+丢弃”实现，限制在单文件上限内以保证 O(64KB)。 */
+            if (fd <= 0 || offset > FS_FILE_MAX) { ret = -1; break; }
+
+            fdp = fd_get(p, fd);
+            if (fdp == 0 || fdp->kind != FD_KIND_FILE ||
+                (fdp->rights & FD_RIGHT_READ) == 0U) {
                 ret = -1;
-                goto mmap_out;
+                break;
             }
+
+            reader.be = fdp->fs_be;
+            reader.handle = (int)fdp->handle;
+            if (mm_file_map(base, len, offset, mm_fs_read, &reader, prot) != 0) {
+                ret = -1;
+                break;
+            }
+        } else if (mmap_anon(base, len) != 0) {
+            ret = -1;
+            break;
         }
+
         p->mmaps[slot].base = base;
         p->mmaps[slot].len = len;
         p->mmap_next += len;
         ret = (int)base;
-mmap_out:
         break;
     }
     case SYS_MUNMAP: {
@@ -157,11 +232,7 @@ mmap_out:
         }
         if (slot == PROC_MMAP_MAX) { ret = -1; break; }
 
-        for (uint32_t off = 0; off < len; off += PAGE_SIZE) {
-            uint32_t ph = vmm_get_phys(addr + off);
-            vmm_unmap_page(addr + off);
-            if (ph != 0U) pmm_free_page((void *)(uintptr_t)ph);
-        }
+        mm_unmap_range(addr, len);
         p->mmaps[slot].base = 0;
         p->mmaps[slot].len = 0;
         ret = 0;

@@ -70,6 +70,12 @@ unsigned int vmm_get_phys(unsigned int virt);
 /* 查询虚拟页的低 12 位页表标志（用于区分只读代码页与 COW 页） */
 unsigned int vmm_user_flags(unsigned int virt);
 
+/* 统计一个地址空间“用户布局区” [USER_LAYOUT_CODE_BASE,
+ * USER_LAYOUT_CLONE_END) 内 PRESENT|USER 的 4KB 用户页数（RSS 口径）。
+ * dir 可以是当前或非当前页目录（页表物理地址恒等映射，可直接遍历）；
+ * dir==0 / 非 RAM 指针 / 已释放的 PDPT 返回 0。 */
+uint32_t vmm_user_page_count(pde_t *dir);
+
 /* 修改当前地址空间一个用户页的保护位（mprotect 的底层实现）：
  * prot 取 VMM_PROT_* 组合。请求写时若页是 COW/共享会先私有化；
  * 清写会同时清 PTE_COW（显式只读必须真的不可写）；执行位用 NX 表达。

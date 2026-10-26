@@ -407,6 +407,13 @@ int mm_selftest(void)
     report("pmm double-free detection", test_pmm_double_free());
     report("heap linked-list check", test_heap_check());
 
+    /* 追加项（P1 mm）：per-process RSS 与文件映射 mmap。
+     * 这两个自检各自打印 docs/claims/mm.md 里的期望行：
+     *   mm: rss accounting ok ...
+     *   mm: file mmap ok ... */
+    report("per-process rss accounting", mm_rss_selftest());
+    report("file-backed mmap", mm_filemap_selftest());
+
     serial_puts("memtest: done, failures = ");
     serial_putdec((unsigned int)failures);
     serial_puts("\r\n");
