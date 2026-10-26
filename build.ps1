@@ -887,7 +887,30 @@ if ($Test -or $Shot) {
             @{ Name = 'runqueue cpu1';             Ok = ($out -match 'sched: runqueue cpu1 mask=0x[0-9a-f]+') },
             @{ Name = 'MADT IRQ0 override';        Ok = ($out.Contains('madt: irq0 -> gsi2')) },
             @{ Name = 'IOAPIC irq0 路由';          Ok = ($out.Contains('ioapic: irq0 -> gsi2 apic 0 vector=0x20')) },
-            @{ Name = 'IOAPIC 全量路由';           Ok = ($out.Contains('ioapic: legacy IRQ routing done')) }
+            @{ Name = 'IOAPIC 全量路由';           Ok = ($out.Contains('ioapic: legacy IRQ routing done')) },
+            # ---- 审计批次（2026-10-27）：fs/net/smp ----
+            @{ Name = 'fs 审计：坏镜像拒绝';       Ok = ($out.Contains('fs: audit corrupt image mounts rejected')) },
+            @{ Name = 'fs 审计：syscall 缓冲守卫'; Ok = ($out.Contains('fs: audit syscall chroot/time/fsck buffer guards ok')) },
+            @{ Name = 'fs 审计：硬链接/nlink';     Ok = ($out.Contains('fs: audit hardlink nlink / ino_promote ok')) },
+            @{ Name = 'fs 审计：路径边界';         Ok = ($out.Contains('fs: audit deep/long/.. path edges ok')) },
+            @{ Name = 'fs 审计自检通过';           Ok = ($out.Contains('fs: audit selftest PASS')) },
+            @{ Name = 'net 审计：IPv4 入口';       Ok = ($out.Contains('net: audit tcp ip ingress rejects malformed ok')) },
+            @{ Name = 'net 审计：UDP 入口';        Ok = ($out.Contains('net: audit udp ingress rejects malformed ok')) },
+            @{ Name = 'net 审计：伪造 SYN';        Ok = ($out.Contains('net: audit tcp forged SYN ignored ok')) },
+            @{ Name = 'net 审计：握手 seq';        Ok = ($out.Contains('net: audit tcp handshake seq validated ok')) },
+            @{ Name = 'net 审计：接收记账';        Ok = ($out.Contains('net: audit tcp receive accounting ok')) },
+            @{ Name = 'net 审计：listener 归属';   Ok = ($out.Contains('net: audit listen socket owned by pid ok')) },
+            @{ Name = 'net 审计：ARP 防欺骗';      Ok = ($out.Contains('net: audit arp spoof rejected ok')) },
+            @{ Name = 'net 审计：DNS txid 熵';     Ok = ($out.Contains('net: audit dns txid entropy ok')) },
+            @{ Name = 'net 审计：伪造 ACK';        Ok = ($out.Contains('net: audit tcp forged ACK ignored ok')) },
+            @{ Name = 'smp 审计：sigreturn 帧';    Ok = ($out.Contains('audit: sigreturn frame validation ok')) },
+            @{ Name = 'smp 审计：kill uid';        Ok = ($out.Contains('audit: kill uid policy ok')) },
+            @{ Name = 'smp 审计：uaccess 窗口';    Ok = ($out.Contains('audit: uaccess user window ok')) },
+            @{ Name = 'smp 审计：spawn 竞态';      Ok = ($out -match 'audit: smp spawn race PASS \(rounds=\d+\)') },
+            @{ Name = 'smp 审计：wake-vs-block';   Ok = ($out -match 'audit: smp wake-vs-block PASS') },
+            @{ Name = 'smp 审计：vmalloc 并发';    Ok = ($out -match 'audit: mm vmalloc concurrent PASS') },
+            @{ Name = 'smp 审计自检通过';          Ok = ($out.Contains('audit: smp selftest PASS')) },
+            @{ Name = 'smp 审计自检结束';          Ok = ($out.Contains('audit: smp selftest done')) }
         )
 
         T 'checks begin'
