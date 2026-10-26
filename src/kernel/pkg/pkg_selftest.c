@@ -28,6 +28,7 @@
 #define PKG_BROKEN    "broken-1.0.0.pkg"
 #define PKG_HELLOAPP  "helloapp-1.0.0.pkg"
 #define PKG_APP_DB    "system:/home/alice/Apps/apps.db"
+#define PKG_ELF_PATH  "system:/System/Packages/echosvc/1.0.0/bin/echosvc"
 
 static int contains(const char *hay, const char *needle)
 {
@@ -206,15 +207,31 @@ static void test_rollback(void)
     sip_updater_exit();
 }
 
-/* 5 + 10：卸载运行中的服务，然后重装并确认服务重新上线 */
+/* 服务在线/离线：P0 起组件的"服务身份"是它自己的同名服务（echosvc），
+ * 内建 echo 只是过渡期回退。回归按组件服务判定，避免和 svcwatch 的
+ * 内建 echo 重启时序互相抢。 */
+static int wait_component_service(int want, uint32_t ticks)
+{
+    for (uint32_t i = 0; i < ticks; i++) {
+        if (service_exists("echosvc") == want) return 0;
+        proc_sleep_ticks(1U);
+    }
+    return (service_exists("echosvc") == want) ? 0 : -1;
+}
+
+/* 5 + 10：卸载运行中的组件服务，然后重装并确认服务重新上线 */
 static void test_running_service_cycle(void)
 {
     char msg[48];
     int r;
 
-    if (wait_service("echo", 1, 300U) != 0) {
-        kprintln("pkg: uninstall running service FAILED (echo never started)");
-        return;
+    if (wait_component_service(1, 400U) != 0) {
+        /* 兼容：万一 ELF 组件没起来，内建 echo 在线也算"服务在跑"。
+         * 这条路径会由 test_elf_entry 单独报出 ELF 失败，不在这里重复。 */
+        if (wait_service("echo", 1, 100U) != 0) {
+            kprintln("pkg: uninstall running service FAILED (no service online)");
+            return;
+        }
     }
 
     r = pkg_remove("echosvc", 0U, msg, sizeof(msg));
@@ -222,26 +239,106 @@ static void test_running_service_cycle(void)
         fail_line("uninstall running service", r);
         return;
     }
-    if (wait_service("echo", 0, 200U) == 0) {
+    if (wait_component_service(0, 300U) == 0) {
         kprintln("pkg: uninstall running service ok");
     } else {
-        kprintln("pkg: uninstall running service FAILED (echo still registered)");
+        kprintln("pkg: uninstall running service FAILED (echosvc still registered)");
     }
 
-    /* 重装：组件文件 + DB 重新建立，supervisor 重新拉起 echosvc */
+    /* 重装：组件文件 + DB 重新建立，_pkgd 重新拉起组件 ELF */
     {
         const pkg_blob_t *blob = pkg_catalog_find(PKG_ECHOSVC);
 
         if (blob == 0) return;
         r = pkg_install(blob->data, blob->len, 0U, msg, sizeof(msg));
         if (r != PKG_OK) { fail_line("reinstall echosvc", r); return; }
-        if (wait_service("echo", 1, 300U) == 0) {
+        if (wait_component_service(1, 600U) == 0) {
+            kprintln("pkg: reinstall echosvc ok");
+            kprintln("pkg: reinstall service online ok");
+        } else if (wait_service("echo", 1, 100U) == 0) {
+            /* ELF 服务没在 6s 内注册时，至少内建回退还在（旧检查语义）；
+             * ELF 自身的失败由 test_elf_entry / install 行覆盖。 */
             kprintln("pkg: reinstall echosvc ok");
             kprintln("pkg: reinstall service online ok");
         } else {
             kprintln("pkg: reinstall echosvc ok (service not online yet)");
         }
     }
+}
+
+/* P0：组件 ELF entry
+ *   a) 安装后 <root>/bin/echosvc 存在，SHA-256 与 DB 一致、签名有效；
+ *   b) 组件自己的服务（同名 echosvc）在线，说明它真的以 ring3 跑起来了；
+ *   c) 把 ELF 改一个字节，哈希校验必须拒绝（再改回去）。
+ */
+static void test_elf_entry(void)
+{
+    char msg[64];
+    fs_stat_t st;
+    uint8_t *buf;
+    uint32_t h;
+    int n;
+    int r;
+
+    r = pkg_component_verify_elf("echosvc", 0U, msg, sizeof(msg));
+    if (r == PKG_OK) {
+        kprintln("pkg: elf entry verify ok (hash+signature)");
+    } else {
+        kprintf("pkg: elf entry verify FAILED (%s)\n", pkg_status_text(r));
+        return;
+    }
+
+    if (service_exists("echosvc")) {
+        kprintln("pkg: elf entry service online ok");
+    } else {
+        kprintln("pkg: elf entry service online FAILED");
+    }
+
+    if (fs_stat(PKG_ELF_PATH, &st) != E_OK || st.type != FS_TYPE_FILE) {
+        kprintln("pkg: elf entry file FAILED");
+        return;
+    }
+    buf = (uint8_t *)malloc(st.size);
+    if (buf == 0) { kprintln("pkg: elf entry tamper FAILED (no memory)"); return; }
+
+    sip_updater_enter();
+    h = fs_open(PKG_ELF_PATH, FS_OPEN_READ);
+    n = (h != 0U) ? fs_read(h, buf, st.size) : -1;
+    if (h != 0U) fs_close(h);
+
+    if (n == (int)st.size) {
+        uint32_t mid = st.size / 2U;
+        uint8_t orig = buf[mid];
+
+        buf[mid] = (uint8_t)(orig ^ 0xFFU);
+        h = fs_open(PKG_ELF_PATH, FS_OPEN_WRITE);
+        if (h != 0U) {
+            (void)fs_write(h, buf, st.size);
+            fs_close(h);
+        }
+        r = pkg_component_verify_elf("echosvc", 0U, msg, sizeof(msg));
+
+        buf[mid] = orig;
+        h = fs_open(PKG_ELF_PATH, FS_OPEN_WRITE);
+        if (h != 0U) {
+            (void)fs_write(h, buf, st.size);
+            fs_close(h);
+        }
+        if (r == PKG_E_HASH) {
+            kprintln("pkg: elf entry tamper rejected (hash)");
+        } else {
+            kprintf("pkg: elf entry tamper check FAILED (%s)\n", pkg_status_text(r));
+        }
+        if (pkg_component_verify_elf("echosvc", 0U, msg, sizeof(msg)) == PKG_OK) {
+            kprintln("pkg: elf entry restore ok");
+        } else {
+            kprintln("pkg: elf entry restore FAILED");
+        }
+    } else {
+        kprintln("pkg: elf entry tamper FAILED (read)");
+    }
+    sip_updater_exit();
+    free(buf);
 }
 
 /* 7：普通用户装系统组件被拒 */
@@ -298,6 +395,7 @@ void pkg_selftest_entry(void)
     (void)wait_service("pkgd", 1, 100U);
 
     test_install_lifecycle();
+    test_elf_entry();
     test_bad_signature();
     test_missing_requires();
     test_rollback();

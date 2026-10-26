@@ -226,7 +226,8 @@ static int map_trampoline(uint32_t va)
     return r;
 }
 
-static int enter_user(uint32_t entry, void *stack_phys, const char *args, const char *what)
+static int enter_user(uint32_t entry, void *stack_phys, const char *args,
+                      const char *what, volatile int *started)
 {
     proc_t *p = proc_current();
     uint32_t stack_va = (p != 0 && p->user_stack_va != 0U)
@@ -268,6 +269,10 @@ static int enter_user(uint32_t entry, void *stack_phys, const char *args, const 
                 (void *)(uintptr_t)p->user_trampoline, p->pid);
     }
 
+    /* 组件启动握手：父线程只在子线程真正进入 ring3 后返回成功。
+     * 必须写在 user_enter 之前——user_enter 不返回。
+     * 状态 2 = started（和 user_comp_job.state 的 pending=1 区分开）。 */
+    if (started != 0) *started = 2;
     user_enter(entry, stack_va + off);
     return 0;
 }
@@ -344,7 +349,7 @@ int user_mode_run(void)
         return -1;
     }
 
-    return enter_user(USER_CODE_VA, stack_phys, 0, "builtin demo");
+    return enter_user(USER_CODE_VA, stack_phys, 0, "builtin demo", 0);
 }
 
 int user_probe_run(void)
@@ -367,7 +372,7 @@ int user_probe_run(void)
         return -1;
     }
 
-    return enter_user(USER_CODE_VA, stack_phys, 0, "ring3 AP probe");
+    return enter_user(USER_CODE_VA, stack_phys, 0, "ring3 AP probe", 0);
 }
 
 int user_fsd_run(void)
@@ -390,7 +395,7 @@ int user_fsd_run(void)
         return -1;
     }
 
-    return enter_user(USER_CODE_VA, stack_phys, 0, "ring3 fsd");
+    return enter_user(USER_CODE_VA, stack_phys, 0, "ring3 fsd", 0);
 }
 
 int user_blkd_run(void)
@@ -412,10 +417,11 @@ int user_blkd_run(void)
                           PTE_PRESENT | PTE_USER) != 0) {
         return -1;
     }
-    return enter_user(USER_CODE_VA, stack_phys, 0, "ring3 blkd");
+    return enter_user(USER_CODE_VA, stack_phys, 0, "ring3 blkd", 0);
 }
 
-int user_exec(const char *path)
+static int user_exec_common(const char *path, const char *args,
+                            volatile int *started)
 {
     uint32_t entry = 0;
     void *stack_phys;
@@ -426,7 +432,97 @@ int user_exec(const char *path)
     stack_phys = pmm_alloc_page();
     if (stack_phys == 0) return -1;
 
-    return enter_user(entry, stack_phys, 0, path);
+    return enter_user(entry, stack_phys, args, path, started);
+}
+
+int user_exec(const char *path)
+{
+    return user_exec_common(path, 0, 0);
+}
+
+int user_exec_args(const char *path, const char *args)
+{
+    return user_exec_common(path, args, 0);
+}
+
+/* ---- 组件 ELF：在独立进程里启动（_pkgd 的 bin/ 入口）----
+ * 单槽邮箱 + 状态握手：
+ *   0 = idle, 1 = pending, 2 = 已进入 ring3, -1 = 加载/exec 失败
+ * 父线程（_pkgd）写入 path/args、spawn "comprun"，等子线程把状态置成
+ * 2/-1 后才算启动完成；失败绝不留下半个进程。 */
+#define USER_COMP_PATH_MAX 192U
+#define USER_COMP_ARGS_MAX 64U
+
+static struct {
+    volatile int state;
+    char path[USER_COMP_PATH_MAX];
+    char args[USER_COMP_ARGS_MAX];
+} user_comp_job;
+
+void user_component_entry(void)
+{
+    char path[USER_COMP_PATH_MAX];
+    char args[USER_COMP_ARGS_MAX];
+
+    if (user_comp_job.state != 1) {
+        proc_exit(1);
+    }
+    strncpy(path, user_comp_job.path, sizeof(path) - 1U);
+    path[sizeof(path) - 1U] = '\0';
+    strncpy(args, user_comp_job.args, sizeof(args) - 1U);
+    args[sizeof(args) - 1U] = '\0';
+
+    /* 成功时 user_enter 不返回；返回就是失败。 */
+    (void)user_exec_common(path, (args[0] != '\0') ? args : 0,
+                           &user_comp_job.state);
+    user_comp_job.state = -1;
+    proc_exit(1);
+}
+
+int user_component_exec(const char *path, const char *args)
+{
+    proc_t *caller = proc_current();
+    proc_t *p;
+    int pid;
+
+    if (path == 0 || caller == 0) return -1;
+    if (strlen(path) >= USER_COMP_PATH_MAX) return -1;
+    if (user_comp_job.state != 0) return -1;
+
+    memset(&user_comp_job, 0, sizeof(user_comp_job));
+    strncpy(user_comp_job.path, path, sizeof(user_comp_job.path) - 1U);
+    if (args != 0) {
+        strncpy(user_comp_job.args, args, sizeof(user_comp_job.args) - 1U);
+    }
+    user_comp_job.state = 1;
+
+    p = proc_spawn("comprun");
+    if (p == 0) {
+        user_comp_job.state = 0;
+        return -1;
+    }
+    /* 让 _pkgd 能 wait/reap 这个组件进程（proc_spawn 默认无父）。 */
+    p->parent_pid = caller->pid;
+
+    for (uint32_t i = 0; i < 300U; i++) {
+        if (user_comp_job.state == 2) {
+            pid = (int)p->pid;
+            user_comp_job.state = 0;
+            return pid;
+        }
+        if (user_comp_job.state < 0) {
+            user_comp_job.state = 0;
+            (void)proc_wait_options((int)p->pid, 0, PROC_WAIT_WNOHANG);
+            return -1;
+        }
+        proc_sleep_ticks(1U);
+    }
+
+    /* 超时：子线程可能卡在别的路径上，杀掉并回收，绝不返回半启动。 */
+    proc_send_signal(p, SIGKILL);
+    user_comp_job.state = 0;
+    kprintf("user: component exec timeout (%s)\n", path);
+    return -1;
 }
 
 /* 用户栈按需增长：栈区内缺页就补一页；底部 guard 页永不映射。 */

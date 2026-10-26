@@ -16,6 +16,15 @@
 #define FS_WRITE  2
 #define FS_CREAT  4
 
+/* SYS_PKG(77) 的 op 编码：与 src/kernel/include/pkg.h 保持一致，
+ * 完整说明（参数/返回值/权限）见 docs/claims/pkg.md。 */
+#define PKG_OP_LIST              0
+#define PKG_OP_INSTALL           1
+#define PKG_OP_REMOVE            2
+#define PKG_OP_VERIFY            3
+#define PKG_OP_COMPONENT_PORT    4
+#define PKG_OP_COMPONENT_UNREG   5
+
 static inline int sc(int n, int a, int b, int c)
 {
     int r;
@@ -73,6 +82,60 @@ static void puterr2(const char *a, const char *b)
     puterr(a);
     puterr(b);
     puterr("\n");
+}
+
+/* 组件 ELF 的 ring3 服务模式（argv[0] = "svc:<组件名>"）。
+ *
+ * 组件模型 P0：_pkgd 从 <root>/bin/<name> 读 ELF、验哈希+签名后，用
+ * user_component_exec 把它映射成 ring3 程序，argv[0] 约定为 "svc:<name>"。
+ * 这里用 native ABI 的 port/channel 服务接口把同名服务注册上去，然后回显
+ * 收到的消息；收到 "stop" 时先让 _pkgd 注销注册表项（SYS_PKG op 5），再退出。
+ * 这样卸载不会在服务表里留下指向已释放 port 的僵尸条目。 */
+static int component_service_main(const char *name)
+{
+    struct { unsigned int type, rights, object_id, flags; } info;
+    int port;
+    int port_obj = -1;
+    char msg[64];
+
+    if (name == 0 || name[0] == '\0') return 1;
+
+    port = nc(0x33, 0, 0, 0);                   /* PORT_CREATE */
+    if (port < 0) {
+        puterr("component: cannot create port\n");
+        return 1;
+    }
+    if (nc(0x38, (int)name, (int)slen(name), port) < 0) {   /* SERVICE_REGISTER */
+        puterr("component: cannot register service\n");
+        return 1;
+    }
+    if (nc(0x12, port, (int)&info, 0) == 0) {   /* HANDLE_INFO -> object_id */
+        port_obj = (int)info.object_id;
+        (void)sc(SYS_PKG, PKG_OP_COMPONENT_PORT, port_obj, 0);
+    }
+    printf("component: %s elf service online (pid=%d port=%d)\n",
+           name, sc(SYS_GETPID, 0, 0, 0), port);
+
+    for (;;) {
+        int s = nc(0x37, port, 0, 0);           /* PORT_ACCEPT_BLOCK */
+        int n;
+
+        if (s < 0) break;
+        n = nc(0x36, s, (int)msg, (int)sizeof(msg));   /* CHANNEL_RECV_BLOCK */
+        if (n == 4 && msg[0] == 's' && msg[1] == 't' &&
+            msg[2] == 'o' && msg[3] == 'p') {
+            nc(0x10, s, 0, 0);                  /* HANDLE_CLOSE */
+            break;
+        }
+        if (n > 0) (void)nc(0x31, s, (int)msg, n);     /* CHANNEL_SEND echo */
+        nc(0x10, s, 0, 0);
+    }
+
+    if (port_obj >= 0) {
+        (void)sc(SYS_PKG, PKG_OP_COMPONENT_UNREG, port_obj, 0);
+    }
+    printf("component: %s elf service stopped\n", name);
+    return 0;
 }
 
 /* 参数解析：支持双引号、单引号和反斜杠转义（就地改字符串）
@@ -482,6 +545,119 @@ static void cmd_mv(const char *oldpath, const char *newpath)
     sc(SYS_SYNC, 0, 0, 0);
 }
 
+/* 小工具：子串查找（pkg CLI 的自检只看关键字，不解析完整文本） */
+static int has_sub(const char *hay, const char *needle)
+{
+    unsigned int n = slen(needle);
+
+    if (hay == 0 || needle == 0 || n == 0U) return 0;
+    while (*hay != '\0') {
+        unsigned int i = 0;
+
+        while (i < n && hay[i] == needle[i]) i++;
+        if (i == n) return 1;
+        hay++;
+    }
+    return 0;
+}
+
+/* pkg <install|list|remove|verify> ...（SYS_PKG 77 的 ring3 前端）
+ * 与内核 _pkgd 同一套策略：普通用户只能动自己 ~/Apps 下的 app，
+ * 系统组件要 root（= CAP_PKG_ADMIN）。 */
+static void cmd_pkg(const char *sub, const char *arg)
+{
+    char reply[128];
+    int r;
+
+    if (sub == 0 || scmp(sub, "help") == 0) {
+        putstr("usage: pkg install <file> | list | remove <name> | verify <name>\n");
+        return;
+    }
+    if (scmp(sub, "list") == 0) {
+        char buf[320];
+        int n = sc(SYS_PKG, PKG_OP_LIST, (int)buf, (int)sizeof(buf));
+
+        if (n < 0) { puterr("pkg: list failed\n"); return; }
+        if (n == 0) { putstr("(no components)\n"); return; }
+        putstr(buf);
+        return;
+    }
+    if (arg == 0 || arg[0] == '\0') {
+        puterr("usage: pkg install <file> | list | remove <name> | verify <name>\n");
+        return;
+    }
+
+    reply[0] = '\0';
+    if (scmp(sub, "install") == 0) {
+        r = sc(SYS_PKG, PKG_OP_INSTALL, (int)arg, (int)reply);
+    } else if (scmp(sub, "remove") == 0) {
+        r = sc(SYS_PKG, PKG_OP_REMOVE, (int)arg, (int)reply);
+    } else if (scmp(sub, "verify") == 0) {
+        r = sc(SYS_PKG, PKG_OP_VERIFY, (int)arg, (int)reply);
+    } else {
+        puterr("pkg: unknown subcommand\n");
+        return;
+    }
+    printf("pkg: %s\n", reply);
+    (void)r;
+}
+
+/* pkg CLI 自检（只在 reexec 带 --pkgcli 时跑）：
+ *   root: list / verify 已安装组件；
+ *   fork 出 alice：remove+install+verify 用户应用，并确认装系统组件被拒。
+ * 这些行就是 docs/claims/pkg.md 里给集成会话的断言行。 */
+static void pkg_cli_selftest(void)
+{
+    char buf[256];
+    char reply[128];
+    int n;
+    int pid;
+    int status = -1;
+
+    n = sc(SYS_PKG, PKG_OP_LIST, (int)buf, (int)sizeof(buf));
+    if (n >= 0 && has_sub(buf, "echosvc")) {
+        putstr("pkg: user cli list ok\n");
+    } else {
+        printf("pkg: user cli list FAIL (n=%d)\n", n);
+    }
+
+    if (sc(SYS_PKG, PKG_OP_VERIFY, (int)"echosvc", (int)reply) == 0) {
+        putstr("pkg: user cli verify ok\n");
+    } else {
+        printf("pkg: user cli verify FAIL (%s)\n", reply);
+    }
+
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) {
+        int r1, r2, r3, r4;
+
+        (void)sc(SYS_SETUID, 1000, 1000, 0);       /* root 才能降权到 alice */
+        reply[0] = '\0';
+        r1 = sc(SYS_PKG, PKG_OP_REMOVE, (int)"helloapp", (int)reply);
+        r2 = sc(SYS_PKG, PKG_OP_INSTALL, (int)"helloapp-1.0.0.pkg", (int)reply);
+        r3 = sc(SYS_PKG, PKG_OP_VERIFY, (int)"helloapp", (int)reply);
+        /* 系统组件（service）：普通用户必须被 policy 拒绝 */
+        r4 = sc(SYS_PKG, PKG_OP_INSTALL, (int)"echosvc-1.0.0.pkg", (int)reply);
+
+        if (r1 == 0 && r2 == 0 && r3 == 0) {
+            putstr("pkg: user cli install ok\n");
+        } else {
+            printf("pkg: user cli install FAIL (%d %d %d)\n", r1, r2, r3);
+        }
+        if (r4 < 0) {
+            putstr("pkg: user cli policy deny ok\n");
+        } else {
+            printf("pkg: user cli policy deny FAIL (r=%d)\n", r4);
+        }
+        sc(SYS_EXIT, (r1 == 0 && r2 == 0 && r3 == 0 && r4 < 0) ? 0 : 1, 0, 0);
+    } else if (pid > 0) {
+        sc(SYS_WAIT, pid, (int)&status, 0);
+        printf("pkg: user cli done (status=%d)\n", status);
+    } else {
+        putstr("pkg: user cli FAIL (fork)\n");
+    }
+}
+
 static void cmd_pwd(void)
 {
     char cwd[64];
@@ -575,19 +751,6 @@ static void cmd_write(const char *path, const char *text)
     sc(SYS_SYNC, 0, 0, 0);          /* 立即落盘，掉电也不丢 */
 
     putstr((n < 0) ? "write: failed\n" : "ok\n");
-}
-
-static void putnum(unsigned int v)
-{
-    char num[12];
-    int i = 0;
-
-    if (v == 0U) num[i++] = '0';
-    while (v > 0U) {
-        num[i++] = (char)('0' + (v % 10U));
-        v /= 10U;
-    }
-    while (i > 0) putch(num[--i]);
 }
 
 static void cmd_fork(void)
@@ -1346,6 +1509,7 @@ static void cmd_help_one(const char *name)
         { "echo",    "echo <args...>        print arguments" },
         { "sleep",   "sleep <ms>            sleep milliseconds" },
         { "fork",    "fork                  fork and wait for the child" },
+        { "pkg",     "pkg install <file> | list | remove <name> | verify <name>" },
         { "sectest", "sectest               code/guard write protection test" },
         { "exec",    "exec <path> [args]    replace this shell" },
         { "reexec",  "reexec                exec /bin/shell (self-test)" },
@@ -1397,6 +1561,7 @@ static void run_line(char *cmd)
                "  echo <args...>         print arguments\n"
                "  sleep <ms>             sleep milliseconds\n"
                "  fork                   create a child process, wait for it\n"
+               "  pkg install|list|remove|verify <file|name>   component CLI\n"
                "  sectest                code/guard write protection test\n"
                "  exec <path> [args]     replace this shell with a program\n"
                "  reexec                 exec /bin/shell (self-test)\n"
@@ -1467,6 +1632,8 @@ static void run_line(char *cmd)
         sc(SYS_SLEEP, str2int(args[1]), 0, 0);
     } else if (scmp(args[0], "fork") == 0) {
         cmd_fork();
+    } else if (scmp(args[0], "pkg") == 0) {
+        cmd_pkg((nargs >= 2) ? args[1] : 0, (nargs >= 3) ? args[2] : 0);
     } else if (scmp(args[0], "sectest") == 0) {
         cmd_sectest();
     } else if (scmp(args[0], "exec") == 0 && nargs >= 2) {
@@ -1483,8 +1650,9 @@ static void run_line(char *cmd)
         sc(SYS_EXEC, (int)args[1], (int)argbuf, 0);
         putstr("exec: failed\n");
     } else if (scmp(args[0], "reexec") == 0) {
-        /* 回归专用：不依赖键盘输入路径字符，直接 exec 自身。 */
-        sc(SYS_EXEC, (int)"system:/bin/shell", 0, 0);
+        /* 回归专用：不依赖键盘输入路径字符，直接 exec 自身。
+         * 带 --pkgcli：新 shell 启动后跑一遍 ring3 pkg CLI 自检（见 _start）。 */
+        sc(SYS_EXEC, (int)"system:/bin/shell", (int)"--pkgcli", 0);
         putstr("reexec: failed\n");
     } else if (scmp(args[0], "reboot") == 0) {
         sc(SYS_REBOOT, 0, 0, 0);
@@ -1851,6 +2019,15 @@ void _start(int argc, char **argv)
 {
     char line[128];
 
+    /* 组件 ELF 服务模式：_pkgd 用 argv[0]="svc:<name>" 启动 */
+    if (argc > 0 && argv != 0 && argv[0] != 0 && slen(argv[0]) > 4U &&
+        argv[0][0] == 's' && argv[0][1] == 'v' &&
+        argv[0][2] == 'c' && argv[0][3] == ':') {
+        int rc = component_service_main(argv[0] + 4);
+
+        sc(SYS_EXIT, rc, 0, 0);
+    }
+
     /* P1：如果这个 tty 是 getty 起的（生产启动），先登录再进 shell。
      * 测试模式（内核参数 autologin=root）这里返回 0，直接往下走，
      * 与引入账号系统之前的行为完全一致。 */
@@ -1866,14 +2043,21 @@ void _start(int argc, char **argv)
            sc(SYS_GETGID, 0, 0, 0), sc(SYS_GETEGID, 0, 0, 0),
            sc(SYS_GETGROUPS, 0, 0, 0));
 
-    /* 内核按 ELF 启动约定压好的 argc/argv（启动时没有参数） */
-    putstr("ushell: argc=");
-    putnum((unsigned int)argc);
-    if (argc > 0 && argv != 0) {
-        putstr(" argv0=");
-        putstr(argv[0]);
+    /* 内核按 ELF 启动约定压好的 argc/argv（启动时没有参数）。
+     * 必须一次 SYS_FWRITE 打完：启动期有服务/中断并发打印，分段写会把
+     * "ushell: argc=0" 插进别人的日志，回归字符串就断了。 */
+    if (argc > 0 && argv != 0 && argv[0] != 0) {
+        printf("ushell: argc=%d argv0=%s\n", argc, argv[0]);
+    } else {
+        putstr("ushell: argc=0\n");
     }
-    putstr("\n");
+
+    /* ring3 pkg CLI 自检：只由 `reexec` 传 --pkgcli 触发（在 pkgtest 跑完之后），
+     * 这样正常启动/生产路径不会安装/卸载组件，也不会和启动回归抢时序。 */
+    if (argc > 0 && argv != 0 && argv[0] != 0 &&
+        scmp(argv[0], "--pkgcli") == 0) {
+        pkg_cli_selftest();
+    }
 
     /* 启动自检：getcwd + mkdir/stat/unlink，证明文件系统系统调用都通。
      * 写卷根需要 root：普通用户登录时跳过（否则会打一条 DENY 审计 + FAIL，

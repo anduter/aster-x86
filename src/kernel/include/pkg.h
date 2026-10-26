@@ -47,6 +47,18 @@
 #define PKG_MANIFEST_MAX    640u
 #define PKG_FILE_MAX        16u
 
+/* 组件 DB 一行最多多少字节（P0 起多出 program=/elf=/elfsha= 三个字段）。 */
+#define PKG_DB_LINE_MAX     512u
+
+/* 组件 ELF entry（P0）：
+ * 安装时把服务的可执行映像放到 <root>/bin/<name>，启动时从组件目录读回来，
+ * 先比对 DB 里记录的 SHA-256、再验证 APKG 包签名（或 shell 运行时签名），
+ * 成功后映射成 ring3 程序 exec。失败由安装流程回滚（删目录 + 删 DB 行）。
+ * 文件名/哈希在组件 DB 里是 elf=/elfsha= 字段。 */
+#define PKG_ELF_DIR         "bin"
+#define PKG_ELF_HASH_HEX    64u
+#define PKG_COMPONENT_MAX   4u
+
 /* 包能申请的 capability（manifest 的 capabilities=，逗号分隔）。
  * app 包不允许申请任何 capability；service 包可以申请下面的位。
  * CAP_SYS_ADMIN / CAP_PKG_ADMIN 只授予签名更新器（_pkgd 自身），
@@ -130,6 +142,11 @@ int pkg_component_root(const pkg_manifest_t *m, uint32_t euid,
 int pkg_install(const uint8_t *pkg, uint32_t len, uint32_t euid,
                 char *msg, uint32_t max);
 
+/* 从"内建包目录里的文件名"或文件系统里的 .pkg 路径安装。
+ * 路径形式（system:/tmp/x.pkg）优先按文件读；否则先查内建包目录。
+ * 这是 SYS_PKG / _pkgd "install <file>" 的统一入口。 */
+int pkg_install_path(const char *path, uint32_t euid, char *msg, uint32_t max);
+
 /* 卸载：运行中的 service 先停；删组件目录 + DB 行。 */
 int pkg_remove(const char *name, uint32_t euid, char *msg, uint32_t max);
 
@@ -137,11 +154,64 @@ int pkg_remove(const char *name, uint32_t euid, char *msg, uint32_t max);
 uint32_t pkg_list(uint32_t euid, char *out, uint32_t max);
 
 /* 校验已安装组件：DB 行存在 + 组件目录在 + 每个文件的 SHA-256 与内建
- * 包目录里的原始包一致。 */
+ * 包目录里的原始包一致。P0 起还会校验 bin/ 下组件 ELF 的 SHA-256。 */
 int pkg_verify_installed(const char *name, uint32_t euid, char *msg, uint32_t max);
+
+/* ---- P0：组件 ELF entry ---- */
+/* 启动已安装 service 的 ELF：读 <root>/bin/<name>，比对 DB 的 elfsha，
+ * 再验 APKG 包签名（内建包）或 shell 运行时签名；成功后新建进程、映射
+ * 成 ring3 并 exec（argv[0]="svc:<name>"）。返回 PKG_OK / 负错误码。 */
+int pkg_component_start(const char *name, uint32_t euid,
+                        char *msg, uint32_t max);
+
+/* 停止 _pkgd 启动的组件进程：先发 "stop" 让它自己注销服务/退出，
+ * 超时才 SIGKILL；最后兜底 service_unregister。没有运行中的组件也返回 PKG_OK。 */
+int pkg_component_stop(const char *name);
+
+/* 只校验（不启动）：<root>/bin/<name> 存在、SHA-256 与 DB 一致、签名有效、
+ * 同名服务在线。selftest 用。 */
+int pkg_component_verify_elf(const char *name, uint32_t euid,
+                             char *msg, uint32_t max);
+
+/* 组件进程通过 SYS_PKG 报告/注销自己的服务 port：
+ * 只有 _pkgd 启动的那个 pid 才能调用（调用者身份取 proc_current()）。 */
+int pkg_component_report_port(uint32_t port);
+int pkg_component_unregister_port(uint32_t port);
+
+/* ---- SYS_PKG (77)：ring3 组件 CLI 的内核入口 ----
+ *
+ * 编码（完整说明见 docs/claims/pkg.md）：
+ *   ebx=op, ecx=a, edx=b；返回 0 成功 / -1 失败；
+ *   LIST 返回组件条数（>=0），其余 op 的回复文本写进 b 指向的用户缓冲。
+ *
+ *   PKG_OP_LIST          0  a=user buf, b=max            -> 条数
+ *   PKG_OP_INSTALL       1  a=包名/路径, b=reply buf     -> 0 / -1
+ *   PKG_OP_REMOVE        2  a=组件名,   b=reply buf      -> 0 / -1
+ *   PKG_OP_VERIFY        3  a=组件名,   b=reply buf      -> 0 / -1
+ *   PKG_OP_COMPONENT_PORT 4 a=port object id             -> 0 / -1（仅组件进程）
+ *   PKG_OP_COMPONENT_UNREG 5 a=port object id            -> 0 / -1（仅组件进程）
+ */
+#define PKG_OP_LIST              0u
+#define PKG_OP_INSTALL           1u
+#define PKG_OP_REMOVE            2u
+#define PKG_OP_VERIFY            3u
+#define PKG_OP_COMPONENT_PORT    4u
+#define PKG_OP_COMPONENT_UNREG   5u
+
+#define PKG_CLI_REPLY_MAX        128u
+
+int pkg_syscall(uint32_t op, uint32_t a, uint32_t b);
 
 /* 把状态码转成短文本（日志/回复用） */
 const char *pkg_status_text(int status);
+
+/* 系统组件的管理员判定：root（euid==0）等价于持有 CAP_PKG_ADMIN。
+ * SIP-lite 的签名更新器作用域同样要求 root；per-process capability 位图
+ * 还没落地，所以这里是唯一的判定点，CLI 与 pkg_install/pkg_remove 共用。 */
+static inline int pkg_euid_is_admin(uint32_t euid)
+{
+    return euid == 0U;
+}
 
 /* ---- 构建期生成的包目录（obj/pkg_catalog.c） ---- */
 typedef struct {

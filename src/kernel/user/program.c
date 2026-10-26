@@ -98,6 +98,8 @@ void prog_init(void)
     /* 组件模型：_pkgd 安装服务；pkgtest 是它的回归驱动（启动后自动跑一次） */
     prog_register("pkgd",      1, "component package service (_pkgd)", pkgd_entry);
     prog_register("pkgtest",   1, "component model regression (pkg)", pkg_selftest_entry);
+    /* P0：组件 ELF 的 ring3 启动线程（由 user_component_exec 唤醒） */
+    prog_register("comprun",   1, "component ELF loader/exec (pkg)", user_component_entry);
     prog_register("tcptest",   1, "TCP robustness regression (4c)", prog_tcptest_entry);
 
     /* heartbeat 是验证 AP 调度/计时器的探针，亲和到 AP；其余程序按负载放置。 */

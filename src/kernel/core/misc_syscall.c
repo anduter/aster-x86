@@ -13,6 +13,7 @@
 #include "include/mm.h"
 #include "include/net.h"
 #include "include/proc.h"
+#include "include/pkg.h"
 #include "misc_syscall.h"
 #include "../proc/trap/syscall_internal.h"
 
@@ -57,6 +58,7 @@ bool misc_syscall_owns(uint32_t nr)
     case SYS_MOUSE:
     case SYS_CONSOLE_CURSOR: /* v1.2：输入框下划线光标（只画 framebuffer） */
     case SYS_ABI_VERSION:   /* ABI v1 只追加的标量版本查询（59） */
+    case SYS_PKG:           /* v1.4：组件 CLI（P0，op 编码见 include/pkg.h） */
         return true;
     default:
         return false;
@@ -190,6 +192,10 @@ int misc_syscall(interrupt_frame_t *f)
     case SYS_ABI_VERSION:
         /* ABI v1：高 16 位版本，低 16 位 feature bits；无参数、无指针 */
         ret = (int)((OS_ABI_VERSION << 16) | OS_ABI_FEATURES);
+        break;
+    case SYS_PKG:
+        /* v1.4：ebx=op, ecx=a, edx=b；组件 CLI（实现在 pkg/pkg_syscall.c） */
+        ret = pkg_syscall(f->ebx, f->ecx, f->edx);
         break;
     default:
         return -1000;
