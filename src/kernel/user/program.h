@@ -4,7 +4,7 @@
 #include "../include/types.h"
 
 #define PROG_NAME_MAX 24
-#define PROG_MAX      16
+#define PROG_MAX      24
 
 /* 程序标志 */
 #define PROG_F_PIN_AP   0x1U    /* 亲和到 AP（用于验证 AP 调度/抢占的探针程序） */
