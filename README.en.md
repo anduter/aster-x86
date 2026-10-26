@@ -4,7 +4,7 @@ English | [简体中文](README.md)
 
 A 32-bit x86 teaching operating system built from scratch: a hand-written boot sector, a two-stage loader, and a 32-bit C kernel. It boots on QEMU (`-vga std`, VBE 0x118 1024x768x24) and brings up a framebuffer text console, physical and virtual memory management, a heap, memory self-tests, an IDT, and timer/keyboard interrupts.
 
-Current version **v0.74.0** (development line): **247** end-to-end regression checks, and **10 host unit suites / 520 checks** (`tools/unit.ps1`, no QEMU; includes path normalization, the PMM bitmap, and FAT16 directory entries).
+Current version **v0.74.1** (development line): **248** end-to-end regression checks, and **10 host unit suites / 520 checks** (`tools/unit.ps1`, no QEMU; includes path normalization, the PMM bitmap, and FAT16 directory entries).
 
 ## System model (target architecture)
 
