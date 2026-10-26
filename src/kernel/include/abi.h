@@ -1,43 +1,32 @@
 /* =============================================================================
- * include/abi.h - 用户态系统调用 ABI 的单一来源（v1）
- *
- * 这个头文件同时被内核和用户库（src/user/ulib.h）包含，只放跨边界的契约：
- *   - legacy int 0x81 调用号（SYS_*）；int 0x80 的 Native ABI 编号在
- *     proc/trap/native.h（NATIVE_SYS_*），两套门编号空间互不相干；
- *   - ABI 版本、魔数、feature bits；
- *   - 用户可见共享结构体，布局由本文件末尾的 _Static_assert 固定；
- *   - legacy 门可能返回的用户可见错误码（复用 core/error.h 的 E_* 子集）。
- *
- * 版本规则（v1 冻结，详见 docs/api.md / docs/native-abi.md §18）：
- *   1. 已有编号、结构体字段偏移/大小、错误码值不得改变；
- *   2. 新增调用只能追加编号（>= SYS_NR_MAX + 1），并同步 bump
- *      OS_ABI_VERSION_MINOR；
- *   3. 结构体只能尾部追加字段，且必须同步更新下面的 _Static_assert；
- *   4. 删除的调用保留编号，legacy 门返回 -1（E_INVAL 语义）。
- * ========================================================================== */
+ * include/abi.h - 鐢ㄦ埛鎬佺郴缁熻皟鐢?ABI 鐨勫崟涓€鏉ユ簮锛坴1锛? *
+ * 杩欎釜澶存枃浠跺悓鏃惰鍐呮牳鍜岀敤鎴峰簱锛坰rc/user/ulib.h锛夊寘鍚紝鍙斁璺ㄨ竟鐣岀殑濂戠害锛? *   - legacy int 0x81 璋冪敤鍙凤紙SYS_*锛夛紱int 0x80 鐨?Native ABI 缂栧彿鍦? *     proc/trap/native.h锛圢ATIVE_SYS_*锛夛紝涓ゅ闂ㄧ紪鍙风┖闂翠簰涓嶇浉骞诧紱
+ *   - ABI 鐗堟湰銆侀瓟鏁般€乫eature bits锛? *   - 鐢ㄦ埛鍙鍏变韩缁撴瀯浣擄紝甯冨眬鐢辨湰鏂囦欢鏈熬鐨?_Static_assert 鍥哄畾锛? *   - legacy 闂ㄥ彲鑳借繑鍥炵殑鐢ㄦ埛鍙閿欒鐮侊紙澶嶇敤 core/error.h 鐨?E_* 瀛愰泦锛夈€? *
+ * 鐗堟湰瑙勫垯锛坴1 鍐荤粨锛岃瑙?docs/api.md / docs/native-abi.md 搂18锛夛細
+ *   1. 宸叉湁缂栧彿銆佺粨鏋勪綋瀛楁鍋忕Щ/澶у皬銆侀敊璇爜鍊间笉寰楁敼鍙橈紱
+ *   2. 鏂板璋冪敤鍙兘杩藉姞缂栧彿锛?= SYS_NR_MAX + 1锛夛紝骞跺悓姝?bump
+ *      OS_ABI_VERSION_MINOR锛? *   3. 缁撴瀯浣撳彧鑳藉熬閮ㄨ拷鍔犲瓧娈碉紝涓斿繀椤诲悓姝ユ洿鏂颁笅闈㈢殑 _Static_assert锛? *   4. 鍒犻櫎鐨勮皟鐢ㄤ繚鐣欑紪鍙凤紝legacy 闂ㄨ繑鍥?-1锛圗_INVAL 璇箟锛夈€? * ========================================================================== */
 #ifndef OS_INCLUDE_ABI_H
 #define OS_INCLUDE_ABI_H
 
 #include "types.h"
-#include "../core/error.h"   /* E_*：legacy 门/文件系统可能原样返回的错误码 */
+#include "../core/error.h"   /* E_*锛歭egacy 闂?鏂囦欢绯荤粺鍙兘鍘熸牱杩斿洖鐨勯敊璇爜 */
 
 /* =============================================================================
- * 1. ABI 版本与标识
- * ========================================================================== */
-#define OS_ABI_MAGIC          0x4F534142u   /* "OSAB"（小端字节序 'O','S','A','B'） */
-#define OS_ABI_VERSION        1u            /* 头文件/编号空间的 major 版本 */
+ * 1. ABI 鐗堟湰涓庢爣璇? * ========================================================================== */
+#define OS_ABI_MAGIC          0x4F534142u   /* "OSAB"锛堝皬绔瓧鑺傚簭 'O','S','A','B'锛?*/
+#define OS_ABI_VERSION        1u            /* 澶存枃浠?缂栧彿绌洪棿鐨?major 鐗堟湰 */
 #define OS_ABI_VERSION_MAJOR  1
-#define OS_ABI_VERSION_MINOR  3
+#define OS_ABI_VERSION_MINOR  4
 
-/* SYS_ABI_VERSION 返回值的低 16 位（feature bits）：只增不减。
- *
- * 注意：bit2-4 只表示内核内部存在版本一致性检查（internal only），
- * 不是对外驱动/服务 API，不承诺兼容，也不代表要推进驱动服务化。 */
-#define OS_ABI_F_NATIVE_GATE      (1u << 0)  /* int 0x80 Native ABI 门已安装 */
-#define OS_ABI_F_VERSIONED_OPS    (1u << 1)  /* 内核内部版本校验存在（internal only） */
-#define OS_ABI_F_DEVICE_API_V1    (1u << 2)  /* internal only：dev/device.h 内部 ops 版本 */
-#define OS_ABI_F_VFS_BACKEND_V1   (1u << 3)  /* internal only：VFS 后端注册表校验 */
-#define OS_ABI_F_SERVICE_MANIFEST_V1 (1u << 4) /* internal only：服务注册入口校验 */
+/* SYS_ABI_VERSION 杩斿洖鍊肩殑浣?16 浣嶏紙feature bits锛夛細鍙涓嶅噺銆? *
+ * 娉ㄦ剰锛歜it2-4 鍙〃绀哄唴鏍稿唴閮ㄥ瓨鍦ㄧ増鏈竴鑷存€ф鏌ワ紙internal only锛夛紝
+ * 涓嶆槸瀵瑰椹卞姩/鏈嶅姟 API锛屼笉鎵胯鍏煎锛屼篃涓嶄唬琛ㄨ鎺ㄨ繘椹卞姩鏈嶅姟鍖栥€?*/
+#define OS_ABI_F_NATIVE_GATE      (1u << 0)  /* int 0x80 Native ABI 闂ㄥ凡瀹夎 */
+#define OS_ABI_F_VERSIONED_OPS    (1u << 1)  /* 鍐呮牳鍐呴儴鐗堟湰鏍￠獙瀛樺湪锛坕nternal only锛?*/
+#define OS_ABI_F_DEVICE_API_V1    (1u << 2)  /* internal only锛歞ev/device.h 鍐呴儴 ops 鐗堟湰 */
+#define OS_ABI_F_VFS_BACKEND_V1   (1u << 3)  /* internal only锛歏FS 鍚庣娉ㄥ唽琛ㄦ牎楠?*/
+#define OS_ABI_F_SERVICE_MANIFEST_V1 (1u << 4) /* internal only锛氭湇鍔℃敞鍐屽叆鍙ｆ牎楠?*/
 
 #define OS_ABI_FEATURES                                                     \
     (OS_ABI_F_NATIVE_GATE | OS_ABI_F_VERSIONED_OPS |                        \
@@ -45,59 +34,57 @@
      OS_ABI_F_SERVICE_MANIFEST_V1)
 
 /* =============================================================================
- * 2. legacy int 0x81 系统调用号（1..58 为既有调用，只迁移不改语义）
+ * 2. legacy int 0x81 绯荤粺璋冪敤鍙凤紙1..58 涓烘棦鏈夎皟鐢紝鍙縼绉讳笉鏀硅涔夛級
  *
- * 参数约定：ebx/ecx/edx 依次为第 1/2/3 个参数；返回值为 eax。
- * >= 0 成功，< 0 失败（legacy 门大多数失败返回 -1）。
- * ========================================================================== */
-#define SYS_WRITE   1   /* ebx=buf, ecx=len            -> 写入字节数 */
-#define SYS_GETPID  2   /*                              -> 当前 pid */
-#define SYS_UPTIME  3   /*                              -> 运行秒数 */
+ * 鍙傛暟绾﹀畾锛歟bx/ecx/edx 渚濇涓虹 1/2/3 涓弬鏁帮紱杩斿洖鍊间负 eax銆? * >= 0 鎴愬姛锛? 0 澶辫触锛坙egacy 闂ㄥぇ澶氭暟澶辫触杩斿洖 -1锛夈€? * ========================================================================== */
+#define SYS_WRITE   1   /* ebx=buf, ecx=len            -> 鍐欏叆瀛楄妭鏁?*/
+#define SYS_GETPID  2   /*                              -> 褰撳墠 pid */
+#define SYS_UPTIME  3   /*                              -> 杩愯绉掓暟 */
 #define SYS_YIELD   4   /*                              -> 0 */
-#define SYS_EXIT    5   /* ebx=退出码                   -> 不返回 */
-#define SYS_OPEN    6   /* ebx=路径, ecx=标志           -> 文件句柄 */
-#define SYS_FREAD   7   /* ebx=句柄, ecx=buf, edx=len   -> 读到字节数 */
-#define SYS_FWRITE  8   /* ebx=句柄, ecx=buf, edx=len   -> 写入字节数 */
-#define SYS_CLOSE   9   /* ebx=句柄                     -> 0 */
-#define SYS_GETCHAR 10  /*                              -> 字符或 -1 */
-#define SYS_LIST    11  /* ebx=路径, ecx=序号, edx=buf     -> 0 / -1 */
-#define SYS_DRIVES  12  /* ebx=序号, ecx=buf, edx=max      -> 0 / -1 */
-#define SYS_MKDIR   13  /* ebx=路径                       -> 0 / -1 */
-#define SYS_UNLINK  14  /* ebx=路径                       -> 0 / -1 */
-#define SYS_STAT    15  /* ebx=路径, ecx=buf(sys_stat_t)  -> 0 / -1 */
-#define SYS_CHDIR   16  /* ebx=路径                       -> 0 / -1 */
-#define SYS_GETCWD  17  /* ebx=buf, ecx=max               -> 长度 / -1 */
-#define SYS_FORK    18  /*                                -> 子 pid / 0（子进程） */
-#define SYS_EXEC    19  /* ebx=路径                       -> 不返回（成功） */
-#define SYS_WAIT    20  /* ebx=pid, ecx=&status           -> 子 pid / -1 */
-#define SYS_INPUT_SET 21 /* ebx=buf, ecx=len              -> 0 / -1（画到输入框） */
-#define SYS_BRK     22  /* ebx=增量                       -> 新的堆顶 / -1 */
+#define SYS_EXIT    5   /* ebx=閫€鍑虹爜                   -> 涓嶈繑鍥?*/
+#define SYS_OPEN    6   /* ebx=璺緞, ecx=鏍囧織           -> 鏂囦欢鍙ユ焺 */
+#define SYS_FREAD   7   /* ebx=鍙ユ焺, ecx=buf, edx=len   -> 璇诲埌瀛楄妭鏁?*/
+#define SYS_FWRITE  8   /* ebx=鍙ユ焺, ecx=buf, edx=len   -> 鍐欏叆瀛楄妭鏁?*/
+#define SYS_CLOSE   9   /* ebx=鍙ユ焺                     -> 0 */
+#define SYS_GETCHAR 10  /*                              -> 瀛楃鎴?-1 */
+#define SYS_LIST    11  /* ebx=璺緞, ecx=搴忓彿, edx=buf     -> 0 / -1 */
+#define SYS_DRIVES  12  /* ebx=搴忓彿, ecx=buf, edx=max      -> 0 / -1 */
+#define SYS_MKDIR   13  /* ebx=璺緞                       -> 0 / -1 */
+#define SYS_UNLINK  14  /* ebx=璺緞                       -> 0 / -1 */
+#define SYS_STAT    15  /* ebx=璺緞, ecx=buf(sys_stat_t)  -> 0 / -1 */
+#define SYS_CHDIR   16  /* ebx=璺緞                       -> 0 / -1 */
+#define SYS_GETCWD  17  /* ebx=buf, ecx=max               -> 闀垮害 / -1 */
+#define SYS_FORK    18  /*                                -> 瀛?pid / 0锛堝瓙杩涚▼锛?*/
+#define SYS_EXEC    19  /* ebx=璺緞                       -> 涓嶈繑鍥烇紙鎴愬姛锛?*/
+#define SYS_WAIT    20  /* ebx=pid, ecx=&status           -> 瀛?pid / -1 */
+#define SYS_INPUT_SET 21 /* ebx=buf, ecx=len              -> 0 / -1锛堢敾鍒拌緭鍏ユ锛?*/
+#define SYS_BRK     22  /* ebx=澧為噺                       -> 鏂扮殑鍫嗛《 / -1 */
 #define SYS_KILL    23  /* ebx=pid, ecx=sig                -> 0 / -1 */
-#define SYS_SLEEP   24  /* ebx=毫秒                        -> 0 */
-#define SYS_PIPE    25  /* ebx=用户 int[2]                 -> 0 / -1 */
-#define SYS_DUP2    26  /* ebx=旧 fd, ecx=新 fd            -> 新 fd / -1 */
-#define SYS_REBOOT  27  /*                                -> 不返回（机器复位） */
-#define SYS_PANIC   28  /*                                -> 不返回（调试用：触发内核 panic） */
-#define SYS_OOPS    29  /*                                -> 不返回（调试用：触发内核 oops） */
-#define SYS_SIGACTION  30 /* ebx=sig, ecx=handler           -> 旧 handler / -1 */
-#define SYS_SIGRETURN  31 /*                                -> 恢复信号前的现场 */
-#define SYS_SYNC       32 /*                                -> 0 / -1（落盘到持久化设备） */
-#define SYS_TIME       33 /* ebx=缓冲, ecx=长度             -> 0（格式化时间字符串） */
-#define SYS_FSCK       34 /* ebx=缓冲, ecx=长度             -> 错误数（缓冲里是摘要） */
-#define SYS_PCI        35 /* ebx=index, ecx=缓冲            -> 0（PCI 设备信息）/ -1 */
-#define SYS_POWEROFF   36 /*                                -> 不返回（ACPI S5 关机） */
-#define SYS_MOUSE      37 /* ebx=用户 int[3]                -> 0（{x,y,buttons}） */
-#define SYS_HANG       38 /* 调试：关中断死循环（验证 NMI 看门狗） */
-#define SYS_ETH        39 /* ebx=0 取信息 / 1 发测试帧, ecx=缓冲 */
-#define SYS_RESINFO    40 /* ebx=用户 u32[10]               -> 0（资源统计） */
+#define SYS_SLEEP   24  /* ebx=姣                        -> 0 */
+#define SYS_PIPE    25  /* ebx=鐢ㄦ埛 int[2]                 -> 0 / -1 */
+#define SYS_DUP2    26  /* ebx=鏃?fd, ecx=鏂?fd            -> 鏂?fd / -1 */
+#define SYS_REBOOT  27  /*                                -> 涓嶈繑鍥烇紙鏈哄櫒澶嶄綅锛?*/
+#define SYS_PANIC   28  /*                                -> 涓嶈繑鍥烇紙璋冭瘯鐢細瑙﹀彂鍐呮牳 panic锛?*/
+#define SYS_OOPS    29  /*                                -> 涓嶈繑鍥烇紙璋冭瘯鐢細瑙﹀彂鍐呮牳 oops锛?*/
+#define SYS_SIGACTION  30 /* ebx=sig, ecx=handler           -> 鏃?handler / -1 */
+#define SYS_SIGRETURN  31 /*                                -> 鎭㈠淇″彿鍓嶇殑鐜板満 */
+#define SYS_SYNC       32 /*                                -> 0 / -1锛堣惤鐩樺埌鎸佷箙鍖栬澶囷級 */
+#define SYS_TIME       33 /* ebx=缂撳啿, ecx=闀垮害             -> 0锛堟牸寮忓寲鏃堕棿瀛楃涓诧級 */
+#define SYS_FSCK       34 /* ebx=缂撳啿, ecx=闀垮害             -> 閿欒鏁帮紙缂撳啿閲屾槸鎽樿锛?*/
+#define SYS_PCI        35 /* ebx=index, ecx=缂撳啿            -> 0锛圥CI 璁惧淇℃伅锛? -1 */
+#define SYS_POWEROFF   36 /*                                -> 涓嶈繑鍥烇紙ACPI S5 鍏虫満锛?*/
+#define SYS_MOUSE      37 /* ebx=鐢ㄦ埛 int[3]                -> 0锛坽x,y,buttons}锛?*/
+#define SYS_HANG       38 /* 璋冭瘯锛氬叧涓柇姝诲惊鐜紙楠岃瘉 NMI 鐪嬮棬鐙楋級 */
+#define SYS_ETH        39 /* ebx=0 鍙栦俊鎭?/ 1 鍙戞祴璇曞抚, ecx=缂撳啿 */
+#define SYS_RESINFO    40 /* ebx=鐢ㄦ埛 u32[10]               -> 0锛堣祫婧愮粺璁★級 */
 #define SYS_GETUID     41 /*                                -> uid */
 #define SYS_GETGID     42 /*                                -> gid */
-#define SYS_CHMOD      43 /* ebx=路径, ecx=mode             -> 0 / -1 */
-#define SYS_CHOWN      44 /* ebx=路径, ecx=uid, edx=gid     -> 0 / -1（root） */
-#define SYS_SETUID     45 /* ebx=uid, ecx=gid               -> 0 / -1（root 才能降权） */
-#define SYS_CAP_DROP   46 /* ebx=fd, ecx=要撤销的 rights    -> 0 / -1 */
-#define SYS_CAP_SEND   47 /* ebx=pid, ecx=fd, edx=rights   -> 目标 fd / -1 */
-#define SYS_MMAP       48 /* ebx=len, ecx=prot             -> 用户 VA / -1 */
+#define SYS_CHMOD      43 /* ebx=璺緞, ecx=mode             -> 0 / -1 */
+#define SYS_CHOWN      44 /* ebx=璺緞, ecx=uid, edx=gid     -> 0 / -1锛坮oot锛?*/
+#define SYS_SETUID     45 /* ebx=uid, ecx=gid               -> 0 / -1锛坮oot 鎵嶈兘闄嶆潈锛?*/
+#define SYS_CAP_DROP   46 /* ebx=fd, ecx=瑕佹挙閿€鐨?rights    -> 0 / -1 */
+#define SYS_CAP_SEND   47 /* ebx=pid, ecx=fd, edx=rights   -> 鐩爣 fd / -1 */
+#define SYS_MMAP       48 /* ebx=len, ecx=prot             -> 鐢ㄦ埛 VA / -1 */
 #define SYS_MUNMAP     49 /* ebx=addr, ecx=len             -> 0 / -1 */
 #define SYS_UDP_SEND   50 /* ebx=&udp_req                 -> 0 / -1 */
 #define SYS_UDP_RECV   51 /* ebx=&udp_req                 -> payload len / -1 */
@@ -105,103 +92,95 @@
 #define SYS_SENDTO     53 /* ebx=fd, ecx=&udp_req          -> 0 / -1 */
 #define SYS_RECVFROM   54 /* ebx=fd, ecx=&udp_req          -> len / -1 */
 #define SYS_CHROOT     55 /* ebx=path                      -> 0 / -1 */
-#define SYS_TCP_TEST   56 /* 运行一次 TCP echo 自检           -> 0 / -1 */
+#define SYS_TCP_TEST   56 /* 杩愯涓€娆?TCP echo 鑷           -> 0 / -1 */
 #define SYS_BLK_READ   57 /* ebx=lba, ecx=user buf           -> 0 / -1 */
-#define SYS_RENAME     58 /* ebx=old path, ecx=new path      -> 0 / -1（同卷 rename） */
+#define SYS_RENAME     58 /* ebx=old path, ecx=new path      -> 0 / -1锛堝悓鍗?rename锛?*/
 
-/* v1 新增（只追加）：标量 ABI 版本查询。
- * 返回 (OS_ABI_VERSION << 16) | OS_ABI_FEATURES；高 16 位是 major，
- * 低 16 位是 feature bits。需要完整结构（major/minor/patch/features）时
- * 走 int 0x80 的 NATIVE_SYS_ABI_VERSION（0x00）。 */
+/* v1 鏂板锛堝彧杩藉姞锛夛細鏍囬噺 ABI 鐗堟湰鏌ヨ銆? * 杩斿洖 (OS_ABI_VERSION << 16) | OS_ABI_FEATURES锛涢珮 16 浣嶆槸 major锛? * 浣?16 浣嶆槸 feature bits銆傞渶瑕佸畬鏁寸粨鏋勶紙major/minor/patch/features锛夋椂
+ * 璧?int 0x80 鐨?NATIVE_SYS_ABI_VERSION锛?x00锛夈€?*/
 #define SYS_ABI_VERSION 59
 
-/* v1.1 新增（只追加）：进程/内存补缺（pm 会话）。
- * SYS_WAIT(20) 的阻塞语义保持不变；带 options 的等待走 SYS_WAITPID。 */
-#define SYS_WAITPID    60 /* ebx=pid, ecx=&status, edx=options -> 子 pid / 0 / -1 */
-#define SYS_GETPPID    61 /*                                    -> 父 pid（0=无） */
+/* v1.1 鏂板锛堝彧杩藉姞锛夛細杩涚▼/鍐呭瓨琛ョ己锛坧m 浼氳瘽锛夈€? * SYS_WAIT(20) 鐨勯樆濉炶涔変繚鎸佷笉鍙橈紱甯?options 鐨勭瓑寰呰蛋 SYS_WAITPID銆?*/
+#define SYS_WAITPID    60 /* ebx=pid, ecx=&status, edx=options -> 瀛?pid / 0 / -1 */
+#define SYS_GETPPID    61 /*                                    -> 鐖?pid锛?=鏃狅級 */
 #define SYS_MPROTECT   62 /* ebx=addr, ecx=len, edx=prot         -> 0 / -1 */
 
-/* v1.2 新增（只追加）：输入框光标显示/隐藏。
- * 只在 framebuffer 的输入框里画一条下划线，不写串口、不动输出区；
- * 位置跟随最后一次 SYS_INPUT_SET 画出的行尾。 */
-#define SYS_CONSOLE_CURSOR 63 /* ebx=0 隐藏 / 1 显示              -> 0 / -1 */
+/* v1.2 鏂板锛堝彧杩藉姞锛夛細杈撳叆妗嗗厜鏍囨樉绀?闅愯棌銆? * 鍙湪 framebuffer 鐨勮緭鍏ユ閲岀敾涓€鏉′笅鍒掔嚎锛屼笉鍐欎覆鍙ｃ€佷笉鍔ㄨ緭鍑哄尯锛? * 浣嶇疆璺熼殢鏈€鍚庝竴娆?SYS_INPUT_SET 鐢诲嚭鐨勮灏俱€?*/
+#define SYS_CONSOLE_CURSOR 63 /* ebx=0 闅愯棌 / 1 鏄剧ず              -> 0 / -1 */
 
-/* v1.3 新增（只追加）：Linux 式账号系统（P1 身份）。
- *
- * 凭据模型与 POSIX 一致：ruid/euid/suid + rgid/egid/sgid + 附加组。
- * 已有的 SYS_GETUID/SYS_GETGID 返回真实 uid/gid，SYS_GETEUID/SYS_GETEGID
- * 返回生效身份；权限检查一律用生效身份（euid），root（euid==0）保留
- * CAP_DAC_OVERRIDE 语义。
- *
- * SYS_LOGIN 是"PAM-lite"内核钩子：口令在核内校验（sha256 + 恒定时间比较），
- * 用户态 login/getty 只负责提示、会话前端与 delay。cmd 见下面的 LOGIN_CMD_*。 */
+/* v1.3 鏂板锛堝彧杩藉姞锛夛細Linux 寮忚处鍙风郴缁燂紙P1 韬唤锛夈€? *
+ * 鍑嵁妯″瀷涓?POSIX 涓€鑷达細ruid/euid/suid + rgid/egid/sgid + 闄勫姞缁勩€? * 宸叉湁鐨?SYS_GETUID/SYS_GETGID 杩斿洖鐪熷疄 uid/gid锛孲YS_GETEUID/SYS_GETEGID
+ * 杩斿洖鐢熸晥韬唤锛涙潈闄愭鏌ヤ竴寰嬬敤鐢熸晥韬唤锛坋uid锛夛紝root锛坋uid==0锛変繚鐣? * CAP_DAC_OVERRIDE 璇箟銆? *
+ * SYS_LOGIN 鏄?PAM-lite"鍐呮牳閽╁瓙锛氬彛浠ゅ湪鏍稿唴鏍￠獙锛坰ha256 + 鎭掑畾鏃堕棿姣旇緝锛夛紝
+ * 鐢ㄦ埛鎬?login/getty 鍙礋璐ｆ彁绀恒€佷細璇濆墠绔笌 delay銆俢md 瑙佷笅闈㈢殑 LOGIN_CMD_*銆?*/
 #define SYS_SETEUID    64 /* ebx=euid                              -> 0 / -1 */
 #define SYS_SETEGID    65 /* ebx=egid                              -> 0 / -1 */
-#define SYS_SETGID     66 /* ebx=gid                               -> 0 / -1（root） */
+#define SYS_SETGID     66 /* ebx=gid                               -> 0 / -1锛坮oot锛?*/
 #define SYS_GETEUID    67 /*                                       -> euid */
 #define SYS_GETEGID    68 /*                                       -> egid */
-#define SYS_GETGROUPS  69 /* ebx=buf, ecx=max                      -> 组数 / -1 */
-#define SYS_SETGROUPS  70 /* ebx=buf, ecx=n                        -> 0 / -1（root） */
-#define SYS_SETUMASK   71 /* ebx=mask                              -> 旧 mask */
-#define SYS_LOGIN      72 /* ebx=cmd, ecx=a, edx=b                 -> 见下 */
+#define SYS_GETGROUPS  69 /* ebx=buf, ecx=max                      -> 缁勬暟 / -1 */
+#define SYS_SETGROUPS  70 /* ebx=buf, ecx=n                        -> 0 / -1锛坮oot锛?*/
+#define SYS_SETUMASK   71 /* ebx=mask                              -> 鏃?mask */
+#define SYS_LOGIN      72 /* ebx=cmd, ecx=a, edx=b                 -> 瑙佷笅 */
 
-/* SYS_LOGIN 的 cmd（ecx/edx 的含义随 cmd 变化） */
-#define LOGIN_CHECK    0  /* -> 1 = 本 tty 需要登录；0 = 已登录/自动登录 */
-#define LOGIN_AUTH     1  /* ecx=用户名, edx=口令 -> 0 成功 / -1 失败 / -2 锁定 */
-#define LOGIN_WHO      2  /* ecx=buf, edx=max -> 会话数（写 "user tty pid" 行） */
-#define LOGIN_PASSWD   3  /* ecx=旧口令, edx=新口令 -> 0 / -1 */
-#define LOGIN_LOGOUT   4  /* -> 0（结束当前会话） */
-#define LOGIN_LAST     5  /* ecx=buf, edx=max -> 审计行数 */
-#define LOGIN_SU       6  /* ecx=用户名, edx=口令 -> 0 / -1 / -2 */
-#define LOGIN_SUDO     7  /* ecx=口令 -> 0 / -1（wheel 组） */
-#define LOGIN_SUDO_END 8  /* -> 0（euid 回到 ruid） */
+/* SYS_LOGIN 鐨?cmd锛坋cx/edx 鐨勫惈涔夐殢 cmd 鍙樺寲锛?*/
+#define LOGIN_CHECK    0  /* -> 1 = 鏈?tty 闇€瑕佺櫥褰曪紱0 = 宸茬櫥褰?鑷姩鐧诲綍 */
+#define LOGIN_AUTH     1  /* ecx=鐢ㄦ埛鍚? edx=鍙ｄ护 -> 0 鎴愬姛 / -1 澶辫触 / -2 閿佸畾 */
+#define LOGIN_WHO      2  /* ecx=buf, edx=max -> 浼氳瘽鏁帮紙鍐?"user tty pid" 琛岋級 */
+#define LOGIN_PASSWD   3  /* ecx=鏃у彛浠? edx=鏂板彛浠?-> 0 / -1 */
+#define LOGIN_LOGOUT   4  /* -> 0锛堢粨鏉熷綋鍓嶄細璇濓級 */
+#define LOGIN_LAST     5  /* ecx=buf, edx=max -> 瀹¤琛屾暟 */
+#define LOGIN_SU       6  /* ecx=鐢ㄦ埛鍚? edx=鍙ｄ护 -> 0 / -1 / -2 */
+#define LOGIN_SUDO     7  /* ecx=鍙ｄ护 -> 0 / -1锛坵heel 缁勶級 */
+#define LOGIN_SUDO_END 8  /* -> 0锛坋uid 鍥炲埌 ruid锛?*/
 #define LOGIN_INFO     9  /* ecx=buf, edx=max -> "uid=.. euid=.. gid=.. name=.." */
-#define LOGIN_PASSWD_USER 10 /* ecx=用户名, edx=新口令 -> 0 / -1（root 给他人改） */
-#define LOGIN_USERADD  11 /* ecx=用户名, edx=uid(0=自动) -> 0 / -1（root） */
-#define LOGIN_USERDEL  12 /* ecx=用户名 -> 0 / -1（root） */
-#define LOGIN_USERMOD  13 /* ecx=用户名, edx=gid -> 0 / -1（root 把用户加进组） */
+#define LOGIN_PASSWD_USER 10 /* ecx=鐢ㄦ埛鍚? edx=鏂板彛浠?-> 0 / -1锛坮oot 缁欎粬浜烘敼锛?*/
+#define LOGIN_USERADD  11 /* ecx=鐢ㄦ埛鍚? edx=uid(0=鑷姩) -> 0 / -1锛坮oot锛?*/
+#define LOGIN_USERDEL  12 /* ecx=鐢ㄦ埛鍚?-> 0 / -1锛坮oot锛?*/
+#define LOGIN_USERMOD  13 /* ecx=鐢ㄦ埛鍚? edx=gid -> 0 / -1锛坮oot 鎶婄敤鎴峰姞杩涚粍锛?*/
 
-/* 附加组上限（proc_t.groups[]、SYS_GETGROUPS/SETGROUPS 缓冲） */
+/* 闄勫姞缁勪笂闄愶紙proc_t.groups[]銆丼YS_GETGROUPS/SETGROUPS 缂撳啿锛?*/
 #define ABI_NGROUPS_MAX 16
 
-/* SYS_WAITPID 的 options 位 */
+/* SYS_WAITPID 鐨?options 浣?*/
 #define WNOHANG 1
 
-/* SYS_MPROTECT 的 prot 位（数值沿用 POSIX） */
+/* SYS_MPROTECT 鐨?prot 浣嶏紙鏁板€兼部鐢?POSIX锛?*/
 #define PROT_NONE  0
 #define PROT_READ  1
 #define PROT_WRITE 2
 #define PROT_EXEC  4
 
-/* 用户可见信号编号（当前只暴露 SIGCHLD；数值与 proc/proc.h 一致） */
+/* 鐢ㄦ埛鍙淇″彿缂栧彿锛堝綋鍓嶅彧鏆撮湶 SIGCHLD锛涙暟鍊间笌 proc/proc.h 涓€鑷达級 */
 #define SIGCHLD 17
 #define SIG_DFL 0u
 #define SIG_IGN 1u
 
-/* 已分配的最大编号；新增调用必须从 SYS_NR_MAX + 1 开始 */
-#define SYS_LINK      73 /* ebx=old path, ecx=new path      -> 0 / -1（硬链接） */
-#define SYS_SYMLINK   74 /* ebx=target, ecx=link path      -> 0 / -1（符号链接） */
-#define SYS_READLINK  75 /* ebx=path, ecx=buf, edx=max     -> 目标长度 / -1 */
-#define SYS_LSTAT     76 /* ebx=path, ecx=&stat[6]         -> 0 / -1（不跟随末段） */
-#define SYS_NR_MAX 76
+/* 宸插垎閰嶇殑鏈€澶х紪鍙凤紱鏂板璋冪敤蹇呴』浠?SYS_NR_MAX + 1 寮€濮?*/
+#define SYS_LINK      73 /* ebx=old path, ecx=new path      -> 0 / -1锛堢‖閾炬帴锛?*/
+#define SYS_SYMLINK   74 /* ebx=target, ecx=link path      -> 0 / -1锛堢鍙烽摼鎺ワ級 */
+#define SYS_READLINK  75 /* ebx=path, ecx=buf, edx=max     -> 鐩爣闀垮害 / -1 */
+#define SYS_LSTAT     76 /* ebx=path, ecx=&stat[6]         -> 0 / -1锛堜笉璺熼殢鏈锛?*/
+#define SYS_PKG       77 /* ebx=op, ecx=a, edx=b           -> 0 / -1（组件操作） */
+#define SYS_LISTEN    78 /* ebx=port, ecx=backlog          -> 0 / -1 */
+#define SYS_ACCEPT    79 /* ebx=sock, ecx=&addr            -> 0 / -1 */
+
+#define SYS_NR_MAX 79
 
 /* =============================================================================
- * 3. 用户可见共享结构体（布局冻结，见文件末尾断言）
- * ========================================================================== */
+ * 3. 鐢ㄦ埛鍙鍏变韩缁撴瀯浣擄紙甯冨眬鍐荤粨锛岃鏂囦欢鏈熬鏂█锛? * ========================================================================== */
 
-/* SYS_STAT 写出：6 个 u32，与内核 fs_stat_t 的字段顺序一致 */
+/* SYS_STAT 鍐欏嚭锛? 涓?u32锛屼笌鍐呮牳 fs_stat_t 鐨勫瓧娈甸『搴忎竴鑷?*/
 typedef struct {
     uint32_t type;      /* 0=none, 1=file, 2=dir */
     uint32_t size;
-    uint32_t mtime;     /* epoch 秒 */
-    uint32_t mode;      /* 低 9 位 rwxrwxrwx */
+    uint32_t mtime;     /* epoch 绉?*/
+    uint32_t mode;      /* 浣?9 浣?rwxrwxrwx */
     uint32_t uid;
     uint32_t gid;
 } sys_stat_t;
 
-/* SYS_UDP_SEND / SYS_UDP_RECV / SYS_SENDTO / SYS_RECVFROM 的请求/应答缓冲。
- * 用户先填 ip/port/len/data，SYS_UDP_RECV / SYS_RECVFROM 返回时内核回填
- * ip/port/len（data 里是 payload）。len 不能超过 sizeof(data)=64。 */
+/* SYS_UDP_SEND / SYS_UDP_RECV / SYS_SENDTO / SYS_RECVFROM 鐨勮姹?搴旂瓟缂撳啿銆? * 鐢ㄦ埛鍏堝～ ip/port/len/data锛孲YS_UDP_RECV / SYS_RECVFROM 杩斿洖鏃跺唴鏍稿洖濉? * ip/port/len锛坉ata 閲屾槸 payload锛夈€俵en 涓嶈兘瓒呰繃 sizeof(data)=64銆?*/
 struct udp_req {
     uint8_t  ip[4];
     uint16_t port;
@@ -209,34 +188,31 @@ struct udp_req {
     uint8_t  data[64];
 };
 
-/* SYS_MOUSE 写出：3 个 int32，{x, y, buttons} */
+/* SYS_MOUSE 鍐欏嚭锛? 涓?int32锛寋x, y, buttons} */
 typedef struct {
     int32_t x;
     int32_t y;
     int32_t buttons;
 } sys_mouse_t;
 
-/* SYS_RESINFO 写出：10 个 u32，顺序固定 */
+/* SYS_RESINFO 鍐欏嚭锛?0 涓?u32锛岄『搴忓浐瀹?*/
 typedef struct {
-    uint32_t free_pages;    /* pmm 空闲页 */
-    uint32_t total_pages;   /* pmm 总页 */
-    uint32_t heap_used;     /* 内核堆已用字节 */
-    uint32_t heap_total;    /* 内核堆总字节 */
-    uint32_t proc_count;    /* 进程数 */
-    uint32_t syscall_count; /* legacy 门调用次数 */
-    uint32_t cow_copies;    /* COW 复制次数 */
-    uint32_t fs_nodes;      /* 文件系统节点数 */
-    uint32_t devices;       /* 设备数 */
-    uint32_t pci_devices;   /* PCI 设备数 */
+    uint32_t free_pages;    /* pmm 绌洪棽椤?*/
+    uint32_t total_pages;   /* pmm 鎬婚〉 */
+    uint32_t heap_used;     /* 鍐呮牳鍫嗗凡鐢ㄥ瓧鑺?*/
+    uint32_t heap_total;    /* 鍐呮牳鍫嗘€诲瓧鑺?*/
+    uint32_t proc_count;    /* 杩涚▼鏁?*/
+    uint32_t syscall_count; /* legacy 闂ㄨ皟鐢ㄦ鏁?*/
+    uint32_t cow_copies;    /* COW 澶嶅埗娆℃暟 */
+    uint32_t fs_nodes;      /* 鏂囦欢绯荤粺鑺傜偣鏁?*/
+    uint32_t devices;       /* 璁惧鏁?*/
+    uint32_t pci_devices;   /* PCI 璁惧鏁?*/
 } sys_resinfo_t;
 
 /* =============================================================================
- * 4. 用户可见错误码（core/error.h 的 E_* 子集）
- *
- * legacy 门没有统一 errno：多数 syscall 失败返回 -1，但文件系统路径
- * （如 fs_sync/fs_write 的错误）可能把下面的值原样带到用户态。
- * Native ABI 有另一套 NATIVE_E_*（proc/trap/native.h），数值不同，不能混用。
- * ========================================================================== */
+ * 4. 鐢ㄦ埛鍙閿欒鐮侊紙core/error.h 鐨?E_* 瀛愰泦锛? *
+ * legacy 闂ㄦ病鏈夌粺涓€ errno锛氬鏁?syscall 澶辫触杩斿洖 -1锛屼絾鏂囦欢绯荤粺璺緞
+ * 锛堝 fs_sync/fs_write 鐨勯敊璇級鍙兘鎶婁笅闈㈢殑鍊煎師鏍峰甫鍒扮敤鎴锋€併€? * Native ABI 鏈夊彟涓€濂?NATIVE_E_*锛坧roc/trap/native.h锛夛紝鏁板€间笉鍚岋紝涓嶈兘娣风敤銆? * ========================================================================== */
 _Static_assert(E_OK == 0, "ABI v1: E_OK must stay 0");
 _Static_assert(E_INVAL == -1, "ABI v1: E_INVAL must stay -1");
 _Static_assert(E_NOENT == -2, "ABI v1: E_NOENT must stay -2");
@@ -249,8 +225,7 @@ _Static_assert(E_ACCES == -8, "ABI v1: E_ACCES must stay -8");
 _Static_assert(E_BUSY == -9, "ABI v1: E_BUSY must stay -9");
 
 /* =============================================================================
- * 5. 编译期布局断言（-Werror 下同样必须通过）
- * ========================================================================== */
+ * 5. 缂栬瘧鏈熷竷灞€鏂█锛?Werror 涓嬪悓鏍峰繀椤婚€氳繃锛? * ========================================================================== */
 _Static_assert(OS_ABI_MAGIC == 0x4F534142u, "ABI v1: magic is frozen");
 
 _Static_assert(sizeof(sys_stat_t) == 24, "ABI v1: sys_stat_t is 6 x u32");
