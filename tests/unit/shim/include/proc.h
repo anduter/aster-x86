@@ -11,6 +11,7 @@
 
 #define PROC_FD_MAX     16
 #define FD_KIND_FILE    0
+#define FD_KIND_PIPE_R  2
 #define FD_KIND_PIPE_W  3
 #define PROC_WAIT_PIPE  0x50495045U   /* "PIPE" */
 
