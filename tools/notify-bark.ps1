@@ -1,45 +1,59 @@
 ﻿# notify-bark.ps1 - send a Bark push notification (iOS)
 #
-# Reads the Bark URL (contains the device key) from:
+# Reads the Bark server URL (contains the device key) from:
 #   1) -Url parameter
 #   2) keys/bark.url  (gitignored)
 #   3) $env:BARK_URL
 #
+# Uses POST JSON (https://api.day.app/<key>) so title/body are unambiguous.
+#
 # usage:
-#   powershell -File tools\notify-bark.ps1 -Title "aster" -Body "8h 浸泡 PASS"
-#   powershell -File tools\notify-bark.ps1 -Title "aster" -Body "audit: 3 bugs" -Group audit -Level timeSensitive
+#   powershell -File tools\notify-bark.ps1 -Title "aster" -Body "8h soak PASS"
+#   powershell -File tools\notify-bark.ps1 -Title "aster" -Body "audit: 3 bugs" `
+#       -Group audit -Level timeSensitive -Ttl 86400 -Sound alarm -Badge 1
 param(
     [string]$Title = 'aster',
     [string]$Body  = '',
     [string]$Group = 'aster',
     [ValidateSet('active', 'timeSensitive', 'passive')]
     [string]$Level = 'active',
-    [string]$Url   = '',
+    [int]$Ttl = 0,              # 0 = let Bark use its default
+    [string]$Sound = '',
+    [string]$Url = '',          # tap-through URL (optional)
+    [int]$Badge = -1,           # -1 = unset
+    [string]$ServerUrl = '',
     [int]$TimeoutSec = 15,
     [int]$Retries = 3
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $Url) {
+if (-not $ServerUrl) {
     $f = Join-Path $repo 'keys\bark.url'
-    if (Test-Path $f) { $Url = (Get-Content $f -Raw).Trim() }
-    elseif ($env:BARK_URL) { $Url = $env:BARK_URL.Trim() }
+    if (Test-Path $f) { $ServerUrl = (Get-Content $f -Raw).Trim() }
+    elseif ($env:BARK_URL) { $ServerUrl = $env:BARK_URL.Trim() }
 }
-if (-not $Url) {
-    Write-Error 'notify-bark: no Bark URL (pass -Url, create keys/bark.url, or set BARK_URL)'
+if (-not $ServerUrl) {
+    Write-Error 'notify-bark: no Bark URL (pass -ServerUrl, create keys/bark.url, or set BARK_URL)'
     exit 1
 }
 
-$base = $Url.TrimEnd('/')
-$t = [uri]::EscapeDataString($Title)
-$b = [uri]::EscapeDataString($Body)
-$q = 'group=' + [uri]::EscapeDataString($Group) + '&level=' + [uri]::EscapeDataString($Level)
-$uri = "$base/$t/$b?$q"
+$payload = [ordered]@{
+    title = $Title
+    body  = $Body
+    group = $Group
+    level = $Level
+}
+if ($Ttl -gt 0)   { $payload['ttl'] = $Ttl }
+if ($Sound)       { $payload['sound'] = $Sound }
+if ($Url)         { $payload['url'] = $Url }
+if ($Badge -ge 0) { $payload['badge'] = $Badge }
+$json = $payload | ConvertTo-Json -Compress
 
 for ($i = 1; $i -le $Retries; $i++) {
     try {
-        $r = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec $TimeoutSec
+        $r = Invoke-RestMethod -Uri $ServerUrl.TrimEnd('/') -Method Post `
+            -ContentType 'application/json; charset=utf-8' -Body $json -TimeoutSec $TimeoutSec
         if ($r -and $r.code -eq 200) {
             Write-Host ("notify-bark: ok ({0})" -f $r.message)
             exit 0
