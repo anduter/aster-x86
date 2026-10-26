@@ -23,6 +23,7 @@
 #include "arch/x86/io.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "brk_range.h"
 #include "include/mm.h"
 #include "include/kernel.h"
 #include "../include/types.h"
@@ -375,6 +376,32 @@ static int test_heap_check(void)
     return ok;
 }
 
+/* 追加：SYS_BRK 的增量边界（纯算术，见 mm/brk_range.h）。
+ * 用户传入的 inc 是 32 位无符号；0xC0000000 这类值会让 old+inc 回绕到内核
+ * 恒等映射区（0x00022000），旧实现只判 neu > HEAP_MAX，于是返回“成功”。
+ * 这里锁定：正向不回绕/不越上限、负向不越过堆基址。 */
+static int test_brk_range(void)
+{
+    const uint32_t floor = 0x40200000U;
+    const uint32_t ceil  = 0x40300000U;
+    int ok = 1;
+
+    if (!brk_range_ok(floor, 0U, floor, ceil)) ok = 0;              /* brk(0) 查询 */
+    if (!brk_range_ok(floor, 0x1000U, floor, ceil)) ok = 0;         /* 正常增长 */
+    if (brk_range_ok(floor, 0xC0000000U, floor, ceil)) ok = 0;      /* 回绕到内核区 */
+    if (brk_range_ok(floor, 0x02000000U, floor, ceil)) ok = 0;      /* 超过堆上限 */
+    if (brk_range_ok(floor, 0xFFFFF000U, floor, ceil)) ok = 0;      /* 缩到基址以下 */
+    if (!brk_range_ok(floor + 0x1000U, 0xFFFFF000U, floor, ceil)) ok = 0; /* 缩回基址合法 */
+    if (brk_range_ok(0x00200000U, 0U, floor, ceil)) ok = 0;         /* 已经是内核地址 */
+
+    if (ok) {
+        kprintln("mm: brk range guard ok (no wrap, no underflow)");
+    } else {
+        kprintln("mm: brk range guard FAIL");
+    }
+    return ok;
+}
+
 int mm_selftest(void)
 {
     void *warm = vmalloc(64U);
@@ -413,6 +440,9 @@ int mm_selftest(void)
      *   mm: file mmap ok ... */
     report("per-process rss accounting", mm_rss_selftest());
     report("file-backed mmap", mm_filemap_selftest());
+
+    /* ABI 边界回归：SYS_BRK 增量回绕/越界。 */
+    report("brk inc range guard", test_brk_range());
 
     serial_puts("memtest: done, failures = ");
     serial_putdec((unsigned int)failures);

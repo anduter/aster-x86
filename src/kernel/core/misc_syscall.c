@@ -17,6 +17,36 @@
 #include "misc_syscall.h"
 #include "../proc/trap/syscall_internal.h"
 
+/* ring3 传入的缓冲必须落在用户映射区 [USER_LAYOUT_CODE_BASE, 3GB)。
+ *
+ * 这里只做“地址窗口”校验，不逐个查页是否映射：未映射页仍由 copy_*_user
+ * 的异常修复表返回错误（boot 的 sys: unmapped user pointer -> -1 覆盖）。
+ *
+ * 为什么需要下界：user_range_ok() 只拒绝 >= 0xC0000000 的指针，0x00100000
+ * 这样的内核恒等映射地址会被当成用户缓冲。此前 ring3 可以用 SYS_WRITE 把
+ * 内核内存（如 0x100000 处的 'KRNL' 头）打印到串口，也可以用 SYS_BLK_READ/
+ * PCI/RESINFO/ETH/MOUSE 让 copy_to_user 写内核内存。
+ *
+ * 内核自检（p->is_user == false）例外：core/bootseq.c 的 syscall_selftest
+ * 就是用内核里的字符串调 SYS_WRITE 验证 int 0x81 通路的。 */
+static bool misc_user_buf(uint32_t ptr, uint32_t len)
+{
+    proc_t *p = proc_current();
+
+    if (p != 0 && p->is_user && ptr < USER_LAYOUT_CODE_BASE) return false;
+    return user_range_ok(ptr, len);
+}
+
+/* 系统级调试/关机入口的权限门：只有 root（或内核线程）能让整机停机。
+ * 这些调用在任何 ring3 进程里都可达，若不做校验，普通用户一条 int 0x81
+ * 就能 panic/hang/reboot/poweroff 整机。 */
+static bool misc_system_privileged(void)
+{
+    proc_t *p = proc_current();
+
+    return (p == 0) || (p->euid == 0U);
+}
+
 /* 分块把用户缓冲区拷进内核栈，再输出。
  * 用户指针未映射时 copy_from_user 会走 #PF 恢复路径返回错误，
  * 而不是把整个系统 panic 掉。 */
@@ -71,7 +101,7 @@ int misc_syscall(interrupt_frame_t *f)
 
     switch (f->eax) {
     case SYS_WRITE:
-        if (!user_range_ok(f->ebx, f->ecx)) {
+        if (!misc_user_buf(f->ebx, f->ecx)) {
             ret = -1;
             break;
         }
@@ -93,6 +123,10 @@ int misc_syscall(interrupt_frame_t *f)
         block_device_t *dev = blk_lookup("ata0");
         uint8_t sec[BLK_SECTOR];
 
+        if (!misc_user_buf(f->ecx, BLK_SECTOR)) {
+            ret = -1;
+            break;
+        }
         if (dev == 0 || blk_read(dev, f->ebx, sec) != 0 ||
             copy_to_user((void *)(uintptr_t)f->ecx, sec, sizeof(sec)) != E_OK) {
             ret = -1;
@@ -102,6 +136,7 @@ int misc_syscall(interrupt_frame_t *f)
         break;
     }
     case SYS_REBOOT:
+        if (!misc_system_privileged()) { ret = -1; break; }
         machine_reboot();       /* 不返回 */
         ret = 0;
         break;
@@ -113,6 +148,8 @@ int misc_syscall(interrupt_frame_t *f)
     }
     case SYS_PANIC: {
         proc_t *p = proc_current();
+
+        if (!misc_system_privileged()) { ret = -1; break; }
         panic("panic requested by userland (pid %u)", (p != 0) ? p->pid : 0U);
         ret = 0;
         break;
@@ -122,7 +159,7 @@ int misc_syscall(interrupt_frame_t *f)
         const pci_dev_t *d = pci_at((uint32_t)f->ebx);
         char b[64];
 
-        if (d == 0) { ret = -1; break; }
+        if (d == 0 || !misc_user_buf(f->ecx, sizeof(b))) { ret = -1; break; }
         ksnprintf(b, sizeof(b), "%x:%x.%x %04x:%04x class=%02x%02x",
                   (unsigned int)d->bus, (unsigned int)d->dev, (unsigned int)d->func,
                   (unsigned int)d->vendor, (unsigned int)d->device,
@@ -132,10 +169,12 @@ int misc_syscall(interrupt_frame_t *f)
         break;
     }
     case SYS_POWEROFF:
+        if (!misc_system_privileged()) { ret = -1; break; }
         acpi_poweroff();        /* 不返回 */
         ret = 0;
         break;
     case SYS_HANG:
+        if (!misc_system_privileged()) { ret = -1; break; }
         /* 调试：关中断并死循环，只有 NMI 看门狗能发现 */
         kprintln("hang: disabling interrupts and spinning (NMI watchdog should fire)");
         __asm__ volatile("cli");
@@ -147,6 +186,7 @@ int misc_syscall(interrupt_frame_t *f)
         unsigned int out[10];
         unsigned int hu = 0, ht = 0;
 
+        if (!misc_user_buf(f->ebx, sizeof(out))) { ret = -1; break; }
         heap_stats(&hu, &ht);
         out[0] = pmm.free_pages;
         out[1] = pmm.total_pages;
@@ -166,6 +206,7 @@ int misc_syscall(interrupt_frame_t *f)
         if (f->ebx == 0U) {
             uint8_t info[8];
 
+            if (!misc_user_buf(f->ecx, sizeof(info))) { ret = -1; break; }
             e1000_mac(info);
             info[6] = (uint8_t)(e1000_present() ? 1 : 0);
             info[7] = (uint8_t)(e1000_link_up() ? 1 : 0);
@@ -182,6 +223,7 @@ int misc_syscall(interrupt_frame_t *f)
         int x = 0, y = 0, b = 0;
         int out[3];
 
+        if (!misc_user_buf(f->ebx, sizeof(out))) { ret = -1; break; }
         mouse_get(&x, &y, &b);
         out[0] = x;
         out[1] = y;

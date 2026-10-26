@@ -10,6 +10,7 @@
 #include "include/fs.h"
 #include "mm_syscall.h"
 #include "filemap.h"
+#include "brk_range.h"
 #include "../proc/trap/syscall_internal.h"
 
 /* 用户堆：布局由 user_layout.h 统一提供（0x40200000 起，1MB 上限）。 */
@@ -78,15 +79,24 @@ static int mmap_anon(uint32_t base, uint32_t len)
 static int sys_brk_user(uint32_t inc)
 {
     proc_t *p = proc_current();
-    uint32_t old, neu;
+    uint32_t old, neu, floor;
 
     if (p == 0) return -1;
 
     old = (p->user_brk != 0U) ? p->user_brk
                               : (p->user_heap_base != 0U ? p->user_heap_base : USER_HEAP_BASE);
-    neu = old + inc;
+    floor = (p->user_heap_base != 0U) ? p->user_heap_base : USER_HEAP_BASE;
+    /* 旧状态可能低于堆基址（修复前 brk 回绕留下的值 / 跨 exec 的旧 brk）：
+     * 以堆基址为起点恢复，避免把 brk 再往下带。 */
+    if (old < floor) old = floor;
 
-    if (neu > USER_HEAP_MAX) return -1;
+    /* 关键：old + inc 是 32 位无符号加法。inc = 0xC0000000、old = 0x40220000
+     * 时会回绕成 0x00022000（内核恒等映射区），旧代码只判 neu > 堆上限，
+     * 于是把“成功”的 brk 返回值设到内核地址，后续 brk 还按它推进。
+     * 这里用纯函数同时挡住正向越界/回绕和负向越过堆底。 */
+    if (!brk_range_ok(old, inc, floor, USER_HEAP_MAX)) return -1;
+    neu = old + inc;
+    if (neu < floor || neu > USER_HEAP_MAX) return -1;   /* 双保险 */
 
     for (uint32_t va = old & 0xFFFFF000U; va < neu; va += 4096U) {
         void *phys;
