@@ -69,18 +69,26 @@ $probeLines = @(
     'mouse'                       # 8: 合法用户缓冲仍然可用
 )
 $guardLines = @(
-    'sys 48 4096 3 0',
-    'sys 49 1077936128 4096 0',
-    'sys 22 0 0 0',
-    'sys 22 3221225472 0 0',
-    'sys 1 1048576 8 0',
-    'sys 40 2097152 0 0',
-    'sys 37 8388608 0 0',
-    'sys 35 0 2097152 0',
-    'sys 39 0 2097152 0',
-    'sys 57 0 2097152 0',
-    'res',
-    'mouse'
+    'sys 48 4096 3 0',                  # 0: 正常 mmap
+    'sys 49 1077936128 4096 0',         # 1: munmap
+    'sys 49 1077936128 4096 0',         # 2: 重复 munmap -> -1（无 double free）
+    'sys 22 0 0 0',                     # 3: brk(0)
+    'sys 22 3221225472 0 0',            # 4: brk 回绕 -> -1
+    'sys 22 2147483648 0 0',            # 5: 负向增量越过堆底 -> -1
+    'sys 1 1048576 8 0',                # 6: SYS_WRITE 内核源 -> -1
+    'sys 1 1073741824 4294967295 0',    # 7: SYS_WRITE 超大 len -> -1
+    'sys 48 4294967295 3 0',            # 8: mmap len 回绕成 0 -> -1
+    'sys 48 4294963200 3 0',            # 9: mmap len 0xFFFFF000 -> -1
+    'sys 62 1077936128 4096 2',         # 10: mprotect 未映射页 -> -1
+    'sys 62 1077936129 4096 2',         # 11: mprotect 未对齐 -> -1
+    'sys 62 1077936128 0 2',            # 12: mprotect len=0 -> -1
+    'sys 40 2097152 0 0',               # 13: RESINFO 内核目标 -> -1
+    'sys 37 8388608 0 0',               # 14: MOUSE 内核目标 -> -1
+    'sys 35 0 2097152 0',               # 15: PCI 内核目标 -> -1
+    'sys 39 0 2097152 0',               # 16: ETH 内核目标 -> -1
+    'sys 57 0 2097152 0',               # 17: BLK_READ 内核目标 -> -1
+    'res',                              # 18: 合法用户缓冲
+    'mouse'                             # 19: 合法用户缓冲
 )
 $privLines = @(
     'drop 1000',
@@ -156,20 +164,28 @@ if ($Suite -eq 'full') {
         }
         Check 'probe: 内核未 panic（信息性）' (-not $out.Contains('KERNEL PANIC'))
     } elseif ($Suite -eq 'guard') {
-        Check 'guard: 注入了 10 条 sys 命令' ($rets.Count -ge 10) ("(got {0})" -f $rets.Count)
+        Check 'guard: 注入了 18 条 sys 命令' ($rets.Count -ge 18) ("(got {0})" -f $rets.Count)
         Check 'guard: 启动自检 brk range guard' ($out.Contains('mm: brk range guard ok'))
-        if ($rets.Count -ge 10) {
+        if ($rets.Count -ge 18) {
             Check 'guard: mmap 正常' ($rets[0] -eq 1077936128) ("ret={0}" -f $rets[0])
             Check 'guard: munmap 正常' ($rets[1] -eq 0) ("ret={0}" -f $rets[1])
+            Check 'guard: 重复 munmap 被拒' ($rets[2] -eq -1) ("ret={0}" -f $rets[2])
             Check 'guard: brk(0) 返回堆内地址' `
-                  ($rets[2] -ge 0x40200000 -and $rets[2] -le 0x40300000) ("ret={0}" -f $rets[2])
-            Check 'guard: brk 回绕被拒' ($rets[3] -eq -1) ("ret={0}" -f $rets[3])
-            Check 'guard: SYS_WRITE 内核源被拒' ($rets[4] -eq -1) ("ret={0}" -f $rets[4])
-            Check 'guard: RESINFO 内核目标被拒' ($rets[5] -eq -1) ("ret={0}" -f $rets[5])
-            Check 'guard: MOUSE 内核目标被拒' ($rets[6] -eq -1) ("ret={0}" -f $rets[6])
-            Check 'guard: PCI 内核目标被拒' ($rets[7] -eq -1) ("ret={0}" -f $rets[7])
-            Check 'guard: ETH 内核目标被拒' ($rets[8] -eq -1) ("ret={0}" -f $rets[8])
-            Check 'guard: BLK_READ 内核目标被拒' ($rets[9] -eq -1) ("ret={0}" -f $rets[9])
+                  ($rets[3] -ge 0x40200000 -and $rets[3] -le 0x40300000) ("ret={0}" -f $rets[3])
+            Check 'guard: brk 回绕被拒' ($rets[4] -eq -1) ("ret={0}" -f $rets[4])
+            Check 'guard: brk 负向越过堆底被拒' ($rets[5] -eq -1) ("ret={0}" -f $rets[5])
+            Check 'guard: SYS_WRITE 内核源被拒' ($rets[6] -eq -1) ("ret={0}" -f $rets[6])
+            Check 'guard: SYS_WRITE 超大 len 被拒' ($rets[7] -eq -1) ("ret={0}" -f $rets[7])
+            Check 'guard: mmap len 回绕被拒' ($rets[8] -eq -1) ("ret={0}" -f $rets[8])
+            Check 'guard: mmap 超大 len 被拒' ($rets[9] -eq -1) ("ret={0}" -f $rets[9])
+            Check 'guard: mprotect 未映射页被拒' ($rets[10] -eq -1) ("ret={0}" -f $rets[10])
+            Check 'guard: mprotect 未对齐被拒' ($rets[11] -eq -1) ("ret={0}" -f $rets[11])
+            Check 'guard: mprotect len=0 被拒' ($rets[12] -eq -1) ("ret={0}" -f $rets[12])
+            Check 'guard: RESINFO 内核目标被拒' ($rets[13] -eq -1) ("ret={0}" -f $rets[13])
+            Check 'guard: MOUSE 内核目标被拒' ($rets[14] -eq -1) ("ret={0}" -f $rets[14])
+            Check 'guard: PCI 内核目标被拒' ($rets[15] -eq -1) ("ret={0}" -f $rets[15])
+            Check 'guard: ETH 内核目标被拒' ($rets[16] -eq -1) ("ret={0}" -f $rets[16])
+            Check 'guard: BLK_READ 内核目标被拒' ($rets[17] -eq -1) ("ret={0}" -f $rets[17])
             Check 'guard: 内核内存未被打印（无 KRNL 泄漏）' (
                 -not ($out -match 'KRNLsys: nr=1'))
         }

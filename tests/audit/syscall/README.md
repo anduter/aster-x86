@@ -27,16 +27,24 @@ sys <nr> [a] [b] [c]      # 发一条 legacy int 0x81，参数为十进制
 |---|------|----------------|------|
 | 1 | `sys 48 4096 3 0` | ret=1077936128（0x40400000） | SYS_MMAP 正常路径 |
 | 2 | `sys 49 1077936128 4096 0` | ret=0 | SYS_MUNMAP 正常路径 |
-| 3 | `sys 22 0 0 0` | 0x40200000..0x40300000 | SYS_BRK 查询 |
-| 4 | `sys 22 3221225472 0 0` | ret=-1 | SYS_BRK 32 位回绕 |
-| 5 | `sys 1 1048576 8 0` | ret=-1 | SYS_WRITE 内核源 |
-| 6 | `sys 40 2097152 0 0` | ret=-1 | SYS_RESINFO 内核目标 |
-| 7 | `sys 37 8388608 0 0` | ret=-1 | SYS_MOUSE 内核目标 |
-| 8 | `sys 35 0 2097152 0` | ret=-1 | SYS_PCI 内核目标 |
-| 9 | `sys 39 0 2097152 0` | ret=-1 | SYS_ETH 内核目标 |
-| 10 | `sys 57 0 2097152 0` | ret=-1 | SYS_BLK_READ 内核目标 |
-| 11 | `res` | `res: mem free=...` | 校验器不误伤合法用户缓冲 |
-| 12 | `mouse` | `mouse: x=... y=...` | 同上 |
+| 3 | `sys 49 1077936128 4096 0` | ret=-1 | 重复 munmap（无 double free） |
+| 4 | `sys 22 0 0 0` | 0x40200000..0x40300000 | SYS_BRK 查询 |
+| 5 | `sys 22 3221225472 0 0` | ret=-1 | SYS_BRK 32 位回绕 |
+| 6 | `sys 22 2147483648 0 0` | ret=-1 | SYS_BRK 负向越过堆底 |
+| 7 | `sys 1 1048576 8 0` | ret=-1 | SYS_WRITE 内核源 |
+| 8 | `sys 1 1073741824 4294967295 0` | ret=-1 | SYS_WRITE 超大 len |
+| 9 | `sys 48 4294967295 3 0` | ret=-1 | SYS_MMAP len 回绕成 0 |
+| 10 | `sys 48 4294963200 3 0` | ret=-1 | SYS_MMAP len=0xFFFFF000 |
+| 11 | `sys 62 1077936128 4096 2` | ret=-1 | SYS_MPROTECT 未映射页 |
+| 12 | `sys 62 1077936129 4096 2` | ret=-1 | SYS_MPROTECT 未对齐 |
+| 13 | `sys 62 1077936128 0 2` | ret=-1 | SYS_MPROTECT len=0 |
+| 14 | `sys 40 2097152 0 0` | ret=-1 | SYS_RESINFO 内核目标 |
+| 15 | `sys 37 8388608 0 0` | ret=-1 | SYS_MOUSE 内核目标 |
+| 16 | `sys 35 0 2097152 0` | ret=-1 | SYS_PCI 内核目标 |
+| 17 | `sys 39 0 2097152 0` | ret=-1 | SYS_ETH 内核目标 |
+| 18 | `sys 57 0 2097152 0` | ret=-1 | SYS_BLK_READ 内核目标 |
+| 19 | `res` | `res: mem free=...` | 校验器不误伤合法用户缓冲 |
+| 20 | `mouse` | `mouse: x=... y=...` | 同上 |
 
 特权用例（`-Suite priv`）：
 

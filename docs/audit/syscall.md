@@ -256,7 +256,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\audit-syscall.ps1 -Sui
   -Keys "sys 48 4096 3 0`nsys 49 ...`nres`nmouse"
 ```
 
-- `guard`：10 条边界命令 + `res`/`mouse` 对照，全部断言通过
+- `guard`：18 条边界命令 + `res`/`mouse` 对照（mmap/munmap 正常与重复 munmap、
+  brk 回绕/负向越界、超大 len、mmap 长度回绕、mprotect 未映射/未对齐/len=0、
+  5 个内核目标写、SYS_WRITE 内核源），全部断言通过
   （`[audit-syscall] suite=guard => PASS`）。
 - `priv`：`drop 1000` 后 4 个停机调用全部 `-1`（`suite=priv => PASS`）。
 - `full`：标准 225 项回归，快照上 **225/225 PASS**（第二次运行；第一次命中
@@ -284,7 +286,8 @@ mouse: x=640 y=512 buttons=2
   case；沙箱 allowlist 与 `eax >= 64` 旁路检查；`mmap` 失败回滚与 `unmap` 路径。
 - **动态触达**：SYS_WRITE(1)、BRK(22)、REBOOT(27)、PANIC(28)、PCI(35)、
   POWEROFF(36)、MOUSE(37)、HANG(38)、ETH(39)、RESINFO(40)、MMAP(48)、
-  MUNMAP(49)、BLK_READ(57)；以及 `res`/`mouse`/`drop`/`crash` 等 shell 命令。
+  MUNMAP(49)、BLK_READ(57)、MPROTECT(62)；含重复 munmap、长度回绕、未对齐、
+  超长 len、内核地址缓冲等边界；以及 `res`/`mouse`/`drop`/`crash` 等 shell 命令。
 - **未覆盖/留给对应会话**：native int 0x80 ABI、net 协议栈深度、fs 路径解析与
   FAT16、security/accounts 口令路径、pkg 安装器、SMP 并发与 TLB shootdown、
   文件映射内容语义、长时间 soak。
