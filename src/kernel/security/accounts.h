@@ -5,30 +5,39 @@
  * security/accounts.h - Linux 式账号数据库（P1 身份 / P3 提权与审计）
  *
  * 这是账号系统的内核侧实现：账户数据库（/etc/passwd、/etc/shadow、
- * /etc/group）、口令校验（sha256 + 恒定时间比较）、会话表（who/last）、
- * 登录失败锁定（faillock 简化）与审计环。
+ * /etc/group）、口令校验（PBKDF2-HMAC-SHA512 + 恒定时间比较）、会话表
+ * （who/last）、登录失败锁定（faillock 简化）与审计环。
  *
  * 与用户态的分工（"PAM-lite"）：
  *   - 用户态 login/getty 前端负责提示、读键盘、失败延迟、以及 exec shell；
  *   - 口令的比较与凭据的落地在核内（SYS_LOGIN），用户态拿不到 shadow 明文，
  *     普通用户也读不到 /etc/shadow（0600 root）。
  *
- * /etc/shadow 的行格式（第三个字段起用 ':' 分隔，和 Linux 同构，
- * 但只解释前两段，其余留给以后）：
- *     name:<64 位十六进制 sha256>:0:0:99999:7:::
+ * /etc/shadow 的行格式（和 Linux 同构，只解释前两段，其余保留）：
+ *     name:pbkdf2$sha512$<iter>$<salt_hex>$<hash_hex>:0:0:99999:7:::
+ * 其中 salt 是 16 字节随机盐（32 个十六进制字符），hash 是 PBKDF2 输出
+ * 32 字节（64 个十六进制字符），iter 固定 10000。
+ * 旧格式（单次 sha256 的 64 位十六进制串）仍然可校验：成功登录后自动
+ * 改写为新格式（见 acct_passwd 同款写回逻辑）。
  * 命令写文件（useradd/passwd）由用户态/核内各自完成，格式必须与这里一致。
  * ========================================================================== */
 #include "../include/types.h"
 
 #define ACCT_NAME_MAX      32
 #define ACCT_HOME_MAX      64
-#define ACCT_HASH_HEX      64
+#define ACCT_HASH_HEX      64     /* 旧格式：sha256 的十六进制长度 */
+#define ACCT_HASH_MAX      160    /* 新格式整串上限（实际最长 118 + NUL） */
+#define ACCT_SALT_BYTES    16     /* PBKDF2 salt */
+#define ACCT_DIGEST_BYTES  32     /* PBKDF2 输出 */
+#define ACCT_PBKDF2_ITERS  10000U /* PBKDF2 迭代次数 */
+#define ACCT_SHADOW_MAX    2048   /* shadow 整文件缓冲（12 个 PBKDF2 账户也够） */
 #define ACCT_MAX_USERS     12     /* 同时能解析的账户数 */
 #define ACCT_MAX_GROUPS    12     /* /etc/group 条目数 */
 #define ACCT_GROUP_MEMBERS 8
 #define ACCT_SESSIONS      8
-#define ACCT_AUDIT_LINES   24
+#define ACCT_AUDIT_LINES   128    /* 审计环：128 行（P0 从 24 扩容） */
 #define ACCT_AUDIT_LEN     96
+#define ACCT_AUDIT_FILE_MAX 16384U /* /var/log/audit.log 追加上限，超限截断重建 */
 #define ACCT_FAIL_SLOTS    8
 #define ACCT_FAIL_MAX      5      /* 连续失败 5 次锁定（faillock 简化） */
 #define ACCT_LOCK_TICKS    1500U  /* 锁定 15s（100Hz） */
@@ -90,12 +99,18 @@ bool acct_in_group(const char *user, uint32_t gid);         /* 成员列表 + �
 bool acct_is_sudoer(uint32_t uid);
 
 /* ---- 口令 ---- */
-/* 把口令算成 64 位十六进制 sha256（out 必须 >= 65 字节） */
+/* 旧格式辅助：把口令算成 64 位十六进制 sha256（out 必须 >= 65 字节）。
+ * 保留它是为了在校验旧 shadow 行 / 迁移自检时算出同样的摘要。 */
 void acct_hash_hex(const char *pw, char out[ACCT_HASH_HEX + 1]);
-/* 恒定时间比较：固定比较 64 个字符，返回值只反映"是否相等"。
- * steps 会累加到 acct_compare_steps()，自检用它证明两条路径迭代次数相同。 */
-bool acct_verify_hash(const char *pw, const char *stored_hex);
+/* 新格式：生成随机 16 字节 salt，PBKDF2-SHA512(10000, 32B)，
+ * 输出 "pbkdf2$sha512$10000$<salt_hex>$<hash_hex>"（out 必须 >= ACCT_HASH_MAX）。 */
+void acct_hash_pbkdf2(const char *pw, char out[ACCT_HASH_MAX]);
+/* 恒定时间比较：自动识别新格式（比较 64 个十六进制字符，固定步数）与
+ * 旧格式（sha256 64 字符）。步数累加到 acct_compare_steps()。 */
+bool acct_verify_hash(const char *pw, const char *stored);
 uint32_t acct_compare_steps(void);
+/* 是否是 PBKDF2 新格式（迁移判定用） */
+bool acct_is_pbkdf2(const char *stored);
 
 /* ---- 登录 / 会话 ---- */
 /* 校验口令并（成功时）把凭据落到当前进程 + 开会话 + 写审计。
@@ -120,10 +135,12 @@ int  acct_last(char *buf, uint32_t max);
 int acct_passwd(const char *user, const char *oldpw, const char *newpw, bool as_root);
 
 /* ---- 审计 ---- */
-/* 写一条审计：环形缓冲 + 串口行 "audit: <event> <detail>"。
+/* 写一条审计：环形缓冲（128 行）+ 串口行 "audit: <event> <detail>"。
  * 可以在中断/持有 fs 锁之外任意调用；本函数不碰文件系统。 */
 void acct_audit(const char *event, const char *detail);
-/* 把审计环刷进 ACCT_AUDIT_PATH（整文件重写）。返回写入字节数或负错误。 */
+/* 把审计环里"尚未刷过"的行**追加**到 ACCT_AUDIT_PATH（保留历史）。
+ * 文件超过 ACCT_AUDIT_FILE_MAX 时截断旧文件重建（轮转）。
+ * 返回本次追加字节数，没有新事件返回 0，出错返回负值。 */
 int  acct_audit_flush(void);
 
 /* ---- 失败计数（诊断/自检） ---- */

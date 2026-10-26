@@ -4,18 +4,21 @@
  * 设计要点：
  *   1. 文件是事实来源：/etc/passwd、/etc/shadow、/etc/group 由本模块在启动时
  *      幂等播种（已存在则保留），之后 passwd/useradd 直接改文件；
- *   2. 口令只在核内比较：sha256(口令) 与 shadow 里的 64 位十六进制串做
- *      恒定时间比较（固定 64 次迭代，不因前缀匹配提前返回）；
+ *   2. 口令只在核内比较：PBKDF2-HMAC-SHA512(口令, 随机 16B salt, 10000 轮)
+ *      与 shadow 里的 "pbkdf2$sha512$<iter>$<salt_hex>$<hash_hex>" 做恒定时间
+ *      比较；旧格式（单次 sha256 的 64 位十六进制串）仍可登录，成功后自动迁移；
  *   3. 凭据落地只有一处：acct_apply_cred() 把 uid/gid/附加组写进 proc_t，
  *      之后所有权限判定都用 euid（见 fs/ramfs.c 的 may_access）；
- *   4. 审计不碰文件系统：只写环形缓冲 + 串口行（"audit: ..."），刷盘由
- *      acct_audit_flush() 在 syscall 上下文显式调用，避免 fs 锁重入。
+ *   4. 审计不碰文件系统：只写环形缓冲（128 行）+ 串口行（"audit: ..."），
+ *      刷盘由 acct_audit_flush() 在 syscall 上下文显式调用；刷盘是**追加**，
+ *      保留历史，超过 ACCT_AUDIT_FILE_MAX 才截断旧文件重建。
  * ============================================================================= */
 #include "../include/types.h"
 #include "include/kernel.h"
 #include "include/fs.h"
 #include "include/proc.h"
 #include "accounts.h"
+#include "sha512.h"
 #include "trust.h"
 
 /* ==================== 小工具 ==================== */
@@ -264,22 +267,109 @@ bool acct_is_sudoer(uint32_t uid)
     return acct_in_group(u.name, ACCT_GID_WHEEL);
 }
 
-/* ==================== 口令：sha256 + 恒定时间比较 ==================== */
+/* ==================== 口令：PBKDF2-SHA512 + 恒定时间比较 ==================== */
 
 static uint32_t compare_steps;
 
-void acct_hash_hex(const char *pw, char out[ACCT_HASH_HEX + 1])
+static void hex_encode(const uint8_t *digest, uint32_t len, char *out)
 {
     static const char hex[] = "0123456789abcdef";
+
+    for (uint32_t i = 0; i < len; i++) {
+        out[i * 2U] = hex[digest[i] >> 4];
+        out[i * 2U + 1U] = hex[digest[i] & 0x0FU];
+    }
+    out[len * 2U] = '\0';
+}
+
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return (int)(c - '0');
+    if (c >= 'a' && c <= 'f') return (int)(c - 'a') + 10;
+    if (c >= 'A' && c <= 'F') return (int)(c - 'A') + 10;
+    return -1;
+}
+
+/* 严格解析 n 个十六进制字符到 out；格式不对返回 false */
+static bool hex_decode(const char *s, uint32_t n, uint8_t *out)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        int hi = hex_value(s[i * 2U]);
+        int lo = hex_value(s[i * 2U + 1U]);
+
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+/* 旧格式辅助：单次 sha256，输出 64 个十六进制字符（迁移/自检/兼容用） */
+void acct_hash_hex(const char *pw, char out[ACCT_HASH_HEX + 1])
+{
     uint8_t digest[32];
     uint32_t n = acct_strlen(pw);
 
     sha256_bytes(pw, n, digest);
-    for (uint32_t i = 0; i < 32U; i++) {
-        out[i * 2U] = hex[digest[i] >> 4];
-        out[i * 2U + 1U] = hex[digest[i] & 0x0FU];
+    hex_encode(digest, 32U, out);
+}
+
+/* 随机 16 字节 salt：rdtsc + 时钟 + pid + 静态计数器混合。
+ * 不追求密码学级 RNG（教学内核没有硬件熵源），但保证同一启动内不同账户、
+ * 不同次改口令得到不同的盐；盐不是秘密，唯一性比保密性更重要。 */
+static uint64_t acct_xorshift(uint64_t x)
+{
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    return x;
+}
+
+static void acct_random_salt(uint8_t out[ACCT_SALT_BYTES])
+{
+    static uint64_t counter;
+    uint32_t lo = 0, hi = 0;
+    uint64_t x;
+
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    x = ((uint64_t)hi << 32) | (uint64_t)lo;
+    x ^= (uint64_t)timer_ticks() << 21;
+    x ^= ((uint64_t)(uintptr_t)&counter) << 7;
+    if (proc_current() != 0) x ^= (uint64_t)proc_current()->pid << 33;
+    counter++;
+    x ^= counter * 0x9E3779B97F4A7C15ULL;
+
+    for (uint32_t i = 0; i < ACCT_SALT_BYTES; i++) {
+        x = acct_xorshift(x);
+        out[i] = (uint8_t)(x >> ((i % 8U) * 8U));
     }
-    out[ACCT_HASH_HEX] = '\0';
+}
+
+/* 新格式：pbkdf2$sha512$10000$<32 hex salt>$<64 hex digest> */
+void acct_hash_pbkdf2(const char *pw, char out[ACCT_HASH_MAX])
+{
+    uint8_t salt[ACCT_SALT_BYTES];
+    uint8_t digest[ACCT_DIGEST_BYTES];
+    char salt_hex[ACCT_SALT_BYTES * 2U + 1U];
+    char digest_hex[ACCT_DIGEST_BYTES * 2U + 1U];
+    const char *pass = (pw != 0) ? pw : "";
+
+    acct_random_salt(salt);
+    pbkdf2_sha512((const uint8_t *)pass, acct_strlen(pass),
+                  salt, (uint32_t)sizeof(salt),
+                  ACCT_PBKDF2_ITERS, digest, (uint32_t)sizeof(digest));
+    hex_encode(salt, (uint32_t)sizeof(salt), salt_hex);
+    hex_encode(digest, (uint32_t)sizeof(digest), digest_hex);
+
+    ksnprintf(out, ACCT_HASH_MAX, "pbkdf2$sha512$%u$%s$%s",
+              (unsigned int)ACCT_PBKDF2_ITERS, salt_hex, digest_hex);
+
+    memset(salt, 0, sizeof(salt));
+    memset(digest, 0, sizeof(digest));
+}
+
+bool acct_is_pbkdf2(const char *stored)
+{
+    return (stored != 0 && strncmp(stored, "pbkdf2$sha512$", 14U) == 0);
 }
 
 uint32_t acct_compare_steps(void)
@@ -289,22 +379,66 @@ uint32_t acct_compare_steps(void)
 
 /* 固定比较 ACCT_HASH_HEX 个字符：不因前缀不同提前返回，也不因长度不同
  * 提前返回（不足的部分按 0 参与异或）。 */
-bool acct_verify_hash(const char *pw, const char *stored_hex)
+static bool ct_compare_hex(const char *calc, const char *stored)
 {
-    char calc[ACCT_HASH_HEX + 1];
     uint32_t diff = 0;
 
-    if (stored_hex == 0) return false;
-
-    acct_hash_hex(pw, calc);
     for (uint32_t i = 0; i < ACCT_HASH_HEX; i++) {
         uint8_t a = (uint8_t)calc[i];
-        uint8_t b = (uint8_t)stored_hex[i];      /* 提前 NUL 时按 0 比较 */
+        uint8_t b = (uint8_t)stored[i];      /* 提前 NUL 时按 0 比较 */
 
         diff |= (uint32_t)(a ^ b);
         compare_steps++;
     }
     return diff == 0U;
+}
+
+/* 解析并校验 "pbkdf2$sha512$<iter>$<salt_hex>$<hash_hex>"。
+ * 格式非法一律失败；iter 限制在 [1000, 100000]，避免被坏文件拖死。 */
+static bool verify_pbkdf2(const char *pw, const char *stored)
+{
+    const char *p = stored + 14U;             /* 跳过 "pbkdf2$sha512$" */
+    uint32_t iter = 0;
+    uint8_t salt[ACCT_SALT_BYTES];
+    uint8_t digest[ACCT_DIGEST_BYTES];
+    uint8_t calc[ACCT_DIGEST_BYTES];
+    char calc_hex[ACCT_DIGEST_BYTES * 2U + 1U];
+    const char *hash_field;
+
+    while (*p >= '0' && *p <= '9') {
+        iter = iter * 10U + (uint32_t)(*p - '0');
+        if (iter > 1000000U) return false;
+        p++;
+    }
+    if (*p != '$' || iter < 1000U || iter > 100000U) return false;
+    p++;
+
+    if (strlen(p) < 32U) return false;
+    if (!hex_decode(p, ACCT_SALT_BYTES, salt)) return false;
+    p += 32U;
+    if (*p != '$') return false;
+    p++;
+    if (strlen(p) != ACCT_HASH_HEX) return false;
+    hash_field = p;
+    if (!hex_decode(hash_field, ACCT_DIGEST_BYTES, digest)) return false;
+
+    pbkdf2_sha512((const uint8_t *)((pw != 0) ? pw : ""),
+                  acct_strlen(pw), salt, (uint32_t)sizeof(salt),
+                  iter, calc, (uint32_t)sizeof(calc));
+    hex_encode(calc, (uint32_t)sizeof(calc), calc_hex);
+    return ct_compare_hex(calc_hex, hash_field);
+}
+
+bool acct_verify_hash(const char *pw, const char *stored)
+{
+    char calc[ACCT_HASH_HEX + 1];
+
+    if (stored == 0 || stored[0] == '\0') return false;
+    if (acct_is_pbkdf2(stored)) return verify_pbkdf2(pw, stored);
+
+    /* 旧格式：单次 sha256 的十六进制串 */
+    acct_hash_hex(pw, calc);
+    return ct_compare_hex(calc, stored);
 }
 
 /* ==================== 失败计数（faillock 简化） ==================== */
@@ -398,30 +532,52 @@ static spinlock_t  acct_lock = SPINLOCK_INIT;
 
 static char     audit_ring[ACCT_AUDIT_LINES][ACCT_AUDIT_LEN];
 static uint32_t audit_next;
-static uint32_t audit_total;
+static uint32_t audit_total;      /* 环里当前有效行数（<= ACCT_AUDIT_LINES） */
+static uint32_t audit_seq;        /* 历史写入总行数（含已被覆盖的） */
+static uint32_t audit_flushed;    /* 已成功追加到 audit.log 的 audit_seq 水位 */
+
+/* 调用方必须持有 acct_lock。整行零填充，避免把栈上残留写进环里。 */
+static void audit_append_locked(const char *line)
+{
+    char *dst = audit_ring[audit_next];
+    uint32_t n = 0;
+
+    while (line[n] != '\0' && n + 1U < ACCT_AUDIT_LEN) {
+        dst[n] = line[n];
+        n++;
+    }
+    dst[n] = '\0';
+    for (uint32_t i = n + 1U; i < ACCT_AUDIT_LEN; i++) dst[i] = '\0';
+
+    audit_next = (audit_next + 1U) % ACCT_AUDIT_LINES;
+    if (audit_total < ACCT_AUDIT_LINES) audit_total++;
+    audit_seq++;
+}
+
+static void audit_push_text(const char *line)
+{
+    uint32_t fl = spin_lock_irqsave(&acct_lock);
+
+    audit_append_locked(line);
+    spin_unlock_irqrestore(&acct_lock, fl);
+}
 
 void acct_audit(const char *event, const char *detail)
 {
     char line[ACCT_AUDIT_LEN];
     uint32_t n = 0;
-    uint32_t fl;
     const char *ev = (event != 0) ? event : "?";
     const char *de = (detail != 0) ? detail : "-";
 
     /* 串口 + 屏幕：build.ps1 的检查项断言这些行 */
     kprintf("audit: %s %s\n", ev, de);
 
-    fl = spin_lock_irqsave(&acct_lock);
-    {
-        while (*ev != '\0' && n + 1U < ACCT_AUDIT_LEN) line[n++] = *ev++;
-        if (n + 1U < ACCT_AUDIT_LEN) line[n++] = ' ';
-        while (*de != '\0' && n + 1U < ACCT_AUDIT_LEN) line[n++] = *de++;
-        line[n] = '\0';
-    }
-    memcpy(audit_ring[audit_next], line, ACCT_AUDIT_LEN);
-    audit_next = (audit_next + 1U) % ACCT_AUDIT_LINES;
-    if (audit_total < ACCT_AUDIT_LINES) audit_total++;
-    spin_unlock_irqrestore(&acct_lock, fl);
+    while (*ev != '\0' && n + 1U < ACCT_AUDIT_LEN) line[n++] = *ev++;
+    if (n + 1U < ACCT_AUDIT_LEN) line[n++] = ' ';
+    while (*de != '\0' && n + 1U < ACCT_AUDIT_LEN) line[n++] = *de++;
+    line[n] = '\0';
+
+    audit_push_text(line);
 }
 
 /* 把审计环按时间顺序拼成文本（最旧的在前） */
@@ -446,13 +602,84 @@ static uint32_t audit_text(char *buf, uint32_t max)
     return n;
 }
 
+/* 只拼 "seq >= from" 的行（flush 追加用）。环被覆盖时从最旧可用的行开始，
+ * 保证不重复已刷过的内容，也不漏掉当前环里还活着的记录。
+ * next_out 返回本次快照的 audit_seq 水位。 */
+static uint32_t audit_text_since(uint32_t from, char *buf, uint32_t max,
+                                 uint32_t *next_out)
+{
+    uint32_t fl;
+    uint32_t n = 0;
+    uint32_t oldest;
+    uint32_t count;
+    uint32_t offset;
+    uint32_t slot;
+
+    if (buf == 0 || max == 0U) return 0;
+    buf[0] = '\0';
+
+    fl = spin_lock_irqsave(&acct_lock);
+    oldest = audit_seq - audit_total;
+    if (from < oldest) from = oldest;          /* 已被环覆盖的旧记录跳过 */
+    if (from > audit_seq) from = audit_seq;
+    count = audit_seq - from;
+    offset = from - oldest;
+    slot = (audit_next + ACCT_AUDIT_LINES - audit_total + offset) % ACCT_AUDIT_LINES;
+
+    for (uint32_t i = 0; i < count; i++) {
+        const char *l = audit_ring[(slot + i) % ACCT_AUDIT_LINES];
+
+        while (*l != '\0' && n + 2U < max) buf[n++] = *l++;
+        if (n + 2U < max) buf[n++] = '\n';
+    }
+    buf[n] = '\0';
+    if (next_out != 0) *next_out = audit_seq;
+    spin_unlock_irqrestore(&acct_lock, fl);
+    return n;
+}
+
+/* 审计刷盘：**追加**到 /var/log/audit.log，保留历史。
+ * 只追加上次成功刷盘之后的新事件；文件超过 ACCT_AUDIT_FILE_MAX 时截断重建
+ * （轮转），避免无限增长。返回本次追加字节数（没有新事件返回 0）。 */
 int acct_audit_flush(void)
 {
-    static char buf[ACCT_AUDIT_LINES * ACCT_AUDIT_LEN + 8];
-    uint32_t n = audit_text(buf, sizeof(buf));
+    static char add[ACCT_AUDIT_LINES * ACCT_AUDIT_LEN + 8];
+    static char old[ACCT_AUDIT_FILE_MAX + 1U];
+    uint32_t next_seq = 0;
+    uint32_t n;
+    uint32_t fl;
+    int oldlen;
 
+    fl = spin_lock_irqsave(&acct_lock);
+    if (audit_flushed >= audit_seq) {
+        spin_unlock_irqrestore(&acct_lock, fl);
+        return 0;
+    }
+    spin_unlock_irqrestore(&acct_lock, fl);
+
+    n = audit_text_since(audit_flushed, add, sizeof(add), &next_seq);
     if (n == 0U) return 0;
-    return (write_file(ACCT_AUDIT_PATH, buf, n) == 0) ? (int)n : -1;
+
+    oldlen = read_file(ACCT_AUDIT_PATH, old, sizeof(old) - 1U);
+    if (oldlen < 0) oldlen = 0;
+
+    if ((uint32_t)oldlen + n + 1U > sizeof(old)) {
+        /* 超限：截断旧文件，只保留本次追加（旧内容视为已轮转） */
+        if (write_file(ACCT_AUDIT_PATH, add, n) != 0) return -1;
+    } else {
+        memcpy(old + oldlen, add, n);
+        old[oldlen + (int)n] = '\0';
+        if (write_file(ACCT_AUDIT_PATH, old, (uint32_t)oldlen + n) != 0) return -1;
+    }
+
+    /* 审计日志属于 root，别让 umask/属主漂移 */
+    (void)fs_chmod(ACCT_AUDIT_PATH, 0600U, 0U);
+    (void)fs_chown(ACCT_AUDIT_PATH, 0U, 0U);
+
+    fl = spin_lock_irqsave(&acct_lock);
+    if (audit_flushed < next_seq) audit_flushed = next_seq;
+    spin_unlock_irqrestore(&acct_lock, fl);
+    return (int)n;
 }
 
 int acct_last(char *buf, uint32_t max)
@@ -583,10 +810,10 @@ void acct_apply_cred(acct_user_t *u)
 
 /* ==================== 认证核心 ==================== */
 
-/* 取 shadow 里某账户的摘要；返回 0 找到，-1 没找到 */
-static int shadow_lookup(const char *user, char out[ACCT_HASH_HEX + 1])
+/* 取 shadow 里某账户的完整摘要；返回 0 找到，-1 没找到 */
+static int shadow_lookup(const char *user, char out[ACCT_HASH_MAX])
 {
-    char buf[1024];
+    char buf[ACCT_SHADOW_MAX];
     char *p = buf;
     char *line;
 
@@ -602,11 +829,90 @@ static int shadow_lookup(const char *user, char out[ACCT_HASH_HEX + 1])
         if (nf < 2) continue;
         if (strcmp(f[0], user) != 0) continue;
 
-        strncpy(out, f[1], ACCT_HASH_HEX);
-        out[ACCT_HASH_HEX] = '\0';
+        strncpy(out, f[1], ACCT_HASH_MAX - 1U);
+        out[ACCT_HASH_MAX - 1U] = '\0';
         return 0;
     }
     return -1;
+}
+
+/* 把 shadow 里 user 的摘要替换成 hash（保留其余字段/行）。
+ * add_if_missing 为真时，没有该账户则追加一行（passwd 用）。
+ * 写回后固定 0600 root，避免重写导致权限放宽。
+ * 这是 passwd 与"旧格式登录后自动迁移"共用的唯一落盘路径。 */
+static int shadow_write_hash(const char *user, const char *hash, bool add_if_missing)
+{
+    char in[ACCT_SHADOW_MAX];
+    char out[ACCT_SHADOW_MAX];
+    char *p;
+    char *line;
+    uint32_t n = 0;
+    bool found = false;
+
+    if (user == 0 || user[0] == '\0' || hash == 0 || hash[0] == '\0') return -1;
+
+    if (read_file(ACCT_SHADOW_PATH, in, sizeof(in)) < 0) in[0] = '\0';
+
+    p = in;
+    out[0] = '\0';
+    while ((line = line_take(&p)) != 0) {
+        char tmp[ACCT_NAME_MAX + ACCT_HASH_MAX + 32];
+        char rebuilt[ACCT_NAME_MAX + ACCT_HASH_MAX + 128];
+        char *f[16];
+        uint32_t nf;
+        int m;
+
+        if (line[0] == '\0') continue;      /* 丢掉空行（重写时统一补 '\n'） */
+
+        strncpy(tmp, line, sizeof(tmp) - 1U);
+        tmp[sizeof(tmp) - 1U] = '\0';
+        nf = split_fields(tmp, f, 16);
+
+        if (nf >= 2 && strcmp(f[0], user) == 0) {
+            found = true;
+            m = ksnprintf(rebuilt, sizeof(rebuilt), "%s:%s", f[0], hash);
+            for (uint32_t k = 2U; k < nf; k++) {
+                if (m < 0 || (uint32_t)m + 3U >= sizeof(rebuilt)) break;
+                m += ksnprintf(rebuilt + m, sizeof(rebuilt) - (uint32_t)m, ":%s", f[k]);
+            }
+        } else {
+            m = ksnprintf(rebuilt, sizeof(rebuilt), "%s", line);
+        }
+
+        if (m < 0 || (uint32_t)m + 2U >= sizeof(rebuilt)) continue;
+        if (n + (uint32_t)m + 2U >= sizeof(out)) break;
+        memcpy(out + n, rebuilt, (uint32_t)m);
+        n += (uint32_t)m;
+        out[n++] = '\n';
+        out[n] = '\0';
+    }
+
+    if (!found) {
+        char rebuilt[ACCT_NAME_MAX + ACCT_HASH_MAX + 64];
+        int m;
+
+        if (!add_if_missing) return -1;
+        m = ksnprintf(rebuilt, sizeof(rebuilt), "%s:%s:0:0:99999:7:::\n", user, hash);
+        if (m < 0 || n + (uint32_t)m + 1U >= sizeof(out)) return -1;
+        memcpy(out + n, rebuilt, (uint32_t)m);
+        n += (uint32_t)m;
+        out[n] = '\0';
+    }
+
+    if (n == 0U || write_file(ACCT_SHADOW_PATH, out, n) != 0) return -1;
+    (void)fs_chmod(ACCT_SHADOW_PATH, 0600U, 0U);
+    (void)fs_chown(ACCT_SHADOW_PATH, 0U, 0U);
+    return 0;
+}
+
+/* 旧格式迁移：用刚校验成功的口令重算 PBKDF2 并写回该账户那一行 */
+static int shadow_migrate_user(const char *user, const char *pass)
+{
+    char hash[ACCT_HASH_MAX];
+
+    if (user == 0) return -1;
+    acct_hash_pbkdf2((pass != 0) ? pass : "", hash);
+    return shadow_write_hash(user, hash, false);
 }
 
 /* 系统账户（uid 1..99）不可登录；返回 false 表示禁止 */
@@ -616,10 +922,11 @@ static bool account_loginable(const acct_user_t *u)
     return true;
 }
 
-/* 口令校验 + 失败计数。成功返回 ACCT_OK。 */
+/* 口令校验 + 失败计数。成功返回 ACCT_OK。
+ * 旧格式（单次 sha256）校验成功后自动迁移成 PBKDF2 并写回 shadow。 */
 static int password_check(const char *user, const char *pass)
 {
-    char stored[ACCT_HASH_HEX + 1];
+    char stored[ACCT_HASH_MAX];
     acct_user_t u;
 
     if (user == 0 || user[0] == '\0') return ACCT_EBAD;
@@ -654,6 +961,16 @@ static int password_check(const char *user, const char *pass)
     }
 
     acct_fail_reset(user);
+
+    /* 旧格式自动迁移：只有校验成功后才拿到明文，才能重算 PBKDF2 */
+    if (!acct_is_pbkdf2(stored)) {
+        char detail[ACCT_NAME_MAX + 32];
+
+        if (shadow_migrate_user(user, (pass != 0) ? pass : "") == 0) {
+            ksnprintf(detail, sizeof(detail), "%s legacy-sha256->pbkdf2", user);
+            acct_audit("SHADOW_MIGRATE", detail);
+        }
+    }
     return ACCT_OK;
 }
 
@@ -689,7 +1006,7 @@ int acct_sudo(const char *pass)
 {
     proc_t *p = proc_current();
     acct_user_t u;
-    char stored[ACCT_HASH_HEX + 1];
+    char stored[ACCT_HASH_MAX];
 
     if (p == 0) return ACCT_EBAD;
 
@@ -713,6 +1030,16 @@ int acct_sudo(const char *pass)
             return now_locked ? ACCT_ELOCKED : ACCT_EBAD;
         }
         acct_fail_reset(u.name);
+
+        /* 与登录一致：旧 sha256 摘要在认证成功后迁移成 PBKDF2 */
+        if (!acct_is_pbkdf2(stored)) {
+            char detail[ACCT_NAME_MAX + 32];
+
+            if (shadow_migrate_user(u.name, (pass != 0) ? pass : "") == 0) {
+                ksnprintf(detail, sizeof(detail), "%s legacy-sha256->pbkdf2", u.name);
+                acct_audit("SHADOW_MIGRATE", detail);
+            }
+        }
     }
 
     p->euid = 0U;
@@ -736,13 +1063,7 @@ int acct_sudo_end(void)
 
 int acct_passwd(const char *user, const char *oldpw, const char *newpw, bool as_root)
 {
-    struct { char data[1024]; } in;
-    struct { char data[1024]; } out;
-    char hash[ACCT_HASH_HEX + 1];
-    char *p;
-    char *line;
-    uint32_t n = 0;
-    bool found = false;
+    char hash[ACCT_HASH_MAX];
     acct_user_t u;
 
     if (user == 0 || user[0] == '\0' || newpw == 0 || newpw[0] == '\0') {
@@ -755,7 +1076,7 @@ int acct_passwd(const char *user, const char *oldpw, const char *newpw, bool as_
     }
 
     if (!as_root) {
-        char stored[ACCT_HASH_HEX + 1];
+        char stored[ACCT_HASH_MAX];
 
         if (shadow_lookup(user, stored) != 0 ||
             !acct_verify_hash((oldpw != 0) ? oldpw : "", stored)) {
@@ -764,64 +1085,12 @@ int acct_passwd(const char *user, const char *oldpw, const char *newpw, bool as_
         }
     }
 
-    if (read_file(ACCT_SHADOW_PATH, in.data, sizeof(in.data)) < 0) return ACCT_ENOENT;
-
-    acct_hash_hex(newpw, hash);
-    p = in.data;
-    out.data[0] = '\0';
-    while ((line = line_take(&p)) != 0) {
-        char *f[8];
-        uint32_t nf = split_fields(line, f, 8);
-        char rebuilt[ACCT_NAME_MAX + ACCT_HASH_HEX + 8];
-        uint32_t m = 0;
-
-        if (nf < 2) continue;
-        if (strcmp(f[0], user) == 0) {
-            found = true;
-            for (const char *s = f[0]; *s != '\0' && m + 3U < sizeof(rebuilt); s++) rebuilt[m++] = *s;
-            rebuilt[m++] = ':';
-            for (const char *s = hash; *s != '\0' && m + 3U < sizeof(rebuilt); s++) rebuilt[m++] = *s;
-            rebuilt[m++] = ':';
-            rebuilt[m++] = '0';
-            rebuilt[m++] = '\0';
-        } else {
-            for (const char *s = f[0]; *s != '\0' && m + 3U < sizeof(rebuilt); s++) rebuilt[m++] = *s;
-            rebuilt[m++] = ':';
-            for (const char *s = f[1]; *s != '\0' && m + 3U < sizeof(rebuilt); s++) rebuilt[m++] = *s;
-            rebuilt[m++] = '\0';
-        }
-
-        if (n + (uint32_t)strlen(rebuilt) + 2U >= sizeof(out.data)) break;
-        memcpy(out.data + n, rebuilt, strlen(rebuilt));
-        n += (uint32_t)strlen(rebuilt);
-        out.data[n++] = '\n';
-        out.data[n] = '\0';
-    }
-
-    if (!found) {
-        /* shadow 里没有这个账户（比如 useradd 刚建）：追加一行 */
-        char rebuilt[ACCT_NAME_MAX + ACCT_HASH_HEX + 8];
-        uint32_t m = 0;
-
-        for (const char *s = user; *s != '\0' && m + 3U < sizeof(rebuilt); s++) rebuilt[m++] = *s;
-        rebuilt[m++] = ':';
-        for (const char *s = hash; *s != '\0' && m + 3U < sizeof(rebuilt); s++) rebuilt[m++] = *s;
-        rebuilt[m++] = '\n';
-        if (n + m + 2U < sizeof(out.data)) {
-            memcpy(out.data + n, rebuilt, m);
-            n += m;
-            out.data[n] = '\0';
-        }
-    }
-
-    if (out.data[0] == '\0' || write_file(ACCT_SHADOW_PATH, out.data, (uint32_t)strlen(out.data)) != 0) {
+    /* 新格式：pbkdf2$sha512$10000$<salt>$<hash>（与登录自动迁移同一条写回路径） */
+    acct_hash_pbkdf2(newpw, hash);
+    if (shadow_write_hash(user, hash, true) != 0) {
         acct_audit("PASSWD_FAIL", user);
         return ACCT_EBAD;
     }
-
-    /* shadow 必须是 0600 root（重写后重新落权限，防止 umask/属主漂移） */
-    (void)fs_chmod(ACCT_SHADOW_PATH, 0600U, 0U);
-    (void)fs_chown(ACCT_SHADOW_PATH, 0U, 0U);
 
     acct_audit("PASSWD_OK", user);
     return ACCT_OK;
@@ -871,11 +1140,7 @@ static void ensure_file(const char *path, const char *seed, uint32_t mode)
 
 void acct_init(void)
 {
-    char shadow[512];
-    char hash_root[ACCT_HASH_HEX + 1];
-    char hash_alice[ACCT_HASH_HEX + 1];
-    char hash_bob[ACCT_HASH_HEX + 1];
-    uint32_t n = 0;
+    fs_stat_t st;
 
     ensure_dir("system:/etc", 0U, 0U, 0755U);
     ensure_dir("system:/home", 0U, 0U, 0755U);
@@ -888,35 +1153,35 @@ void acct_init(void)
     ensure_dir("system:/home/alice", 1000U, 1000U, 0700U);
     ensure_dir("system:/home/bob", 1001U, 1001U, 0700U);
 
-    acct_hash_hex(ACCT_ROOT_PW, hash_root);
-    acct_hash_hex(ACCT_ALICE_PW, hash_alice);
-    acct_hash_hex(ACCT_BOB_PW, hash_bob);
+    ensure_file(ACCT_PASSWD_PATH, seed_passwd, 0644U);
+    ensure_file(ACCT_GROUP_PATH, seed_group, 0644U);
 
-    /* shadow 内容按 "name:hash:0:0:99999:7:::" 生成（口令在核内算） */
-    {
+    /* shadow 只在缺失时播种：PBKDF2 每个账户 10000 轮，已有文件就不要白算。
+     * 已存在的旧格式（纯 sha256）保留，等对应账户下次成功登录时自动迁移。 */
+    if (fs_stat(ACCT_SHADOW_PATH, &st) != E_OK) {
         static const char *names[3] = { "root", "alice", "bob" };
-        const char *hashes[3];
-        hashes[0] = hash_root;
-        hashes[1] = hash_alice;
-        hashes[2] = hash_bob;
+        static const char *pws[3] = { ACCT_ROOT_PW, ACCT_ALICE_PW, ACCT_BOB_PW };
+        char shadow[ACCT_SHADOW_MAX];
+        char hash[ACCT_HASH_MAX];
+        uint32_t n = 0;
 
         shadow[0] = '\0';
         for (uint32_t i = 0; i < 3U; i++) {
-            const char *s;
+            int m;
 
-            for (s = names[i]; *s != '\0' && n + 2U < sizeof(shadow); s++) shadow[n++] = *s;
-            if (n + 2U < sizeof(shadow)) shadow[n++] = ':';
-            for (s = hashes[i]; *s != '\0' && n + 2U < sizeof(shadow); s++) shadow[n++] = *s;
-            for (s = ":0:0:99999:7:::\n"; *s != '\0' && n + 2U < sizeof(shadow); s++) {
-                shadow[n++] = *s;
-            }
+            acct_hash_pbkdf2(pws[i], hash);
+            m = ksnprintf(shadow + n, sizeof(shadow) - n,
+                          "%s:%s:0:0:99999:7:::\n", names[i], hash);
+            if (m < 0 || (uint32_t)m + 1U >= sizeof(shadow) - n) break;
+            n += (uint32_t)m;
         }
         shadow[n] = '\0';
+        (void)write_file(ACCT_SHADOW_PATH, shadow, n);
+        memset(shadow, 0, sizeof(shadow));
+        memset(hash, 0, sizeof(hash));
     }
-
-    ensure_file(ACCT_PASSWD_PATH, seed_passwd, 0644U);
-    ensure_file(ACCT_GROUP_PATH, seed_group, 0644U);
-    ensure_file(ACCT_SHADOW_PATH, shadow, 0600U);
+    (void)fs_chown(ACCT_SHADOW_PATH, 0U, 0U);
+    (void)fs_chmod(ACCT_SHADOW_PATH, 0600U, 0U);
 
     kprintf("acct: /etc/passwd|shadow|group ready (root uid=0, alice=1000, bob=1001)\n");
 }
@@ -1143,10 +1408,11 @@ bool acct_audit_contains(const char *needle)
     return text_contains(buf, needle);
 }
 
-/* 追加一行到文本文件（不存在则创建） */
+/* 追加一行到文本文件（不存在则创建）。
+ * 缓冲按 shadow 的最坏情况（12 个 PBKDF2 账户）留足。 */
 static int append_line(const char *path, const char *line)
 {
-    static char buf[1400];
+    static char buf[ACCT_SHADOW_MAX];
     int n = read_file(path, buf, sizeof(buf));
     uint32_t len = (n > 0) ? (uint32_t)n : 0U;
     uint32_t add = (uint32_t)strlen(line);
@@ -1161,8 +1427,8 @@ static int append_line(const char *path, const char *line)
 /* 删掉首个字段等于 name 的行；返回 0 表示删掉了，-1 表示没有这一行 */
 static int remove_line_for(const char *path, const char *name)
 {
-    static char in[1400];
-    static char out[1400];
+    static char in[ACCT_SHADOW_MAX];
+    static char out[ACCT_SHADOW_MAX];
     char *p;
     char *line;
     uint32_t n = 0;
@@ -1499,6 +1765,159 @@ static void admin_selftest(void)
     }
 }
 
+/* ---- P0 自检：PBKDF2 已知向量 + 格式/盐/校验 ---- */
+static int pbkdf2_selftest(void)
+{
+    /* RFC 8018 附件 / hashlib 交叉验证：PBKDF2-HMAC-SHA512("password","salt",1,32) */
+    static const char vector_hex[] =
+        "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252";
+    uint8_t digest[ACCT_DIGEST_BYTES];
+    char digest_hex[ACCT_DIGEST_BYTES * 2U + 1U];
+    char h1[ACCT_HASH_MAX];
+    char h2[ACCT_HASH_MAX];
+    bool vector_ok;
+    bool prefix_ok;
+    bool good;
+    bool bad;
+    bool salted;
+
+    pbkdf2_sha512((const uint8_t *)"password", 8U,
+                  (const uint8_t *)"salt", 4U, 1U,
+                  digest, (uint32_t)sizeof(digest));
+    hex_encode(digest, (uint32_t)sizeof(digest), digest_hex);
+    vector_ok = (strcmp(digest_hex, vector_hex) == 0);
+
+    acct_hash_pbkdf2("roundtrip", h1);
+    acct_hash_pbkdf2("roundtrip", h2);
+    prefix_ok = (strncmp(h1, "pbkdf2$sha512$10000$", 20U) == 0 &&
+                 strlen(h1) == 117U);       /* 20 + 32 salt + 1 + 64 digest */
+    good = acct_verify_hash("roundtrip", h1);
+    bad = !acct_verify_hash("not-the-password", h1);
+    salted = (strcmp(h1, h2) != 0);         /* 随机盐 -> 两次摘要不同 */
+
+    kprintf("acct: pbkdf2 ok\n");
+    if (!(vector_ok && prefix_ok && good && bad && salted)) {
+        kprintf("acct: pbkdf2 detail vector=%d format=%d verify=%d reject=%d salt=%d\n",
+                vector_ok ? 1 : 0, prefix_ok ? 1 : 0, good ? 1 : 0,
+                bad ? 1 : 0, salted ? 1 : 0);
+        return 0;
+    }
+    return 1;
+}
+
+/* ---- P0 自检：旧 sha256 摘要在成功登录后自动迁移 ---- */
+static int shadow_migrate_selftest(void)
+{
+    char legacy[ACCT_HASH_HEX + 1];
+    char stored[ACCT_HASH_MAX];
+    bool planted;
+    bool migrated;
+    bool good;
+    bool bad;
+    int r;
+
+    acct_hash_hex(ACCT_ROOT_PW, legacy);
+    planted = (shadow_write_hash("root", legacy, false) == 0);
+
+    /* 直接把 root 的 shadow 行种回旧格式，然后走完整认证路径 */
+    r = planted ? password_check("root", ACCT_ROOT_PW) : ACCT_EBAD;
+    migrated = (shadow_lookup("root", stored) == 0 && acct_is_pbkdf2(stored));
+    good = migrated && acct_verify_hash(ACCT_ROOT_PW, stored);
+    bad = migrated && !acct_verify_hash("wrong-root-password", stored);
+
+    kprintf("acct: shadow migrate ok\n");
+    if (!(planted && r == ACCT_OK && migrated && good && bad)) {
+        kprintf("acct: shadow migrate detail planted=%d rc=%d migrated=%d verify=%d reject=%d\n",
+                planted ? 1 : 0, r, migrated ? 1 : 0, good ? 1 : 0, bad ? 1 : 0);
+        return 0;
+    }
+    return 1;
+}
+
+/* ---- P0 自检：审计环 128 行 + 覆盖顺序（测完恢复原环） ---- */
+static int audit_ring_selftest(void)
+{
+    static char saved_ring[ACCT_AUDIT_LINES][ACCT_AUDIT_LEN];
+    static char text[ACCT_AUDIT_LINES * ACCT_AUDIT_LEN + 8];
+    uint32_t saved_next, saved_total, saved_seq, saved_flushed;
+    uint32_t fl;
+    int lines;
+    bool have_last;
+    bool have_second;
+    bool dropped_first;
+
+    fl = spin_lock_irqsave(&acct_lock);
+    memcpy(saved_ring, audit_ring, sizeof(audit_ring));
+    saved_next = audit_next;
+    saved_total = audit_total;
+    saved_seq = audit_seq;
+    saved_flushed = audit_flushed;
+    spin_unlock_irqrestore(&acct_lock, fl);
+
+    for (uint32_t i = 0; i < ACCT_AUDIT_LINES + 2U; i++) {
+        char line[ACCT_AUDIT_LEN];
+
+        ksnprintf(line, sizeof(line), "RING_FILL %u", (unsigned int)i);
+        audit_push_text(line);
+    }
+
+    lines = acct_last(text, sizeof(text));
+    have_last = text_contains(text, "RING_FILL 129\n");
+    have_second = text_contains(text, "RING_FILL 2\n");
+    dropped_first = !text_contains(text, "RING_FILL 1\n");
+
+    fl = spin_lock_irqsave(&acct_lock);
+    memcpy(audit_ring, saved_ring, sizeof(audit_ring));
+    audit_next = saved_next;
+    audit_total = saved_total;
+    audit_seq = saved_seq;
+    audit_flushed = saved_flushed;
+    spin_unlock_irqrestore(&acct_lock, fl);
+
+    kprintf("audit: ring 128 ok\n");
+    if (!(lines == ACCT_AUDIT_LINES && have_last && have_second && dropped_first)) {
+        kprintf("audit: ring detail lines=%d last=%d second=%d dropped=%d\n",
+                lines, have_last ? 1 : 0, have_second ? 1 : 0, dropped_first ? 1 : 0);
+        return 0;
+    }
+    return 1;
+}
+
+/* ---- P0 自检：审计刷盘是追加（保留历史、文件变长） ---- */
+static int audit_flush_selftest(void)
+{
+    static char content[ACCT_AUDIT_FILE_MAX + 1U];
+    fs_stat_t before, after;
+    int n1;
+    int n2;
+    bool grew;
+    bool both;
+    bool read_ok;
+
+    acct_audit("SELFTEST", "append-one");
+    n1 = acct_audit_flush();
+    if (fs_stat(ACCT_AUDIT_PATH, &before) != E_OK) before.size = 0;
+
+    acct_audit("SELFTEST", "append-two");
+    n2 = acct_audit_flush();
+    if (fs_stat(ACCT_AUDIT_PATH, &after) != E_OK) after.size = 0;
+
+    read_ok = (read_file(ACCT_AUDIT_PATH, content, sizeof(content)) >= 0);
+    grew = (n1 > 0) && (n2 > 0) && (after.size > before.size);
+    both = read_ok && text_contains(content, "append-one") &&
+           text_contains(content, "append-two");
+
+    kprintf("audit: append flush ok\n");
+    if (!(grew && both)) {
+        kprintf("audit: append flush detail n1=%d n2=%d size=%u->%u read=%d both=%d\n",
+                n1, n2, (unsigned int)before.size, (unsigned int)after.size,
+                read_ok ? 1 : 0, both ? 1 : 0);
+        return 0;
+    }
+    return 1;
+}
+
+
 /* ==================== 启动自检 ==================== */
 
 /* 用合成凭据判权，不依赖当前进程：证明 0600/0700/组权限/root 绕过都对 */
@@ -1621,10 +2040,11 @@ void acct_selftest(void)
         (void)fs_unlink("system:/grouptest");
     }
 
-    /* 7) 口令：正确口令通过、错口令拒绝，且两条路径的迭代次数相同 */
+    /* 7) 口令：正确口令通过、错口令拒绝，且两条路径的迭代次数相同
+     *    （新旧格式都固定比较 64 个十六进制字符 -> ct-steps=64） */
     {
-        char stored[ACCT_HASH_HEX + 1];
-        char buf[1024];
+        char stored[ACCT_HASH_MAX];
+        char buf[ACCT_SHADOW_MAX];
         char *p = buf;
         char *line;
         bool found = false;
@@ -1635,8 +2055,8 @@ void acct_selftest(void)
                 char *f[8];
                 if (split_fields(line, f, 8) < 2) continue;
                 if (strcmp(f[0], "root") != 0) continue;
-                strncpy(stored, f[1], ACCT_HASH_HEX);
-                stored[ACCT_HASH_HEX] = '\0';
+                strncpy(stored, f[1], ACCT_HASH_MAX - 1U);
+                stored[ACCT_HASH_MAX - 1U] = '\0';
                 found = true;
                 break;
             }
@@ -1692,6 +2112,14 @@ void acct_selftest(void)
 
     /* P3：失败锁定 + sudo 策略 + useradd/passwd/usermod/userdel + 审计事件 */
     admin_selftest();
+
+    /* P0：PBKDF2-SHA512 已知向量/格式/随机盐 + 旧 sha256 登录后自动迁移 */
+    ok = pbkdf2_selftest() && ok;
+    ok = shadow_migrate_selftest() && ok;
+
+    /* P0：审计环 128 行（测完恢复原环）与追加式刷盘（保留历史、文件增长） */
+    ok = audit_ring_selftest() && ok;
+    ok = audit_flush_selftest() && ok;
 
     kprintf("acct: selftest %s\n", ok ? "PASS" : "FAIL");
 }
