@@ -5,9 +5,9 @@
   以及 `src/kernel/dev/net/e1000.c` 交给协议栈的**解析入口以上**部分
 - 约束：只改 `net/**`；不改 `e1000.c`、`build.ps1` 检查项、`abi.h`、`fs/**`、
   `proc/**`、`security/**`、`mm/**`
-- 结论：**找到并修复 7 个可复现缺陷**（4 个可导致数据注入/劫持、2 个可导致
-  拒绝服务、1 个可导致静默数据损坏）；**未发现**帧解析的越界读写/空指针
-  （推演范围见 §6）
+- 结论：**找到并修复 9 个可复现缺陷**：数据注入/劫持/投毒 4 个（V3/V4/V7/V8）、
+  坏包入库/完整性 2 个（V1/V2）、静默丢数据 2 个（V5/V9）、
+  资源泄漏拒绝服务 1 个（V6）；**未发现**帧解析的越界读写/空指针（推演范围见 §6）
 
 ## 1. 摘要
 
@@ -20,6 +20,8 @@
 | V5 | 中 | 客户端 `rcv_nxt` 按段长推进而非实际交付字节：缓冲满时静默丢数据 | `tcp.c` `tcp_deliver/tcp_input` | `net: audit tcp receive accounting ok` |
 | V6 | 中 | `SYS_LISTEN` 兜底监听 socket 永不回收：普通进程可永久占满端口/socket 槽 | `net_syscall.c` `tcp.c` | `net: audit listen socket owned by pid ok` |
 | V7 | 中 | ARP reply 只校验 `10.0.x` 两字节：任意主机可改写网关 MAC（流量劫持） | `net.c` `net_parse_arp` | `net: audit arp spoof rejected ok` |
+| V8 | 中 | DNS 事务 ID / 源端口确定性递增：off-path 可盲伪造响应（缓存投毒） | `net_boot.c` `nb_dns_query` | `net: audit dns txid entropy ok` |
+| V9 | 中 | 客户端 ACK 无 `snd_max` 上界：伪造 ACK 可让发送提前"完成"（静默丢数据） | `tcp.c` `tcp_ack_received/tcp_send_wait` | `net: audit tcp forged ACK ignored ok` |
 
 另有两行汇总：`net: audit net ok (udp+arp)`、`net: audit tcp ok`。
 
@@ -55,8 +57,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/audit-net.ps1 -NoFull
 ```
 
 `tools/audit-net.ps1` 用上面这套隔离参数跑 `build.ps1 -Test`，再从串口日志断言
-§1 的 9 条 `net: audit ...` 行与 11 条既有 net 正向断言，并从 build 日志断言
-`225/225`。
+§1 的 11 条 `net: audit ...` 行与 8 条"启动阶段必然产生"的既有 net 正向断言，
+并从 build 日志断言 `225/225`。只能靠 shell 注入命令才产生的行
+（`net: TCP echo reply`）与 sleep 密集的 listen/accept 段单独判定：只有它们缺失
+时整轮重试（仓库既有 flake + 宿主争用，见 §5-8）。
 
 ## 3. 攻击面与解析入口矩阵
 
@@ -195,6 +199,40 @@ MAC 写成攻击者 MAC：修复前 `net_parse_arp()` 只比 `rd16(f+28) == 0x0A
 **修复前**：任意同链路主机可改写网关 MAC（无断言行）。
 **修复后**：`net: audit arp spoof rejected ok`。
 
+### V8 DNS 事务 ID / 源端口可预测（中）
+
+**复现**：连续发起 DNS 查询，事务 ID 是 `nb_dns_id++`、源端口是
+`nb_dns_sport++`（53000..59000 顺序）。off-path 攻击者只要知道递归器/网络位置，
+就能预测下一个 ID 与端口组合，抢在真实应答前注入伪造响应（DNS 缓存投毒 →
+后续所有域名解析被劫持）。
+
+**根因**：ID 与源端口都来自确定性计数器，没有熵。
+
+**修复**：新增 `nb_rand()`（xorshift，首次用 TSC 播种），
+`nb_dns_next_id()` 取 16 位非 0 随机 ID，源端口取 `53000 + rand()%6000`。
+
+**修复前**：ID/端口可预测（无断言行）。
+**修复后**：`net: audit dns txid entropy ok (distinct=N/8)`（连续 8 次取样至少
+6 个不同值，且不能是简单递增）。
+
+### V9 客户端 ACK 无 `snd_max` 上界（中）
+
+**复现**：连接已发送到 `snd_una=0x7000`、`snd_max=0x7010` 时，注入一个
+`ack=0x8010`（确认从未发送的数据）的裸 ACK：修复前 `tcp_ack_received()` 只要
+"正数推进"就接受，`tcp_send_wait()` 看到 `snd_una >= seq+len` 立即返回成功——
+实际数据没到对端，调用者以为发出去了（静默丢数据），且 `snd_una` 被拉飞后
+后续重传/拥塞状态全乱。
+
+**根因**：`snd_una` 只有单调性约束，没有"不能超过已发送上界"的约束。
+
+**修复**：`tcp_conn_t` 新增 `snd_max`（SYN/FIN 各占一个序号，
+`tcp_send_wait()` 在发送前记录 `seq+len(+1)`），`tcp_ack_received()` 对
+`ack > snd_max` 直接忽略。
+
+**修复前**：伪造 ACK 可推进 `snd_una`（无断言行）。
+**修复后**：`net: audit tcp forged ACK ignored ok`（伪造 ACK 不推进；
+到 `snd_max` 的合法 ACK 必须推进）。
+
 ## 5. 未修项 / 明确不承诺
 
 以下问题本次**只记录、不修**（跨 `net/**` 之外或需要重构收发模型）：
@@ -205,18 +243,16 @@ MAC 写成攻击者 MAC：修复前 `net_parse_arp()` 只比 `rd16(f+28) == 0x0A
    （软件队列/`udp_req.data[64]` ABI 冻结所致）。
 3. **TCP 广告窗口恒为 2048**：不做零窗口通告；接收缓冲满时靠对端 RTO 重传
    （V5 修好后不再丢数据，但吞吐/时延不优）。
-4. **客户端 ACK 伪造**：`conn.snd_una` 只有"正数推进"约束，没有 `snd_max`
-   上界；伪造 ACK 可让 `tcp_send_wait` 提前返回（静默丢数据）。修它需要重构
-   `snd_nxt` 的推进时机（当前是 `tcp_send_wait` 返回后才推进），本次不动。
-5. **服务端无乱序缓存**：`seq != rcv_nxt` 的数据段直接丢弃（只回 ACK）。
-6. **`socks[].conn` 是死字段**：监听 socket 关闭不连带已 accept 的连接
+4. **服务端无乱序缓存**：`seq != rcv_nxt` 的数据段直接丢弃（只回 ACK）。
+5. **`socks[].conn` 是死字段**：监听 socket 关闭不连带已 accept 的连接
    （符合 BSD 语义，但 `net_tcp_sock_conn()` 永远返回 -1，属无用接口）。
-7. **DNS 事务 ID/源端口可预测**：`nb_dns_id++`、`nb_dns_sport++` 递增可预测，
-   理论上可 off-path 伪造 DNS 响应（缓存投毒）。需要随机源，本次未纳入。
-8. **e1000 驱动**：不在本会话修复范围（按要求不改 `dev/net/e1000.c`）；本次只
+6. **DNS 应答的环境校验**：只校验 ID/源端口/RCODE/问题数，没有校验
+   "应答的问题名 == 我们问的名字"（A 记录解析本身有界）。V8 之后 ID/端口有熵，
+   风险大幅下降，但严格匹配问题名仍是下一步。
+7. **e1000 驱动**：不在本会话修复范围（按要求不改 `dev/net/e1000.c`）；本次只
    确认 `e1000_rx_poll()` 会把帧长夹到 `max_len`，所以解析层拿到的 `len`
    不会超过调用者缓冲区（这是"没有越界"的前提之一）。
-9. **tcptest 尾部延迟（既有 flake，已转 audit-smp）**：`net: tcp selftest PASS`
+8. **tcptest 尾部延迟（既有 flake，已转 audit-smp）**：`net: tcp selftest PASS`
    偶发晚于 60s 窗口；QMP 现场看到 CPU0 停在 `lib/string.c:20` 的 memset 且
    `EFL.IF=0`，失败点在不同用例间漂移（本会话观察到 4 个不同停点），基线
    38161af 同样出现。与 net 解析改动无关；本次审计用例已改为**不依赖调度**

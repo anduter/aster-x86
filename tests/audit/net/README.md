@@ -29,6 +29,8 @@
 | 接收缓冲满 | `rlen=2048-16` 时交付 100B | `rcv_nxt` 只 +16 | `net: audit tcp receive accounting ok` |
 | ARP 欺骗 | reply 的 sender IP = 10.0.9.9 | `gw_mac` 不变 | `net: audit arp spoof rejected ok` |
 | 兜底 listener 归属 | 无 TCP fd 时 `SYS_LISTEN` | 槽记在 pid 名下、每进程 ≤1 | `net: audit listen socket owned by pid ok` |
+| DNS ID 可预测 | 连续 8 次取事务 ID | ≥6 个不同、且非简单递增 | `net: audit dns txid entropy ok` |
+| 伪造 ACK | `ack > snd_max`（确认未发送数据） | `snd_una` 不推进；合法 ACK 必须推进 | `net: audit tcp forged ACK ignored ok` |
 
 每个用例都配一个**正向对照**（合法帧必须被接受），避免"全部丢弃"式的假通过。
 

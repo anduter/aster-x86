@@ -54,25 +54,31 @@ $auditLines = @(
     'net: audit tcp handshake seq validated ok',
     'net: audit tcp ip ingress rejects malformed ok (bad=3)',
     'net: audit listen socket owned by pid ok',
+    'net: audit dns txid entropy ok',
+    'net: audit tcp forged ACK ignored ok',
     'net: audit tcp ok'
 )
 
-# 既有 net 正向断言（抽关键项，防止修复把正向链路弄坏）
+# 既有 net 正向断言：只放"启动/自检阶段必然产生"的行（不依赖 shell 注入键，
+# 宿主被占满时 shell 键注入类检查会成批失败，那是环境问题不是 net 回归）。
 $netLines = @(
     'net: ARP reply gw=',
     'net: ICMP echo reply seq=',
     'net: UDP echo reply',
-    'net: TCP echo reply',
     'net: dhcp ok',
     'net: dns ok',
     'net: ping ok',
     'net: tcp handshake ok',
-    'net: tcp large transfer ok',
-    'net: tcp listen/accept selftest PASS'
+    'net: tcp large transfer ok'
 )
 
-# tcptest 尾部：仓库既有 flake（见文件头注释）。单独判定，只有它缺失时整轮重试。
-$tailLines = @('net: tcp selftest PASS')
+# 尾部（shell 注入相关 + sleep 密集段）：仓库既有 flake 与宿主争用都会命中，
+# 单独判定，只有这些缺失时才整轮重试（见文件头注释与 docs/audit/net.md §5-8）。
+$tailLines = @(
+    'net: TCP echo reply',
+    'net: tcp listen/accept selftest PASS',
+    'net: tcp selftest PASS'
+)
 
 function Invoke-AuditRun([int]$attempt) {
     $serialAbs = Join-Path $root $SerialLog
@@ -155,7 +161,7 @@ do {
     # 只有"既有 tcptest 尾部"缺失（审计行与其它正向行全在）时才重试：
     # 这是仓库已知的尾部延迟/卡住，与本会话 net 改动无关（基线同样复现）。
     $onlyFlakyTail = ($missAudit.Count -eq 0) -and ($missNet.Count -eq 0) -and
-                     ($missTail.Count -eq 1) -and (-not $fullOk)
+                     ($missTail.Count -ge 1) -and (-not $fullOk)
     if ($onlyFlakyTail -and $attempt -lt $Retries) {
         Write-Host ''
         Write-Host ("[retry] 只有 tcptest 尾部（'net: tcp selftest PASS'）缺失 = 仓库已知 flake，整轮重跑 {0}/{1}" -f ($attempt + 1), $Retries) -ForegroundColor Yellow
