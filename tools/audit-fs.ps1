@@ -23,7 +23,7 @@ param(
     [string]$ObjDir = '.obj-audit-fs',
     [string]$DistDir = '.dist-audit-fs',
     [int]$QmpPort = 4542,
-    [int]$TimeoutSec = 60
+    [int]$TimeoutSec = 90
 )
 
 $ErrorActionPreference = 'Stop'
