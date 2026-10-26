@@ -99,7 +99,8 @@ $privLines = @(
     'sys 36 0 0 0',
     'sys 38 0 0 0'
 )
-$fullKeys = 'help`nfork`nsectest`nlinktest`necho hi`nreexec'
+# 双引号：反引号 n 必须是换行；单引号会把字面 "`n" 打进 shell。
+$fullKeys = "help`nfork`nsectest`nlinktest`necho hi`nreexec"
 
 switch ($Suite) {
     'probe' { $lines = $probeLines; $keys = ($probeLines -join "`n"); $tag = 'probe' }
