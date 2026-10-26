@@ -348,6 +348,10 @@ static char kbd_translate(unsigned char sc)
 }
 
 /* ==================== 中断处理函数 ==================== */
+/* PIT 频率自检状态（见 timer_handler 的 irq: pit rate 行）。 */
+static uint32_t pit_rate_rtc0;
+static bool     pit_rate_armed;
+
 static void timer_handler(void *arg)
 {
     (void)arg;
@@ -379,6 +383,26 @@ static void timer_handler(void *arg)
                   sec, (unsigned int)pmm.free_pages, (unsigned int)proc_count(),
                   (unsigned int)pmm_faults);
         console_serial_line(line);
+    }
+
+    /* PIT 频率自检（v0.74 tick 2x 回归）：tick 200 时记下 RTC 秒，tick 1400
+     * 再读一次。1200 tick 应约等于 12 个 RTC 墙钟秒；如果每秒来了两次中断，
+     * 这里只有 ~6s，打印 FAIL 而不是让 uptime/心跳/超时全部跑快。
+     * 容差放宽到 8..18s：TCG/CI 负载高时定时器投递会被延迟（实测 13.6s），
+     * 但 2x 回归的 ~6s 仍然远离下界。 */
+    if (ticks == 200U) {
+        pit_rate_rtc0 = rtc_now();
+        pit_rate_armed = true;
+    } else if (ticks == 1400U && pit_rate_armed) {
+        uint32_t sec = rtc_now() - pit_rate_rtc0;
+
+        pit_rate_armed = false;
+        if (sec >= 8U && sec <= 18U) {
+            kprintf("irq: pit rate ok (1200 ticks / %u s)\n", (unsigned int)sec);
+        } else {
+            kprintf("irq: pit rate FAIL (1200 ticks / %u s, expect ~12)\n",
+                    (unsigned int)sec);
+        }
     }
 
     /* 唤醒到期的睡眠者 */
@@ -626,7 +650,15 @@ static void pit_init(unsigned int hz)
     if (divisor == 0U) divisor = 1U;
     if (divisor > 0xFFFFU) divisor = 0xFFFFU;
 
-    outb(PIT_CMD, 0x36U);
+    /* 通道 0 用 mode 2（rate generator）：每个周期只输出一个脉冲/上升沿。
+     *
+     * 0.74 把 IRQ0 迁到 IOAPIC 后 guest tick 变成墙钟的 ~2 倍：旧代码用
+     * mode 3（方波），OUT 每周期翻转两次；8259 的边沿检测只认一次上升沿，
+     * 而 IOAPIC 的 edge 重定向表把两次电平变化都当成一次触发，于是 PIT
+     * 100Hz → 200 次向量 0x20（QMP 实测 irq0 计数=ticks，LINT0 屏蔽无效，
+     * 只有 IOAPIC 是唯一来源）。mode 2 在两种投递路径下都是 1 次/周期。
+     * tick 频率自检见 timer_handler 的 "irq: pit rate ok" 行。 */
+    outb(PIT_CMD, 0x34U);
     outb(PIT_CH0, (unsigned char)(divisor & 0xFFU));
     outb(PIT_CH0, (unsigned char)((divisor >> 8) & 0xFFU));
 }

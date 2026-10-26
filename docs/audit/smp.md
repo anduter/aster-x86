@@ -216,6 +216,58 @@ audit-net 报：启动负载下 `tcptest` 偶发卡住，60s 内既没有
   （~2s）看到 `per_cpu[0].ticks` 不前进就 panic，打印 eip/global ticks/
   syscall 数，把“BSP 关中断锁死但 AP 还在跑”从静默 hang 变成可诊断 panic。
 
+### 3.9 P0（0.74 浸泡发现）：guest tick = 墙钟 2 倍（PIT mode 3 + IOAPIC 边沿双计数）
+
+**现象**：v0.74.0 镜像启动后 guest tick 约 2 倍：179s 墙钟 uptime 到 300s，
+`thread: heartbeat` ~1.9–2.0/s（心跳周期 100 tick）。0.73 为 1:1 且没有
+`ioapic: irq0` 行。
+
+**现场（QMP + 内核探针）**：
+
+```text
+ioapic0 ... redir[24]
+  pin 2  0x0000000000000020 dest=0 vec=32 active-hi edge unmasked fixed physical
+  （其余 pin 全部 masked 或 vec=0x21/0x24/0x2b/0x2c，没有第二个 vec=0x20）
+pic0: irr=03 imr=ff isr=00      ← PIC 全屏蔽，PIT 在 IRR 里挂着但不投递
+LAPIC LVT0 = 0x00008700 ExtINT active-hi level（未屏蔽）
+LAPIC LVT1 = 0x00008400 NMI；LVTT = 0x00020400 periodic NMI
+```
+
+RTC 墙钟探针（每次 4 个 CMOS 秒）：
+
+| 实验 | ticks/4s | 结论 |
+|---|---|---|
+| 原样（IOAPIC + PIC） | 783–797 (~199/s) | 2x |
+| 屏蔽 LAPIC LINT0 | 797 | PIC/ExtINT 不是来源 |
+| `irq_mask(0)`（PIC+IOAPIC 都关） | 0 | 没有其它 tick 源 |
+| 只关 IOAPIC（PIC 保持开） | 0 | QEMU 里 PIC 路径本身不投递 |
+| PIT 改 mode 2 后原样 | 394–400 (~99/s) | 1:1 |
+
+**根因**：`pit_init()` 用 **mode 3（方波）**。方波每周期 OUT 翻转两次；
+8259 的边沿检测只认上升沿（0.73 PIC 路径 1:1），而 IOAPIC 的 edge 重定向
+把两次电平变化都当成一次触发 → 100Hz PIT 产生 ~200 次向量 0x20。
+`irq_count(0)` 与 `timer_ticks()` 增量完全相等，说明就是同一个向量被投递
+两次，而不是 ticks 被多写。
+
+**修复**（`proc/trap/irq.c`）：PIT 通道 0 改用 **mode 2（rate generator，
+每周期一个脉冲）**：`outb(PIT_CMD, 0x34)`。两种投递路径下都恢复 1 次/周期。
+**回归自检行**（`timer_handler`，tick 200 与 1400 各读一次 RTC）：
+
+```text
+irq: pit rate ok (1200 ticks / 14 s)      ← 2x 回归时是 ~6s，打印 FAIL
+```
+
+（容差 8..18s：TCG/CI 负载高时定时器投递会滞后，实测 13.6s；2x 的 ~6s 远离下界。）
+
+**验证**：
+- 修复后 `soak: uptime=60 s` 在 QEMU 启动后 69.3s 出现（boot ~9s）→ 1:1；
+  `smp: tick check after 2s` 的 AP tick=219（0.74 坏版本是 348）。
+- `-smp 2` 全量 `build.ps1 -Test`：**247/247 PASS**（含 smp 审计 8 项）。
+- `-smp 4` 同一套检查：241/247，唯一 6 项失败仍是 §5 列出的“2 核写死字符串”
+  （`madt: 2 cpu`、`2 cpu(s) discovered`、`2/2 cpus online, 1 AP`、
+  `smp: 2 cpus online`、`ack=1/1`、`spin running on cpu 1`），无新增失败；
+  4 核自检 PASS、`audit: smp selftest start (cpus=4)`。
+
 ## 4. 复现（负向）与证据
 
 负向构建 = 临时还原某一条旧逻辑，其余修复保留，用同一个自检跑 2 核启动；
