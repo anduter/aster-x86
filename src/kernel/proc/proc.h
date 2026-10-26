@@ -6,7 +6,7 @@
 #include "include/security.h"
 
 /* 进程表上限与线程栈大小 */
-#define PROC_MAX          24
+#define PROC_MAX          32
 #define PROC_STACK_SIZE   65536U        /* exec + RSA + 中断嵌套需要更大的内核栈 */
 #define PROC_STACK_CANARY 0x5354414BU   /* 'STAK'，检测内核栈向下溢出 */
 #define PROC_TIMESLICE    5U        /* 每个时间片 5 个 tick = 50ms */
