@@ -388,8 +388,8 @@ static void set_msg(char *msg, uint32_t max, const char *text)
     msg[max - 1U] = '\0';
 }
 
-int pkg_install(const uint8_t *pkg, uint32_t len, uint32_t euid,
-                char *msg, uint32_t max)
+static int pkg_install_impl(const uint8_t *pkg, uint32_t len, uint32_t euid,
+                     char *msg, uint32_t max)
 {
     pkg_manifest_t m;
     pkg_header_t h;
@@ -553,7 +553,7 @@ int pkg_install(const uint8_t *pkg, uint32_t len, uint32_t euid,
 /* -------------------------------------------------------------------------
  * 卸载
  * ------------------------------------------------------------------------- */
-int pkg_remove(const char *name, uint32_t euid, char *msg, uint32_t max)
+static int pkg_remove_impl(const char *name, uint32_t euid, char *msg, uint32_t max)
 {
     char line[320];
     char type[16];
@@ -610,6 +610,29 @@ int pkg_remove(const char *name, uint32_t euid, char *msg, uint32_t max)
     return PKG_OK;
 }
 
+/* ---- 公开入口：整个安装/卸载过程处于"签名更新器作用域" ----
+ * SIP-lite 会拒绝写 system:/System|bin|drivers，只有 updater scope 内的线程被
+ * 放行；scope 绑定进入时的 pid，所以不会顺带放开别的线程。 */
+int pkg_install(const uint8_t *pkg, uint32_t len, uint32_t euid,
+                char *msg, uint32_t max)
+{
+    int r;
+
+    sip_updater_enter();
+    r = pkg_install_impl(pkg, len, euid, msg, max);
+    sip_updater_exit();
+    return r;
+}
+
+int pkg_remove(const char *name, uint32_t euid, char *msg, uint32_t max)
+{
+    int r;
+
+    sip_updater_enter();
+    r = pkg_remove_impl(name, euid, msg, max);
+    sip_updater_exit();
+    return r;
+}
 /* -------------------------------------------------------------------------
  * 列表 / 已安装校验
  * ------------------------------------------------------------------------- */

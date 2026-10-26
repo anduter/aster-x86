@@ -88,6 +88,11 @@ name=echosvc version=1.0.0 type=service entry=echosvc euid=0 root=system:/System
 9. **DB 追加**（失败 → 删掉刚 rename 的目录，保持无残留）；
 10. **通知 supervisor**：发 `start:<entry>`，由 supervisor `proc_spawn` 拉起。
 
+整个安装/卸载过程处于 **SIP-lite 的签名更新器作用域**（`sip_updater_enter/exit`，
+实现在 `src/kernel/fs/sip.c`）：`system:/System`、`system:/bin`、`system:/drivers`
+对所有人（含 root）只读，只有 `_pkgd` 进入作用域的那个线程可以写。作用域绑定
+pid，不是全局开关，所以别的线程不会被顺带放行。详见 `docs/security-model.md` 4.13。
+
 卸载：先发 `stop:<entry>`（supervisor 停服务并等注册表里消失），再递归删组件
 目录与 DB 行。普通用户只能卸载自己 DB 里的 `type=app`。
 

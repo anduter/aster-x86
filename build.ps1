@@ -769,6 +769,18 @@ if ($Test -or $Shot) {
             @{ Name = 'pkg 组件 DB 列表';          Ok = ($out -match 'pkg: list shows echosvc 1\.0\.0 service') },
             @{ Name = 'pkgd 服务协议可用';         Ok = ($out -match 'pkgd: service protocol ok') },
             @{ Name = 'pkg 重装后服务重新上线';    Ok = ($out -match 'pkg: reinstall service online ok') }
+
+            # ---- SIP-lite（阶段 3）：系统路径运行时只读 + 更新器例外 ----
+            @{ Name = 'SIP 生产默认开启';          Ok = ($out -match 'sip: enabled \(system:/System, system:/bin, system:/drivers are read-only\)') },
+            @{ Name = 'SIP 拒写 system:/System';   Ok = ($out -match 'sip: root write system:/System denied ok') },
+            @{ Name = 'SIP 拒写 system:/bin';      Ok = ($out -match 'sip: root write system:/bin denied ok') },
+            @{ Name = 'SIP 拒写 system:/drivers';  Ok = ($out -match 'sip: root write system:/drivers denied ok') },
+            @{ Name = 'SIP 拒写/删/改名/改权限';   Ok = ($out -match 'sip: root write/unlink/rename/chmod/chown denied ok') },
+            @{ Name = 'SIP 路径穿越规范化';        Ok = ($out -match 'sip: path traversal normalized ok') },
+            @{ Name = 'SIP 包仓库对 root 只读';    Ok = ($out -match 'sip: package store write denied for root ok') },
+            @{ Name = 'SIP 更新器作用域放行';      Ok = ($out -match 'sip: updater scope bypass ok') },
+            @{ Name = 'SIP sip=0 可关闭';          Ok = ($out -match 'sip: sip=0 disables protection ok') },
+            @{ Name = 'SIP 自检通过';              Ok = ($out -match 'sip: selftest PASS') }
         )
 
         T 'checks begin'

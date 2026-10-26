@@ -62,15 +62,17 @@ void supervisor_entry(void)
             /* 组件安装后由 _pkgd 通知启动：按程序名拉起（程序表里的名字）。
              * echosvc 已经在线时按"已在运行"处理，不重复拉起。 */
             const char *prog = name + 6;
+            int started = 1;
 
             if (strcmp(prog, "echosvc") == 0 && service_exists("echo")) {
                 kprintf("supervisor: start %s already running\n", prog);
             } else {
                 proc_t *p = proc_spawn(prog);
+                started = (p != 0) ? 1 : 0;
                 kprintf("supervisor: start %s -> %s\n", prog,
-                        (p != 0) ? "ok" : "failed");
+                        started ? "ok" : "failed");
             }
-            (void)chan_send(server, "ok", 2U);
+            (void)chan_send(server, started ? "ok" : "no", started ? 2U : 2U);
         } else if (strncmp(name, "stop:", 5) == 0) {
             /* 卸载运行中的组件：先停服务，等注册表里消失再让 _pkgd 删文件。 */
             const char *prog = name + 5;

@@ -138,17 +138,23 @@ static void install_programs(void)
     uint32_t h;
     int n;
 
+    /* 启动期安装器是受信任的更新器（和 _pkgd 同一入口）：SIP-lite 默认开启后，
+     * system:/bin 只允许更新器写，所以这里显式进入 updater scope。 */
+    sip_updater_enter();
     fs_mkdir("system:/bin");
+    fs_mkdir("system:/System");     /* 组件仓库根（SIP 开启后只有更新器能建） */
     fs_mount("data");           /* 第二个驱动号，演示多卷 */
 
     h = fs_open("system:/bin/shell", FS_OPEN_WRITE | FS_OPEN_CREAT);
     if (h == 0) {
+        sip_updater_exit();
         kprintln("fs: cannot create system:/bin/shell");
         return;
     }
     n = fs_write(h, user_shell_blob_start, size);
     fs_close(h);
     installed_shell_size = (n > 0) ? (uint32_t)n : 0U;
+    sip_updater_exit();
 
     kprintf("fs: volumes = %u, system:/bin/shell installed (%d bytes)\n",
             (unsigned int)fs_volume_count(), n);
@@ -278,6 +284,8 @@ static void step_devices(void)
 static void step_fs(void)
 {
     fs_init();
+    /* SIP-lite：系统路径运行时只读（生产默认开启；sip=0 可关） */
+    sip_init();
     select_backing();
     if (blk_lookup("ata1") != 0) {
         (void)fat16_mount("ata1", "fat");   /* 第二块盘做 FAT16 交换盘 */
@@ -367,6 +375,9 @@ static void step_selftests(void)
 
     /* VFS 后端一致性：ramfs / FAT16 走同一条 ops 表 */
     fs_backend_selftest();
+
+    /* SIP-lite：root 写系统目录被拒、穿越规范化、更新器放行、开关有效 */
+    sip_selftest();
 }
 
 static void step_programs(void)

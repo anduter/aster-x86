@@ -41,3 +41,24 @@
   4. 同名组件不支持多版本/升级回滚。
 - 门禁：见下方"阶段 2 门禁"小节。
 
+## 阶段 3：SIP-lite（系统路径运行时只读）
+
+- 状态：**完成**
+- 实现：`src/kernel/fs/sip.c`；声明进 `fs/fs.h`；ramfs 的 6 个写入口
+  （写打开/mkdir/unlink/rename/chmod/chown）统一调 `sip_guard_write`。
+- 规则：`system:/System`、`system:/bin`、`system:/drivers` 对**所有人（含 root）**
+  只读；判定前规范化 `..` / `.` / 重复 `/`。
+- 例外：`_pkgd` 安装/卸载期间进入"签名更新器作用域"，scope 绑定进入时线程 pid；
+  启动期安装 `/bin/shell` 走同一入口。
+- 开关：内核参数 `sip=0` / 运行时 `sip_set_enabled(0)`；`-Test` 默认仍开启
+  （否则"root 写系统目录被拒"没有意义）。
+- 检查项：**146 → 156**。
+- 测试证据：`build.ps1 -Test` → `=== TEST PASS (156/156) ===`（`serial-sip2.log`）；
+  SIP 10 项全 PASS：三目录拒绝、写/删/改名/改权限拒绝、穿越规范化、包仓库
+  对 root 只读、更新器放行、`sip=0` 可关闭、自检 PASS。
+- 遗留：
+  1. 只覆盖 ramfs 写路径（FAT16/svc/blk 另有自己的语义）；
+  2. 判定不解析符号链接（阶段 4b 落地后需补"解析后复查"）；
+  3. 更新器作用域是内核可信标志，未做成 capability 表项。
+
+

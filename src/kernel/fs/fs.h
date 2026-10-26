@@ -163,6 +163,27 @@ int         fs_sync_backing(void);
 /* 一致性检查：返回错误数，report 写一行摘要（nodes/files/dirs/errors） */
 int fs_check(char *report, uint32_t max);
 
+/* =============================================================================
+ * SIP-lite：系统路径运行时只读（实现在 fs/sip.c）
+ *
+ * system:/System、system:/bin、system:/drivers 下的写操作（创建/写打开、
+ * mkdir、unlink、rename、chmod、chown）一律 E_ACCES，root 同样被拒。
+ * 例外是"签名更新器作用域"：_pkgd 在安装/卸载期间 sip_updater_enter()，
+ * 只有进入时那个线程的写放行（scope 绑定 pid，不是全局开关）。
+ * 判定前会规范化路径（"."、".."、重复 '/'），所以穿越写法也拦得住。
+ * 关闭：内核参数 sip=0，或运行中 sip_set_enabled(0)。
+ * ========================================================================== */
+void sip_init(void);
+int  sip_enabled(void);
+void sip_set_enabled(int on);
+int  sip_path_protected(const char *path);
+/* 写操作守卫：E_OK 放行 / E_ACCES 拒绝（VFS 写路径统一调用） */
+int  sip_guard_write(const char *path);
+void sip_updater_enter(void);
+void sip_updater_exit(void);
+int  sip_updater_active(void);
+void sip_selftest(void);
+
 /* 已用节点数（诊断） */
 unsigned int fs_node_count(void);
 

@@ -246,8 +246,28 @@ trust: tampered image rejected
 
 ---
 
-## 5. 明确限制（必须诚实记录）
+### 4.13 SIP-lite：系统路径运行时只读（阶段 3）
 
+实现在 `src/kernel/fs/sip.c`，由 ramfs 的写路径统一调用（`sip_guard_write`）：
+
+- 受保护：`system:/System`、`system:/bin`、`system:/drivers`；
+- 覆盖的写操作：创建/写打开、`mkdir`、`unlink`、`rename`（源或目标）、
+  `chmod`、`chown`；**root 同样被拒**（CAP_DAC_OVERRIDE 管不到这里）；
+- 例外：签名更新器作用域。`_pkgd` 在 `install`/`remove` 期间
+  `sip_updater_enter()`，scope 绑定**进入时的线程 pid**——只有该线程的写被
+  放行，其它线程同时运行也照样被拒；启动期安装 `/bin/shell` 走同一入口；
+- 判定前把路径规范化（`.`、`..`、重复 `/`），所以
+  `system:/bin/../System/x` 与 `system:/System/x` 一样被拦；
+- 关闭：内核参数 `sip=0`，或运行时 `sip_set_enabled(0)`（自检用它验证开关；
+  `-Test` 构建默认仍然开启，否则"root 写系统目录被拒"没有意义）。
+
+自检（`sip: selftest PASS`，10 项检查）：三个目录各自拒绝、写/删/改名/改权限
+拒绝、穿越规范化、包仓库对 root 只读、更新器作用域放行、`sip=0` 可关闭。
+
+**限制**：判定不解析符号链接（等 4b 的 symlink 落地后补"解析后复查"）；
+scope 是内核内可信标志，没有做成 capability 表项。
+
+## 5. 明确限制（必须诚实记录）
 | 限制 | 影响 | 后续 |
 |---|---|---|
 | 仅栈/堆/蹦床 ASLR | 代码/数据段仍未 PIE 化，整体 ASLR 未完成 | P4 |
@@ -258,6 +278,7 @@ trust: tampered image rejected
 | boot sector/loader 仍是信任根 | 替换整个 bootloader 可绕过 kernel 签名；无硬件 Secure Boot | UEFI Secure Boot/TPM measured boot |
 | 没有审计/速率限制 | 拒绝服务与探测较容易 | 日志计数器 + 配额 |
 | 没有内核栈保护 | 内核栈溢出可能破坏相邻内存 | guard page + canary |
+| SIP-lite 只覆盖 ramfs 写路径 | FAT16/svc/blk 后端不在这套前缀策略里；路径判定不解析符号链接 | 4b 之后补"解析后复查"，按后端能力收敛 |
 
 **内核与用户页 W^X 均已成立**：内核 text R+X、rodata R+NX、data/bss RW+NX，
 `__kernel_end` 以上的恒等映射 2MB 页统一 NX；用户 text R+X、rodata R+NX、
@@ -327,6 +348,13 @@ data/stack/heap RW+NX。`err=15` 的栈/rodata 取指回归证明 NX 真正生�
 | MADT 多核发现 | `madt: 2 cpu(s)`；`smp: 2/2 cpus online, 1 AP GDT/TSS/IDT ready, AP ticks=... ipi=...`；heartbeat 在 AP 执行 |
 | 启动链 kernel 签名 | `boot: KERNEL SIGNATURE OK`；篡改 kernel 输出 INVALID 并停机 |
 | exec 切换 | `user: exec system:/bin/shell` 后再次打印 `ushell: ready` |
+| SIP：root 写系统目录 | `sip: root write system:/{System,bin,drivers} denied ok`；E_ACCES，root 不例外 |
+| SIP：写/删/改名/改权限 | `sip: root write/unlink/rename/chmod/chown denied ok` |
+| SIP：路径穿越 | `sip: path traversal normalized ok`；`..`/`.`/`//` 规范化后仍被拒 |
+| SIP：更新器例外 | `sip: updater scope bypass ok`；只有被 `sip_updater_enter` 标记的线程放行 |
+| SIP：开关 | `sip: sip=0 disables protection ok`；关掉时可写，重新开启后又被拒 |
+| 组件包验签 | `pkg: bad signature rejected (signature)`；签名区改 1 字节即拒绝 |
+| 组件安装回滚 | `pkg: install failure rollback ok`；rename 失败删 staging、不写 DB、不动既有内容 |
 | 关闭后旧句柄 | `E_BADF` |
 | 用户指针未映射 | `E_FAULT`，不 panic |
 | 编译告警 | 构建失败（`-Werror`） |

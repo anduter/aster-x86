@@ -527,6 +527,7 @@ int fs_access_cred_impl(const char *path, uint32_t want, const fs_cred_t *c)
 
 int fs_chmod_impl(const char *path, uint32_t mode, const fs_cred_t *c)
 {
+    if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *n;
@@ -559,6 +560,7 @@ int fs_chmod_impl(const char *path, uint32_t mode, const fs_cred_t *c)
 
 int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t *c)
 {
+    if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *n;
@@ -583,6 +585,10 @@ int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t 
 
 static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *c)
 {
+    if ((flags & (FS_OPEN_WRITE | FS_OPEN_CREAT)) != 0U &&
+        sip_guard_write(path) != E_OK) {
+        return 0;
+    }
     fs_volume_t *vol = 0;
     const char *rel;
     fs_node_t *node;
@@ -763,6 +769,7 @@ int fs_stat_cred_impl(const char *path, fs_stat_t *out, const fs_cred_t *c)
 
 static int mkdir_impl(const char *path, const fs_cred_t *c)
 {
+    if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
     fs_node_t *node;
@@ -804,6 +811,7 @@ int fs_mkdir_cred_impl(const char *path, const fs_cred_t *c)
 
 static int unlink_impl(const char *path, const fs_cred_t *c)
 {
+    if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
     fs_node_t *node;
@@ -944,6 +952,10 @@ static bool dir_is_inside(fs_node_t *dir, fs_node_t *node)
 static int ramfs_rename_impl(const char *oldrel, const char *newrel,
                              const fs_cred_t *c)
 {
+    /* 源和目标任一在受保护目录都拒绝（rename 会同时改两边目录项） */
+    if (sip_guard_write(oldrel) != E_OK || sip_guard_write(newrel) != E_OK) {
+        return E_ACCES;
+    }
     fs_volume_t *ovol = 0;
     fs_volume_t *nvol = 0;
     fs_node_t *odir = 0;

@@ -163,7 +163,10 @@ static void test_rollback(void)
 
     if (blob == 0) { kprintln("pkg: catalog missing " PKG_BROKEN); return; }
 
-    /* 预置：system:/System/Packages/broken/1.0.0/keep.txt（非空目录） */
+    /* 预置：system:/System/Packages/broken/1.0.0/keep.txt（非空目录）。
+     * SIP-lite 开启后这些路径只有更新器能写，所以测试用 updater scope 模拟
+     * "另一个安装器留下的目录"。 */
+    sip_updater_enter();
     (void)fs_mkdir("system:/System");
     (void)fs_mkdir("system:/System/Packages");
     (void)fs_mkdir("system:/System/Packages/broken");
@@ -176,6 +179,7 @@ static void test_rollback(void)
             fs_close(h);
         }
     }
+    sip_updater_exit();
 
     r = pkg_install(blob->data, blob->len, 0U, msg, sizeof(msg));
 
@@ -195,9 +199,11 @@ static void test_rollback(void)
     }
 
     /* 清理预置目录，避免影响后续（keep.txt + 两级目录） */
+    sip_updater_enter();
     (void)fs_unlink("system:/System/Packages/broken/1.0.0/keep.txt");
     (void)fs_unlink("system:/System/Packages/broken/1.0.0");
     (void)fs_unlink("system:/System/Packages/broken");
+    sip_updater_exit();
 }
 
 /* 5 + 10：卸载运行中的服务，然后重装并确认服务重新上线 */
