@@ -38,6 +38,15 @@ if (-not $ServerUrl) {
     exit 1
 }
 
+# 开关：keys/notify.flag 内容为 off/0/false/no 时静默跳过（-Force 可强制）
+$flag = Join-Path $repo 'keys\notify.flag'
+if ((-not $Force) -and (Test-Path $flag)) {
+    $v = (Get-Content $flag -Raw).Trim()
+    if ($v -match '^(off|0|false|no)$') {
+        Write-Host 'notify-bark: disabled (keys/notify.flag)'
+        exit 0
+    }
+}
 $payload = [ordered]@{
     title = $Title
     body  = $Body

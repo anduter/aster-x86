@@ -55,3 +55,4 @@ desktop.ini
 
 # Bark 推送 URL（含 key，本地保留）
 keys/*.url
+keys/*.key
