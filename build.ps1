@@ -493,6 +493,19 @@ if ($Test -or $Shot) {
     }
 
     T 'boot ready'
+    # 组件模型回归线程（pkgtest）会并发安装/卸载服务。它跑完之前注入按键会被抢：
+    # shell 阻塞在 fork/wait 时键盘缓冲会丢字符（sectest 曾被拼成 "sectesecho hi"）。
+    # 先等它收尾，再注入命令——这是"等被测系统就绪"，不是放宽断言。
+    if ($Test) {
+        $pkgDeadline = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $pkgDeadline) {
+            if (Test-Path $serial) {
+                $snap = Get-Content $serial -Raw -ErrorAction SilentlyContinue
+                if ($snap -and $snap.Contains('pkg: selftest done')) { break }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
     if ($Test) {
         try {
             Write-Host ("  [inject command: {0}]" -f $Keys) -ForegroundColor DarkGray

@@ -416,9 +416,12 @@ static void step_programs(void)
         kprintln("proc: ring3probe spawn failed");
     }
 
-    /* 组件模型回归：独立线程，启动窗口过后自动跑（断言行由 build.ps1 收集） */
-    if (proc_spawn("pkgtest") == 0) {
-        kprintln("proc: pkgtest spawn failed");
+    /* 组件模型回归：只在测试构建里跑（会安装/卸载组件，生产启动不应做这些）。
+     * 断言行由 build.ps1 收集；测试脚本会等 "pkg: selftest done" 再注入按键。 */
+    if (boot_test_build()) {
+        if (proc_spawn("pkgtest") == 0) {
+            kprintln("proc: pkgtest spawn failed");
+        }
     }
 
     /* 多核调度回归：4 个忙等线程由负载放置决定落在哪颗核上（不看名字）。

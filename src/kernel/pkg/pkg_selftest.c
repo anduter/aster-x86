@@ -284,10 +284,12 @@ static void test_user_app(void)
 
 void pkg_selftest_entry(void)
 {
-    /* 给 supervisor/echosvc/shell 留出注册与启动窗口（也把串口顺序稳定下来） */
-    proc_sleep_ticks(150U);
-    (void)wait_service("supervisor", 1, 200U);
-    (void)wait_service("pkgd", 1, 200U);
+    /* 越早跑越好：这段回归会阻塞等 supervisor/echosvc，必须赶在 ring3 shell
+     * 进入交互（build.ps1 注入按键）之前结束，否则按键注入会和这里的
+     * 调度/IO 抢时间，导致输入被丢字符（曾表现为 sectest 命令被拼坏）。 */
+    proc_sleep_ticks(10U);
+    (void)wait_service("supervisor", 1, 100U);
+    (void)wait_service("pkgd", 1, 100U);
 
     test_install_lifecycle();
     test_bad_signature();
