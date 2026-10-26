@@ -51,15 +51,28 @@ int svc_syscall(interrupt_frame_t *f)
         rfd = fd_alloc_kind(p, FD_KIND_PIPE_R, (uint32_t)idx, FD_RIGHT_READ);
         wfd = fd_alloc_kind(p, FD_KIND_PIPE_W, (uint32_t)idx, FD_RIGHT_WRITE);
         if (rfd < 0 || wfd < 0) {
+            /* pipe_create() 预置了 1 读 + 1 写引用；失败时两个 fd 都不要了，
+             * 必须把两侧引用都还回去，否则槽位永久泄漏。 */
             if (rfd >= 0) memset(&p->fds[rfd], 0, sizeof(p->fds[rfd]));
             if (wfd >= 0) memset(&p->fds[wfd], 0, sizeof(p->fds[wfd]));
+            pipe_unref_read(idx);
+            pipe_unref_write(idx);
             ret = -1;
             break;
         }
 
         fds[0] = rfd;
         fds[1] = wfd;
-        ret = (copy_to_user((void *)(uintptr_t)f->ebx, fds, sizeof(fds)) == E_OK) ? 0 : -1;
+        if (copy_to_user((void *)(uintptr_t)f->ebx, fds, sizeof(fds)) != E_OK) {
+            /* 用户缓冲坏了：把刚分配的两端还回去，不能留下不可见的 fd/管道。 */
+            memset(&p->fds[rfd], 0, sizeof(p->fds[rfd]));
+            memset(&p->fds[wfd], 0, sizeof(p->fds[wfd]));
+            pipe_unref_read(idx);
+            pipe_unref_write(idx);
+            ret = -1;
+            break;
+        }
+        ret = 0;
         break;
     }
     case SYS_DUP2: {
@@ -87,6 +100,10 @@ int svc_syscall(interrupt_frame_t *f)
         p->fds[newfd] = *old;
         if (p->fds[newfd].kind == FD_KIND_PIPE_W) {
             pipe_ref_write((int)p->fds[newfd].handle);
+        } else if (p->fds[newfd].kind == FD_KIND_PIPE_R) {
+            /* 读端也是共享资源：dup 后两份 fd 各自持有一个读引用，close 一份
+             * 不会把管道槽位释放掉（否则另一份会读到 -1 或复用后的别家数据）。 */
+            pipe_ref_read((int)p->fds[newfd].handle);
         } else if (p->fds[newfd].kind == FD_KIND_FILE) {
             if (fs_ref_ex(p->fds[newfd].fs_be, (int)p->fds[newfd].handle) != E_OK) {
                 /* 该后端不支持句柄共享（如 FAT16）：拒绝 dup2，避免双重关闭 */

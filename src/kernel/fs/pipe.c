@@ -17,6 +17,7 @@ typedef struct {
     uint8_t  buf[PIPE_SIZE];
     uint32_t head, tail, count;
     uint32_t writers;
+    uint32_t readers;       /* 读端引用计数（fork/dup2 会增加） */
 } pipe_t;
 
 static pipe_t pipes[PIPE_MAX];
@@ -34,6 +35,7 @@ int pipe_create(void)
             memset(&pipes[i], 0, sizeof(pipes[i]));
             pipes[i].used = true;
             pipes[i].writers = 1U;      /* 创建时算一个写端 */
+            pipes[i].readers = 1U;      /* 创建时算一个读端 */
             spin_unlock_irqrestore(&pipe_lock, flags);
             return i;
         }
@@ -121,15 +123,43 @@ void pipe_ref_write(int idx)
     spin_unlock_irqrestore(&pipe_lock, flags);
 }
 
+/* 读写端引用都归零才释放槽位。管道里残留的未读数据此时已没有合法读者，
+ * 可以一并丢弃；否则“先关读端、后关写端”会让槽位永久泄漏（8 个槽位用完后
+ * 所有 pipe() 都失败）。调用方必须已持有 pipe_lock。 */
+static void pipe_maybe_free_locked(int idx)
+{
+    if (pipes[idx].used &&
+        pipes[idx].readers == 0U && pipes[idx].writers == 0U) {
+        pipes[idx].used = false;
+    }
+}
+
 void pipe_unref_write(int idx)
 {
     uint32_t flags;
 
     if (idx < 0 || idx >= PIPE_MAX) return;
     flags = spin_lock_irqsave(&pipe_lock);
-    if (pipes[idx].used && pipes[idx].writers > 0U) pipes[idx].writers--;
+    if (pipes[idx].used && pipes[idx].writers > 0U) {
+        pipes[idx].writers--;
+        pipe_maybe_free_locked(idx);
+    }
     spin_unlock_irqrestore(&pipe_lock, flags);
     proc_wakeup(PROC_WAIT_PIPE);
+}
+
+/* fork/dup2 复制读端时增加引用：否则任一副本 close 时 readers 提前归零，
+ * 槽位被释放（甚至被新 pipe 复用），另一份 fd 读到 -1 或别的管道的数据。 */
+void pipe_ref_read(int idx)
+{
+    uint32_t flags;
+
+    if (idx < 0 || idx >= PIPE_MAX) return;
+    flags = spin_lock_irqsave(&pipe_lock);
+    if (pipes[idx].used && pipes[idx].readers < 0xFFFFFFFFU) {
+        pipes[idx].readers++;
+    }
+    spin_unlock_irqrestore(&pipe_lock, flags);
 }
 
 void pipe_unref_read(int idx)
@@ -138,8 +168,9 @@ void pipe_unref_read(int idx)
 
     if (idx < 0 || idx >= PIPE_MAX) return;
     flags = spin_lock_irqsave(&pipe_lock);
-    if (pipes[idx].used && pipes[idx].writers == 0U && pipes[idx].count == 0U) {
-        pipes[idx].used = false;
+    if (pipes[idx].used && pipes[idx].readers > 0U) {
+        pipes[idx].readers--;
+        pipe_maybe_free_locked(idx);
     }
     spin_unlock_irqrestore(&pipe_lock, flags);
     proc_wakeup(PROC_WAIT_PIPE);
@@ -153,6 +184,8 @@ void pipe_fork_inherit(struct process *child)
         if (!child->fds[i].used) continue;
         if (child->fds[i].kind == FD_KIND_PIPE_W) {
             pipe_ref_write((int)child->fds[i].handle);
+        } else if (child->fds[i].kind == FD_KIND_PIPE_R) {
+            pipe_ref_read((int)child->fds[i].handle);
         }
     }
 }
