@@ -557,21 +557,83 @@ static int net_tcp_recv(uint16_t src_port, uint32_t spins, uint8_t *flags,
  * 只做 IPv4 + 以太网的封装（目的 MAC 用网关 MAC：现有自检的对端都是网关
  * 10.0.2.2）；不做分片、不做 ARP（启动自检已经拿到 gw_mac）。
  * ========================================================================== */
+/* ---- 本地回环：目的 IP 是本机时不经网卡，帧直接进软件 RX 队列 ----
+ *
+ * QEMU slirp 不转发 guest 的 127.0.0.1，TCP listen/accept 自检需要“本机客户端
+ * 连本机服务端”的路径，所以把 net_ip_send 的“目的 = 本机 IP”这一支做成回环：
+ * 帧推进下面的小队列，net_rx_frame 优先从队列取，协议栈看到的与真收包一致
+ * （仍然过 IPv4/TCP 解析与校验和）。正常开机路径不会产生这种帧。 */
+#define NET_LOOP_QMAX      8U
+#define NET_LOOP_FRAME_MAX 1600U
+
+static struct {
+    uint32_t len;
+    uint8_t  data[NET_LOOP_FRAME_MAX];
+} net_loop_q[NET_LOOP_QMAX];
+static uint32_t   net_loop_head;
+static uint32_t   net_loop_count;
+static spinlock_t net_loop_lock = SPINLOCK_INIT;
+
+int net_loopback_push(const uint8_t *frame, uint32_t len)
+{
+    uint32_t flags;
+    uint32_t slot;
+
+    if (frame == 0 || len == 0U || len > NET_LOOP_FRAME_MAX) return -1;
+
+    flags = spin_lock_irqsave(&net_loop_lock);
+    if (net_loop_count == NET_LOOP_QMAX) {          /* 满：丢最旧的 */
+        net_loop_head = (net_loop_head + 1U) % NET_LOOP_QMAX;
+        net_loop_count--;
+    }
+    slot = (net_loop_head + net_loop_count) % NET_LOOP_QMAX;
+    net_loop_q[slot].len = len;
+    memcpy(net_loop_q[slot].data, frame, len);
+    net_loop_count++;
+    spin_unlock_irqrestore(&net_loop_lock, flags);
+    return 0;
+}
+
+static int net_loopback_pop(uint8_t *buf, uint32_t max)
+{
+    uint32_t flags;
+    uint32_t len = 0U;
+
+    flags = spin_lock_irqsave(&net_loop_lock);
+    if (net_loop_count != 0U) {
+        len = net_loop_q[net_loop_head].len;
+        if (len > max) len = max;
+        memcpy(buf, net_loop_q[net_loop_head].data, len);
+        net_loop_head = (net_loop_head + 1U) % NET_LOOP_QMAX;
+        net_loop_count--;
+    }
+    spin_unlock_irqrestore(&net_loop_lock, flags);
+    return (int)len;
+}
+
 int net_ip_send(const uint8_t dst_ip[4], uint8_t proto,
                 const uint8_t *payload, uint32_t len)
 {
     static uint8_t f[1600];
     uint8_t *ip = f + 14;
     uint32_t total = 20U + len;
+    int loopback;
 
     if (dst_ip == 0 || payload == 0 || total > 1480U) return -1;
-    if ((gw_mac[0] | gw_mac[1] | gw_mac[2] | gw_mac[3] | gw_mac[4] | gw_mac[5]) == 0) {
+    loopback = (memcmp(dst_ip, local_ip, 4) == 0);
+    if (!loopback &&
+        (gw_mac[0] | gw_mac[1] | gw_mac[2] | gw_mac[3] | gw_mac[4] | gw_mac[5]) == 0) {
         return -1;
     }
 
     memset(f, 0, 14U + total);
-    memcpy(f, gw_mac, 6);
-    e1000_mac(f + 6);
+    if (loopback) {
+        e1000_mac(f + 6);
+        memcpy(f, f + 6, 6);            /* 回环：源/宿 MAC 都是本机 */
+    } else {
+        memcpy(f, gw_mac, 6);
+        e1000_mac(f + 6);
+    }
     f[12] = 0x08; f[13] = 0x00;
 
     ip[0] = 0x45;
@@ -584,12 +646,17 @@ int net_ip_send(const uint8_t dst_ip[4], uint8_t proto,
     wr16(ip + 10, checksum(ip, 20));
     memcpy(ip + 20, payload, len);
 
+    if (loopback) return net_loopback_push(f, 14U + total);
     return (e1000_send_frame(f, 14U + total) == E_OK) ? 0 : -1;
 }
 
 int net_rx_frame(uint8_t *buf, uint32_t max)
 {
+    int n;
+
     if (buf == 0) return -1;
+    n = net_loopback_pop(buf, max);
+    if (n > 0) return n;
     return e1000_rx_poll(buf, max);
 }
 
