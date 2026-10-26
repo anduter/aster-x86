@@ -781,6 +781,10 @@ if ($Test -or $Shot) {
             @{ Name = 'SIP 更新器作用域放行';      Ok = ($out -match 'sip: updater scope bypass ok') },
             @{ Name = 'SIP sip=0 可关闭';          Ok = ($out -match 'sip: sip=0 disables protection ok') },
             @{ Name = 'SIP 自检通过';              Ok = ($out -match 'sip: selftest PASS') }
+
+            # ---- FS 64KB / XFS1 v5（阶段 4a） ----
+            @{ Name = 'XFS1 v5 挂载 64KB 限额';    Ok = ($out -match 'fs: XFS1 v5 mounted, file limit 65536 bytes') },
+            @{ Name = '单文件 64KB 上限生效';      Ok = ($out -match 'fs: 64KB file limit ok \(wrote 65536 bytes, one-past rejected\)') }
         )
 
         T 'checks begin'

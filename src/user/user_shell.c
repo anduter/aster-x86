@@ -550,10 +550,11 @@ static const unsigned char rodata_ret[8] __attribute__((section(".rodata"), used
  *   mprotect（写保护、NX、COW、非法参数）。
  * 期望串口行见 docs/process-memory.md §5.7。
  *
- * 注意：shell ELF 要装进 ramfs 的 32KB 单文件上限（FS_FILE_MAX），而这一块
- * 自检代码在 -O0 下会把 .text 顶过 0x40004000 边界、让 .rodata 整体后移一页。
- * 这里只对“自检区块 + cmd_sectest”用 Os 编译（语义不变，只是代码更小），
- * 其余 shell 代码保持 -O0。改这里时记得跑一次 build 看 user_shell.elf 大小。
+ * 注意：shell ELF 要装进 ramfs 的单文件上限（阶段 4a 起 FS_FILE_MAX = 64KB；
+ * 之前是 40960）。这一块自检代码在 -O0 下会把 .text 顶过 0x40004000 边界、
+ * 让 .rodata 整体后移一页。这里只对“自检区块 + cmd_sectest”用 Os 编译（语义
+ * 不变，只是代码更小），其余 shell 代码保持 -O0。改这里时记得跑一次 build
+ * 看 user_shell.elf 大小。
  * ============================================================================= */
 #pragma GCC push_options
 #pragma GCC optimize ("Os")

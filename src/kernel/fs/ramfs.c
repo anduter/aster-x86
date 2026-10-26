@@ -30,6 +30,10 @@
  * ============================================================================= */
 static spinlock_t fs_lock = SPINLOCK_INIT;
 
+/* 当前挂载卷的单文件上限：新盘 64KB；挂载 v4 旧镜像先按 40960 限流，
+ * fs_sync 升级到 XFS1 v5 后放开（fs_write / fsck 都看这个值）。 */
+static uint32_t fs_limit_current = FS_FILE_MAX;
+
 #define fs_mount        fs_mount_impl
 #define fs_open         fs_open_impl
 #define fs_read         fs_read_impl
@@ -688,7 +692,7 @@ int fs_write(uint32_t handle, const void *buf, uint32_t len)
      * 不能"截断后返回短计数"：内核侧调用点大多把"返回值 == len"当成功，
      * 截断写入会让文件停在半截状态；而返回 0 又和"成功写了 0 字节"混淆。
      * 也不允许先写满再让下一次失败——那样原文件内容已被部分覆盖。 */
-    space = (f->offset < FS_FILE_MAX) ? (FS_FILE_MAX - f->offset) : 0U;
+    space = (f->offset < fs_limit_current) ? (fs_limit_current - f->offset) : 0U;
     if (len > space) return E_NOSPC;
 
     memcpy(f->node->data + f->offset, buf, len);
@@ -1077,7 +1081,7 @@ unsigned int fs_node_count(void)
 
         if (n->type == FS_TYPE_FILE) {
             file_count++;
-            if (n->size > FS_FILE_MAX) errors++;
+            if (n->size > fs_limit_current) errors++;
         } else if (n->type == FS_TYPE_DIR) {
             dir_count++;
             if (n->size != 0U) errors++;
@@ -1112,12 +1116,17 @@ unsigned int fs_node_count(void)
 }
 
 /* 磁盘布局（扇区 512 字节）：
- *   0        超级块
- *   1..12    inode 表（64 × 92 字节）
- *   13..511  数据区
+ *   0        超级块（512 字节，disk_super_t 用 pad 撑满一个扇区）
+ *   1..14    inode 表（64 × 108 字节）
+ *   15..     数据区
+ *
+ * v5（当前）：super 增加 max_file / data_bytes；单文件上限 64KB。
+ * v4（旧镜像）：没有这两个字段，挂载时按 FS_FILE_MAX_LEGACY 限流，
+ * 下一次 fs_sync 自动升级成 v5（文件仍在数据区，布局不变，无需迁移数据）。
  */
 #define DISK_MAGIC       "XFS1"
-#define DISK_VERSION     4U
+#define DISK_VERSION     FS_DISK_VERSION
+#define DISK_VERSION_LEGACY 4U
 #define DISK_INODE_MAX   64U
 #define DISK_INODE_LBA   1U
 #define DISK_INODE_SECT  14U   /* 64 × 108 = 6912 字节 → 14 扇区 */
@@ -1133,8 +1142,19 @@ typedef struct {
     uint32_t inode_lba;
     uint32_t data_lba;
     uint32_t volume_count;
+    uint32_t max_file;       /* v5：单文件上限（v4 镜像没有，按 legacy 处理） */
+    uint32_t data_bytes;     /* v5：数据区可用字节数（容量自检用） */
     char     volumes[FS_MAX_VOLUMES][FS_DRIVE_MAX];
+    uint8_t  pad[340];       /* 撑满 512 字节扇区：全部字段写完仍是 512B */
 } disk_super_t;
+
+/* 当前挂载卷的单文件上限：新盘 = FS_FILE_MAX；v4 旧镜像先按 40960 限流，
+ * fs_sync 升级到 v5 后放开。fs_write/fsck 都用它，而不是硬编码宏。 */
+static void set_file_limit(uint32_t limit)
+{
+    if (limit == 0U || limit > FS_FILE_MAX) limit = FS_FILE_MAX;
+    fs_limit_current = limit;
+}
 
 typedef struct {
     uint32_t used;
@@ -1223,8 +1243,14 @@ int fs_format_disk(const char *blk_name)
     super.inode_lba = DISK_INODE_LBA;
     super.data_lba = DISK_DATA_LBA;
     super.volume_count = 0U;
+    super.max_file = FS_FILE_MAX;
+    super.data_bytes = (blk->sector_count - DISK_DATA_LBA) * BLK_SECTOR;
 
     if (blk_write(blk, 0U, &super) != E_OK) return E_INVAL;
+    set_file_limit(FS_FILE_MAX);   /* 新格式 = 64KB 上限 */
+    kprintf("fs: formatted %s as XFS1 v%u (file limit %u bytes, data %u KB)\n",
+            blk->name, (unsigned int)DISK_VERSION,
+            (unsigned int)fs_limit_current, (unsigned int)(super.data_bytes >> 10));
 
     memset(zero, 0, sizeof(zero));
     for (uint32_t s = 0; s < DISK_INODE_SECT; s++) {
@@ -1262,12 +1288,17 @@ int fs_sync(const char *blk_name)
     super.inode_size = (uint32_t)sizeof(disk_inode_t);
     super.inode_lba = DISK_INODE_LBA;
     super.data_lba = DISK_DATA_LBA;
+    super.max_file = FS_FILE_MAX;
+    super.data_bytes = (blk->sector_count - DISK_DATA_LBA) * BLK_SECTOR;
     super.volume_count = fs_volume_count();
     for (uint32_t v = 0; v < FS_MAX_VOLUMES; v++) {
         if (volumes[v].used) {
             strncpy(super.volumes[v], volumes[v].name, FS_DRIVE_MAX - 1U);
         }
     }
+
+    /* 写到盘上的就是 v5：v4 旧镜像在第一次 sync 时自动升级（数据区布局不变） */
+    set_file_limit(FS_FILE_MAX);
 
     memset(inode_buf, 0, sizeof(inode_buf));
     memcpy(inode_buf, dump_inodes, dump_count * sizeof(disk_inode_t));
@@ -1300,6 +1331,7 @@ int fs_mount_disk(const char *blk_name)
     static uint8_t inode_buf[DISK_INODE_SECT * BLK_SECTOR];
     static fs_node_t *by_index[DISK_INODE_MAX];
     disk_inode_t *inodes;
+    uint32_t limit;
 
     if (blk == 0) return E_NOENT;
     if (blk_read(blk, 0U, &super) != E_OK) return E_INVAL;
@@ -1312,6 +1344,22 @@ int fs_mount_disk(const char *blk_name)
         return E_INVAL;
     }
 
+    /* 版本策略：
+     *   v5（当前）：max_file 必须在 [legacy, 64KB] 之间，否则镜像不可信；
+     *   v4（旧镜像）：数据区布局相同，按 40960 限流挂载，下次 sync 自动升级；
+     *   其它：拒绝（不能拿错布局的镜像当本文件系统用）。
+     * 真正应用限额放在几何校验之后：几何不成立时不能改全局状态。 */
+    if (super.version == DISK_VERSION_LEGACY) {
+        limit = FS_FILE_MAX_LEGACY;
+    } else if (super.version == DISK_VERSION) {
+        if (super.max_file < FS_FILE_MAX_LEGACY || super.max_file > FS_FILE_MAX) {
+            return E_INVAL;
+        }
+        limit = super.max_file;
+    } else {
+        return E_INVAL;
+    }
+
     /* 几何字段必须自洽且落在设备范围内。否则按 data_lba 读会越界（块层会拒绝），
      * 但那时内存树已经清空、节点建了一半；先在"还没动内存状态"时拒绝。 */
     if (blk->sector_count < DISK_DATA_LBA ||
@@ -1320,6 +1368,17 @@ int fs_mount_disk(const char *blk_name)
         super.data_lba < DISK_DATA_LBA ||
         super.data_lba >= blk->sector_count) {
         return E_INVAL;
+    }
+    /* v5 的容量字段必须落在设备范围内（v4 没有这个字段，按布局推算） */
+    if (super.version == DISK_VERSION && super.data_bytes != 0U &&
+        super.data_lba * BLK_SECTOR + super.data_bytes > blk->sector_count * BLK_SECTOR) {
+        return E_INVAL;
+    }
+
+    set_file_limit(limit);
+    if (super.version == DISK_VERSION_LEGACY) {
+        kprintf("fs: XFS1 v4 legacy image mounted, file limit %u bytes (upgrade on sync)\n",
+                (unsigned int)fs_limit_current);
     }
 
     /* 清空内存里的树和句柄，准备从盘恢复 */
@@ -1341,6 +1400,26 @@ int fs_mount_disk(const char *blk_name)
         fs_node_t *n;
 
         if (in->used == 0U) continue;
+
+        /* 损坏/越界 inode：size 超过当前限额、或数据区超出设备，整次挂载失败。
+         * 不做这个检查的话，按 size 往 n->data（FS_FILE_MAX）里 memcpy 会溢出。 */
+        if (in->used > 1U || in->type > (uint32_t)FS_TYPE_DIR) {
+            (void)mount_disk_fail();
+            return E_INVAL;
+        }
+        if (in->type == (uint32_t)FS_TYPE_FILE) {
+            if (in->size > fs_limit_current) {
+                (void)mount_disk_fail();
+                return E_INVAL;
+            }
+            if (in->size > 0U &&
+                (uint64_t)in->data_lba +
+                    (uint64_t)((in->size + BLK_SECTOR - 1U) / BLK_SECTOR) >
+                (uint64_t)blk->sector_count) {
+                (void)mount_disk_fail();
+                return E_INVAL;
+            }
+        }
 
         n = node_alloc();
         if (n == 0) {
@@ -1389,6 +1468,8 @@ int fs_mount_disk(const char *blk_name)
         }
     }
 
+    kprintf("fs: XFS1 v%u mounted, file limit %u bytes\n",
+            (unsigned int)super.version, (unsigned int)fs_limit_current);
     return E_OK;
 }
 

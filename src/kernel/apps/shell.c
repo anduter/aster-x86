@@ -140,7 +140,9 @@ static void cmd_file_ls(void)
 
 static void cmd_file_write(int argc, char **argv)
 {
-    char text[FS_FILE_MAX];
+    /* 64KB 的单文件上限不能再放内核栈上（会踩栈）：用静态缓冲。
+     * 内核 shell 只有一个实例，不存在重入问题。 */
+    static char text[FS_FILE_MAX];
     uint32_t n = 0;
     uint32_t h;
 
@@ -176,7 +178,7 @@ static void cmd_file_write(int argc, char **argv)
 
 static void cmd_file_read(const char *name)
 {
-    char buf[FS_FILE_MAX];
+    static char buf[FS_FILE_MAX];   /* 同上：64KB 不进内核栈 */
     uint32_t h = fs_open(name, FS_OPEN_READ);
     int n;
 

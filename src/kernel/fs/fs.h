@@ -6,7 +6,9 @@
 /* 文件系统模块（当前后端是内存卷；接口按“卷”设计，日后可换块设备后端） */
 #define FS_NAME_MAX     65    /* 文件名/目录名最长 64 字符（含结尾 0） */
 #define FS_PATH_MAX     256
-#define FS_FILE_MAX     40960 /* 单个文件最大字节数（放得下 ELF 程序和审计日志） */
+#define FS_FILE_MAX     65536 /* 单个文件最大字节数（64KB；shell/程序不再受 40KB 限制） */
+#define FS_FILE_MAX_LEGACY 40960 /* XFS1 v4 镜像的单文件上限（旧镜像兼容） */
+#define FS_DISK_VERSION 5u    /* XFS1 super 版本：v5 = 64KB 限额 + 容量字段 */
 #define FS_MAX_NODES    64    /* 节点池（文件 + 目录，所有卷共用） */
 #define FS_MAX_OPEN     32    /* 同时打开的文件句柄数 */
 #define FS_MAX_VOLUMES  4     /* 最多挂载几个卷（C: D: ...） */

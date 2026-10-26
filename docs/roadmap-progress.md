@@ -61,4 +61,26 @@
   2. 判定不解析符号链接（阶段 4b 落地后需补"解析后复查"）；
   3. 更新器作用域是内核可信标志，未做成 capability 表项。
 
+## 阶段 4a：FS 单文件 64KB + XFS1 v5
+
+- 状态：**完成**
+- `FS_FILE_MAX` 40960 → **65536**（任务卡写的 32768 是更早基线；仓库当时已是
+  40960），新增 `FS_FILE_MAX_LEGACY = 40960`。
+- `FS_DISK_VERSION = 5`：super 增加 `max_file` / `data_bytes` 并撑满 512B
+  （顺手修掉 164B 结构体被按 512B 写的越界读）；挂载接受 v4/v5：v4 按 40960
+  限流并打印 legacy 行，下次 `fs_sync` 自动升级为 v5（数据区布局不变）；
+  v5 的 `max_file` 必须落在 [40960, 65536]；其它版本拒绝。
+- 挂载时新增 inode 校验：`size > 限额` 或数据区超出设备 → 整次挂载失败
+  （之前损坏镜像可以打穿 64KB 的节点数据区）。
+- `.bss`：`nodes[64]` 从 2.6MB 涨到 4MB，`_kernel_end` 0x83ac64 → 0x9e1f04；
+  heap arena 自动抬到 0x9e2000，仍剩 14.4MB（`HEAP_BASE` 不用改）。
+- 内核 shell 的 `file write/read` 缓冲移到 `static`（64KB 不能放栈上）。
+- 检查项：**156 → 158**。
+- 测试证据：`=== TEST PASS (158/158) ===`（`serial-fs1.log`）；
+  `fs: XFS1 v5 mounted, file limit 65536 bytes`、
+  `fs: 64KB file limit ok (wrote 65536 bytes, one-past rejected)`。
+- 遗留：FAT16 单文件上限仍是簇链限制；没有 v4 旧镜像的自动化测试（兼容路径
+  靠代码 + 文档，-Test 每次重建 disk.img）。（4b/4c 见下）
+
+
 

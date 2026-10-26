@@ -204,3 +204,27 @@ fs: backend selftest ok
   `FS_OPEN_WRITE|CREAT` 还会截断；加标志要同时改 ramfs/FAT 与 `sys_open_user`，
   本批未动；
 - 跨卷 rename（"copy + unlink" 语义）和 FAT16 目标替换：刻意不做，先保证语义清晰。
+
+## 8. 更新（阶段 4a）：单文件 64KB + XFS1 v5
+
+- `FS_FILE_MAX`：40960 → **65536**（任务卡写的 32768 是更早的基线，仓库当时已是
+  40960；这次直接到 64KB）。`FS_FILE_MAX_LEGACY = 40960` 留给旧镜像。
+- `FS_DISK_VERSION = 5`：
+  - super 增加 `max_file` / `data_bytes`，并用 `pad[340]` 撑满 512 字节
+    （之前 `blk_write(...,&super)` 只写了 164 字节结构体，块层却读 512 字节，
+    属于越界读；现在是完整扇区）；
+  - 挂载接受 **v4 与 v5**：v4 没有新字段，按 40960 限流并打印
+    `fs: XFS1 v4 legacy image mounted ...`，下一次 `fs_sync` 自动写 v5（数据区
+    布局未变，不需要迁移数据）；v5 的 `max_file` 必须在 [40960, 65536]；
+    其它版本直接拒绝；
+  - 挂载增加 inode 越界校验：`size > 当前限额`、`data_lba + 扇区数 > 设备容量`
+    都会让整次挂载失败（之前会按 size 直接 memcpy 进 64KB 的 `n->data`，损坏
+    镜像可以打穿节点）。
+- ramfs 节点数据 64KB → `nodes[64]` 的 `.bss` 从 2.6MB 涨到 4MB，`_kernel_end`
+  从 0x83ac64 抬到 0x9e1f04；`heap_init` 的 "arena 抬到镜像之后" 机制自动把它
+  挪到 0x9e2000（仍剩 14.4MB 可用），不需要改 `HEAP_BASE`。
+- 内核 shell 的 `file write/read` 缓冲从栈上移到 `static`（64KB×2 放栈上会踩栈）。
+- 回归：`fs: XFS1 v5 mounted, file limit 65536 bytes` 与
+  `fs: 64KB file limit ok (wrote 65536 bytes, one-past rejected)`，
+  `build.ps1 -Test` 158/158。
+- 本批未做：FAT16 单文件上限（仍是簇链限制）、append 模式、跨卷 rename。
