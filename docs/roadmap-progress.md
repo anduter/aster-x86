@@ -121,3 +121,29 @@
 - 遗留：
   1. 同步收发（在途 1 段），没有流水线/SACK/窗口缩放；
   2. 无 IP 分片重组、无 ARP 解析（目的 MAC 用网关）、只有客户端侧。
+
+## 总览（2026-10-26 收尾）
+
+| 阶段 | 状态 | 提交 | 检查项 | 门禁 |
+| --- | --- | --- | --- | --- |
+| 1 push + GitHub CI | **blocked**（无远端/无 gh） | `6ac2c2e` | — | 不适用 |
+| 2 组件模型 MVP | 完成 | `211681d` + `c345847` | 131 → 146 | 2x PASS |
+| 3 SIP-lite | 完成 | `fe46acf` | 146 → 156 | 2x PASS |
+| 4a FS 64KB / XFS1 v5 | 完成 | `7ef13b5` | 156 → 158 | 2x PASS |
+| 4b 硬链接 / 符号链接 | 完成 | `58a3a4b` | 158 → 174 | 2x PASS |
+| 4c TCP 健壮性 | 完成 | `83f03d7` | 174 → 182 | 2x PASS |
+
+门禁证据（每阶段）：`tools/ci.ps1 -Full` → `build.ps1` + **连续 2 次
+`build.ps1 -Test` 全 PASS** + `check-deps 0` + BOM/parse + host 单测 + 收尾工作区干净。
+最终一次：`-Test run 1/2 (182/182)`、`run 2/2 (182/182)`、`=== CI PASS ===`。
+
+### 下一步（优先级）
+
+1. **解除阶段 1 的 blocked**：按 `docs/github-ci-blocked.md` 由用户提供远端并推送，
+   然后 `gh run list --workflow static.yml` 记录真实 run。
+2. 组件模型：把 `entry` 从"内核程序名"改成组件目录里的 ELF（`_pkgd` 已就绪，
+   容器格式不用改），补用户态 `pkg` 命令与多版本升级/回滚。
+3. SIP：符号链接已在写路径复查；剩下 FAT16/svc/blk 后端与"解析后再判"的完整覆盖。
+4. FS：硬链接持久化需要 XFS1 v6（inode 加 `link_to/nlink`），顺带把 `nlink`
+   暴露到用户态 stat。
+5. TCP：流水线发送/SACK/窗口缩放、IP 分片重组、listen/accept 与用户态 socket API。
