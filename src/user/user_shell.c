@@ -1479,6 +1479,16 @@ static int str2int(const char *s)
     return v;
 }
 
+/* 无符号十进制参数（审计/调试用：地址用十进制，避免 QMP sendkey 对
+ * 大写十六进制字符的处理差异） */
+static unsigned int str2unum(const char *s)
+{
+    unsigned int v = 0;
+
+    while (*s >= '0' && *s <= '9') v = v * 10U + (unsigned int)(*s++ - '0');
+    return v;
+}
+
 /* SIGTERM 处理函数：打印一行后返回（内核用蹦床做 sigreturn） */
 static void sig_handler(int sig)
 {
@@ -1920,6 +1930,17 @@ static void run_line(char *cmd)
     } else if (scmp(args[0], "kill") == 0 && nargs >= 3) {
         int r = sc(SYS_KILL, str2int(args[1]), str2int(args[2]), 0);
         printf("kill: ret=%d\n", r);
+    } else if (scmp(args[0], "sys") == 0 && nargs >= 2) {
+        /* 审计/调试用：直接发一条 legacy int 0x81，参数用十进制。
+         *   sys <nr> [a] [b] [c]   -> 打印返回值
+         * 只暴露 shell 本来就有的 ring3 权限，不新增内核入口。 */
+        unsigned int nr = str2unum(args[1]);
+        unsigned int a = (nargs >= 3) ? str2unum(args[2]) : 0U;
+        unsigned int b = (nargs >= 4) ? str2unum(args[3]) : 0U;
+        unsigned int c = (nargs >= 5) ? str2unum(args[4]) : 0U;
+        int r = sc((int)nr, (int)a, (int)b, (int)c);
+
+        printf("sys: nr=%u a=%u b=%u c=%u ret=%d\n", nr, a, b, c, r);
     } else if (scmp(args[0], "exit") == 0) {
         sc(SYS_EXIT, 0, 0, 0);
     } else {
