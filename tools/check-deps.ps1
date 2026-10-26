@@ -34,7 +34,7 @@ Set-Location $Repo
 $root = (Resolve-Path (Join-Path $Repo 'src/kernel')).Path
 $rootPrefix = $root.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
 
-$modules    = @('core','lib','mm','proc','dev','fs','net','svc','security','user','apps','include','ipc')
+$modules    = @('core','lib','mm','proc','dev','fs','net','svc','security','user','apps','include','ipc','pkg')
 $primitives = @('core/error.h','core/atomic.h','core/spinlock.h')
 
 # --- explicit syscall-subsystem exceptions (keep in sync with docs/modules.md) ---

@@ -17,6 +17,7 @@
 #include "include/userland.h"
 #include "include/apps.h"
 #include "include/security.h"
+#include "include/pkg.h"
 
 /* E820 内存映射表由加载器写在 0x5000（见 loader/sysinfo.asm） */
 #define E820_COUNT_ADDR  0x5000U
@@ -373,12 +374,17 @@ static void step_programs(void)
     /* 进程模块：把程序变成可调度的内核线程，然后交给调度器。
        shell 与 heartbeat 都是程序表里的程序，内核不解释任何命令。 */
     proc_init();
+    /* 组件服务 _pkgd：先建 port/注册服务，再让 supervisor 开始拉服务线程 */
+    pkgd_init();
     supervisor_init();
     if (proc_spawn("fsd") == 0) {
         kprintln("proc: fsd spawn failed");
     }
     if (proc_spawn("blkd") == 0) {
         kprintln("proc: blkd spawn failed");
+    }
+    if (proc_spawn("pkgd") == 0) {
+        kprintln("proc: pkgd spawn failed");
     }
     service_lifecycle_selftest();
     /* 生产入口 getty -> login -> shell 必须在程序表里（生产构建走这一条；
@@ -394,8 +400,7 @@ static void step_programs(void)
         }
     } else {
         kprintf("acct: login required (cmdline \"%s\") -> getty\n", boot_cmdline());
-        if (proc_spawn("getty") == 0) {
-            panic("cannot spawn getty program");
+        if (proc_spawn("getty") == 0) {            panic("cannot spawn getty program");
         }
     }
     if (proc_spawn("heartbeat") == 0) {
@@ -409,6 +414,11 @@ static void step_programs(void)
     }
     if (proc_spawn("ring3probe") == 0) {
         kprintln("proc: ring3probe spawn failed");
+    }
+
+    /* 组件模型回归：独立线程，启动窗口过后自动跑（断言行由 build.ps1 收集） */
+    if (proc_spawn("pkgtest") == 0) {
+        kprintln("proc: pkgtest spawn failed");
     }
 
     /* 多核调度回归：4 个忙等线程由负载放置决定落在哪颗核上（不看名字）。

@@ -11,6 +11,7 @@
 #include "include/apps.h"
 #include "include/apps.h"
 #include "include/userland.h"
+#include "include/pkg.h"
 
 static program_t programs[PROG_MAX];
 static uint32_t  count;
@@ -83,6 +84,9 @@ void prog_init(void)
     prog_register("fsd",       1, "ring3 userspace file service", prog_fsd_entry);
     prog_register("blkd",      1, "ring3 virtual block service", prog_blkd_entry);
     prog_register("spin",      1, "busy-wait 2s (scheduler load test)", spin_entry);
+    /* 组件模型：_pkgd 安装服务；pkgtest 是它的回归驱动（启动后自动跑一次） */
+    prog_register("pkgd",      1, "component package service (_pkgd)", pkgd_entry);
+    prog_register("pkgtest",   1, "component model regression (pkg)", pkg_selftest_entry);
 
     /* heartbeat 是验证 AP 调度/计时器的探针，亲和到 AP；其余程序按负载放置。 */
     (void)prog_set_flags("heartbeat", PROG_F_PIN_AP);

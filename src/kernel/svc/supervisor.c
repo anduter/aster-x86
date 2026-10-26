@@ -58,6 +58,32 @@ void supervisor_entry(void)
             ok = service_exists("supervisor") && service_exists("echo");
             kprintf("supervisor: manifest -> %s\n", ok ? "ok" : "missing");
             (void)chan_send(server, ok ? "ok" : "missing", ok ? 2U : 7U);
+        } else if (strncmp(name, "start:", 6) == 0) {
+            /* 组件安装后由 _pkgd 通知启动：按程序名拉起（程序表里的名字）。
+             * echosvc 已经在线时按"已在运行"处理，不重复拉起。 */
+            const char *prog = name + 6;
+
+            if (strcmp(prog, "echosvc") == 0 && service_exists("echo")) {
+                kprintf("supervisor: start %s already running\n", prog);
+            } else {
+                proc_t *p = proc_spawn(prog);
+                kprintf("supervisor: start %s -> %s\n", prog,
+                        (p != 0) ? "ok" : "failed");
+            }
+            (void)chan_send(server, "ok", 2U);
+        } else if (strncmp(name, "stop:", 5) == 0) {
+            /* 卸载运行中的组件：先停服务，等注册表里消失再让 _pkgd 删文件。 */
+            const char *prog = name + 5;
+
+            if (strcmp(prog, "echosvc") == 0) {
+                echosvc_request_stop();
+                for (uint32_t w = 0; w < 100U && service_exists("echo"); w++) {
+                    proc_sleep_ticks(1U);
+                }
+            }
+            ok = service_exists("echo") ? 0 : 1;
+            kprintf("supervisor: stop %s -> %s\n", prog, ok ? "ok" : "busy");
+            (void)chan_send(server, ok ? "ok" : "no", ok ? 2U : 2U);
         } else if (strcmp(name, "restart-echo") == 0) {
             /* 只负责停；先等旧服务注销，再让客户端去等 svcwatch 拉起的新服务。 */
             echosvc_request_stop();

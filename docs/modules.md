@@ -64,6 +64,7 @@ src/
 │  ├─ net/                         M5：net 协议栈（e1000 在 dev/net）
 │  ├─ svc/                         M6：service、supervisor、channel、port
 │  ├─ security/                    M7：trust、cap、cpu features
+│  ├─ pkg/                         M9：组件包 .pkg 解析/验签、_pkgd 安装服务、组件 DB
 │  ├─ user/                        M8 内核侧：loader、entry、program registry
 │  └─ apps/                        内核启动的服务程序
 └─ user/                           M8 用户态：ulib、user_shell、链接脚本
@@ -76,6 +77,7 @@ M0 → M2 → M1 → M3 → M4
               ↘ M5
 M6 →（M1/M2/M4/M5）
 M7 →（M1/M2/M4）
+M9 →（M4/M6/M7）
 M8 → 只依赖用户态 ABI（src/user/ulib.h）
 ```
 
