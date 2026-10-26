@@ -337,6 +337,9 @@ irq: pit rate ok (1200 ticks / 14 s)      ← 2x 回归时是 ~6s，打印 FAIL
     `tools/audit-smp*.ps1`）
   - `43b0720` `[audit-smp] NMI watchdog BSP tick-stall check; docs: tcptest
     A/B 10%->0% root cause, build.ps1 check lines, tcp repro script`
+  - `68183ba` `[audit-smp] docs: final regression numbers ...`
+  - `ea5da7a` `[fix] intc: PIT mode 2 (one pulse/period) - v0.74 tick was 2x
+    after IRQ0 moved to IOAPIC; add 'irq: pit rate ok' selftest`（§3.9）
 
 ## 5.1 可直接并入 `build.ps1` 的检查项（给父会话）
 
