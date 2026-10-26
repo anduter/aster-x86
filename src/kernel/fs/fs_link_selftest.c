@@ -97,10 +97,12 @@ static int v5_mount_compat(void)
     }
     if (fs_mount_disk("ram0") != E_OK) {
         kprintln("fs: xfs v5 mount FAILED");
+        (void)fs_mount_disk(backing);
         return -1;
     }
     if (fs_volume_count() != 0U) {
         kprintln("fs: xfs v5 empty image has unexpected volumes");
+        (void)fs_mount_disk(backing);
         return -1;
     }
     /* 恢复真实卷；v5 -> v6 的升级由后面的 fs_sync 完成 */
