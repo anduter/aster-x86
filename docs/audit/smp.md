@@ -31,9 +31,12 @@
 | 2 | lost wakeup | `proc/sched.c`、`proc/process.c` | check→block 窗口内的唤醒被丢，waitpid/pipe/getchar 永久睡 | `wake_pending` latch + `sched_block_begin()` 锁内消费 |
 | 3 | runqueue 损坏 | `proc/process.c`、`proc/sched.c` | hlt 阻塞分支返回后未重新入队 → RUNNING 不在任何 runq → 永久饿死 | `proc_block()` 返回前 `sched_enqueue()`；新增 RUNNING⇒在队断言 |
 | 4 | 全局分配器竞态 | `mm/vmm.c` | 并发 vmalloc 拿到同一虚拟区间/重复释放物理页 | `vm_lock` 保护 bitmap+映射+释放 |
+| 5 | 看门狗盲区（加固） | `dev/intc/apic.c` | BSP PIT 停摆被 AP syscall 掩盖，静默 hang | NMI 里检查 BSP tick 停摆（~2s）并 panic |
 
-汇总：**4 个并发 bug**（其中 #3 是静默饿死、#1 可导致双核同栈执行/pid 重复）。
-另接收 `audit-syscall` 的 3 个 P0（§3.5–§3.7），共 7 项修复。
+汇总：**4 个并发 bug**（其中 #3 是静默饿死、#1 可导致双核同栈执行/pid 重复），
+外加 1 处看门狗加固；`tcptest` 偶发卡死（A/B 10% → 0%）是 #3 的下游表现，
+不是独立 bug。另接收 `audit-syscall` 的 3 个 P0（§3.5–§3.7），共 7 项修复
++ 1 项加固。
 
 ### 3.1 并发 fork/spawn 的槽位与 pid 分配竞态（bug 1）
 
@@ -175,6 +178,44 @@ uaccess 层统一：
 否则 SYS_KILL 返回 -1。
 回归：`audit: kill uid policy ok (root/self/same-uid/other)`。
 
+### 3.8 追加：tcptest 偶发卡死 = 同一个“RUNNING 未入队”饥饿（bug 3）
+
+audit-net 报：启动负载下 `tcptest` 偶发卡住，60s 内既没有
+`net: tcp selftest PASS` 也没有 `proc: pid .. (tcptest) exited`；QMP 现场
+曾见 CPU0 在 `memset` 且 `EFL.IF=0`。本会话用 2 核、带宿主 TCP/UDP echo
+（45445）的启动循环复现/验证：
+
+- **修复前（基线 `38161af`）**：tcptest 会卡在 `timer_ticks()` 驱动的 RTO/accept
+  等待里；缺少 PASS/exit 行（见 `obj/audit/base-repro.out` 的 A/B 记录）。
+- **根因不是长 memset/IF 丢失**：`memset` 的关中断调用点只有 pmm 毒化
+  （单页 4KB，AP 栈启动期 16 页）和 vmalloc 块，量级是微秒；`proc_block` /
+  `proc_switch_to` 的 IF 保存恢复成对（入口 pushfl → 出口 popfl；新线程由
+  `thread_trampoline` `sti`；中断里切换由 iret 恢复被打断的 EFLAGS），没有
+  找到 IF=0 泄漏。
+- **真正原因**：tcptest 在 `proc_sleep_ticks(1)`/accept 等待中 `proc_block`
+  时，如果 CPU 上没有别的 READY 会进 `sti;hlt` 分支；被 tick 唤醒后（唤醒方
+  只置 `wake_pending`）旧代码直接返回，进程以 RUNNING 身份继续跑却**不在
+  任何 runq_mask 里**（§3.3）。随后时间片到期被置 READY，`sched_next()`
+  永远选不到它；tcptest 的所有超时都依赖 `timer_ticks()`，而它自己再也跑
+  不到检查超时的那一行 → 表现为“PASS/exit 行消失”，且 BSP 仍在正常跑
+  （所以看门狗不炸）。QMP 采样到 CPU0 在 memset/IF=0 只是那一瞬间 BSP 正在
+  做 PMM 毒化，不是根因。
+- **验证（A/B）**：同一脚本（2 核、宿主 TCP/UDP echo、每次启动等 60s 看
+  `tcptest exited`）：
+  - 基线 `38161af`（隔离 worktree，构建 38161af 自己的 -Test 镜像）：
+    **10 次命中 1 次（10%）**。失败现场（`obj/audit/base-repro.out` run 3）：
+    `tcptest_exit=False tcp_pass=False heartbeats=87`，QMP `info registers`：
+    `CPU#0 ... EFL=00000246 [IF=1] HLT=1 CR3=019f7000`——CPU0 停在
+    `proc_block()` 的 `sti;hlt` 分支里（current=某进程、页目录还是进程的），
+    不是 memset/IF=0，也不是 PIT 停摆（BSP ticks 在走、AP 心跳到 87）。
+  - 修复后同一脚本：**20/20 次 60s 内看到 PASS + exit（0% 命中）**
+    （`obj/audit/tcp-repro2.out` 10/10、`obj/audit/tcp-repro3.out` 10/10）。
+- **看门狗盲区**：`progress_now() = timer_ticks() + syscall_count()`，SMP 下
+  AP 的 syscall 会掩盖 BSP PIT 停摆。`dev/intc/apic.c` 新增 BSP tick 停摆
+  检查：NMI（由 BSP 自己的 LAPIC 定时器投递，不受 IF 影响）连续 8 次
+  （~2s）看到 `per_cpu[0].ticks` 不前进就 panic，打印 eip/global ticks/
+  syscall 数，把“BSP 关中断锁死但 AP 还在跑”从静默 hang 变成可诊断 panic。
+
 ## 4. 复现（负向）与证据
 
 负向构建 = 临时还原某一条旧逻辑，其余修复保留，用同一个自检跑 2 核启动；
@@ -225,6 +266,34 @@ uaccess 层统一：
   `tools/audit-smp-soak.ps1 -Minutes 12`（QMP 注入 `sectest/fork/linktest`
   循环，4 核 fork/exit/mmap/signal 压测），结果见 `obj/audit/smp4-soak.log`。
 - 提交：`audit-smp` 提交（本文件与修复同一提交），哈希在 `git log` 中。
+
+## 5.1 可直接并入 `build.ps1` 的检查项（给父会话）
+
+正例（全部在 `-Test` 的 2 核/4 核启动里出现；建议加 8 条）：
+
+```powershell
+@{ Name='sigreturn 帧校验';     Ok = ($out -match 'audit: sigreturn frame validation ok \(user cs/ss, user eip, no iopl/nt/vm\)') },
+@{ Name='kill uid 策略';        Ok = ($out -match 'audit: kill uid policy ok \(root/self/same-uid/other\)') },
+@{ Name='uaccess 用户窗口';     Ok = ($out -match 'audit: uaccess user window ok \(kernel-low/3gb/wrap rejected\)') },
+@{ Name='SMP spawn 竞态';       Ok = ($out -match 'audit: smp spawn race PASS \(rounds=\d+\)') },
+@{ Name='SMP wake-vs-block';    Ok = ($out -match 'audit: smp wake-vs-block PASS \(latency=\d+ ticks\)') },
+@{ Name='vmalloc 并发';         Ok = ($out -match 'audit: mm vmalloc concurrent PASS \(iters=\d+\)') },
+@{ Name='SMP 自检总判定';       Ok = ($out -match 'audit: smp selftest PASS') },
+@{ Name='SMP 自检收尾';         Ok = ($out -match 'audit: smp selftest done') },
+```
+
+负向（只在临时还原旧代码时出现，**不要**作为 build.ps1 的期望行；用于确认
+自检的判别力，现场已存 `obj/audit/neg-*.log`、`obj/audit/base-repro.out`）：
+
+```text
+audit: smp spawn race FAIL (reason=1 ... slot0=22 slot1=22 pid0=29 pid1=29)
+audit: smp wake-vs-block FAIL (lost wakeup, waited=600 ticks)
+audit: mm vmalloc concurrent FAIL (worker timeout ack0=0 ack1=3 iters=1200 ... w0state=1)
+（基线 38161af，tcptest 60s 无 PASS/exit）run 3: tcptest_exit=False tcp_pass=False heartbeats=87
+```
+
+注意：`audit:` 前缀与 `acct:`/`fs:` 审计行不冲突；若父会话只想在 `-smp 2`
+检查，以上 8 条在 2 核上全部出现（4 核同样出现，`cpus=4`）。
 
 ## 6. 未修项 / 已知边界
 

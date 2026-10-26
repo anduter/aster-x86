@@ -34,6 +34,8 @@ static uint32_t calib_tick0;
 static uint32_t final_period;
 static uint32_t last_progress;
 static uint32_t stuck_count;
+static uint32_t bsp_last_ticks;      /* BSP PIT tick 快照（BSP 时钟停摆检测） */
+static uint32_t bsp_stall_count;
 static int      in_panic;
 
 uint32_t rdmsr_low(uint32_t msr)
@@ -175,6 +177,31 @@ static int nmi_watchdog(interrupt_frame_t *f)
 
     if (in_panic) return EXC_HANDLED;      /* 已经 panic，别递归 */
 
+    /* BSP 时钟停摆检测（audit-smp/audit-net 线索）：
+     *
+     * progress_now() = 全局 timer_ticks + syscall_count。timer_ticks 只由
+     * BSP 的 PIT 推进；SMP 下 AP 上的 syscall 也会让 syscall_count 增长，
+     * 于是“BSP 关中断/锁死、PIT 停摆”时 progress 仍然在变，旧看门狗永远不会
+     * 报警——表现为 tcptest 等依赖 timer_ticks 的线程卡 60s+ 而系统看似活着。
+     *
+     * 这里单独盯 BSP 的 per-CPU tick：NMI 由 BSP 自己的 LAPIC 定时器投递，
+     * 不受 IF 影响，连续 8 次（~2s）没有推进就 panic 留现场。正常路径只多
+     * 一次 32 位比较；AP 上的活动不会掩盖它。 */
+    if (wd_state == 2) {
+        uint32_t bsp_ticks = per_cpu[0].ticks;
+
+        if (bsp_ticks != bsp_last_ticks) {
+            bsp_last_ticks = bsp_ticks;
+            bsp_stall_count = 0;
+        } else if (++bsp_stall_count >= 8U) {
+            in_panic = 1;
+            panic("NMI watchdog: BSP ticks stalled ~2s (bsp_ticks=%u eip=%p "
+                  "global_ticks=%u syscalls=%u)",
+                  (unsigned int)bsp_ticks, (void *)(uintptr_t)f->eip,
+                  timer_ticks(), syscall_count());
+        }
+    }
+
     p = progress_now();
     if (p == last_progress) {
         stuck_count++;
@@ -243,6 +270,8 @@ void apic_tick(void)
 
         last_progress = progress_now();
         stuck_count = 0;
+        bsp_last_ticks = per_cpu[0].ticks;
+        bsp_stall_count = 0;
         wd_state = 2;
 
         kprintf("apic: NMI watchdog armed (period=%u counts, ~250ms)\n",
