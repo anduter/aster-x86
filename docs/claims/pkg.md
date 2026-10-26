@@ -136,15 +136,21 @@ CLI 自检由 `reexec` 传入 `--pkgcli` 触发（`build.ps1 -Test` 默认注入
 ## 5. 验证记录
 
 - 构建：`tools\session-run.ps1 -Name pkg` → exit 0（kernel 358656 bytes）。
-- 共享树上 `fs` / `eng` / `net` / `mm` 会话的 `session-run -Test` 在包含本改动的
-  工作树上各出现 `=== TEST PASS (182/182) ===`；串口里 §1 的 pkg 新增行全部
-  出现（`pkg: elf entry ok`、`pkg: elf entry verify ok`、`... tamper rejected`、
-  `pkg: user cli list/verify/install/policy deny/done`）。
-- 本会话自己的 `session-run -Name pkg -Test` 受共享宿主 12345 回显端口与 QMP
-  4511 的并行会话抢占影响，出现过几次 `no verdict captured`（不是断言失败）；
-  最终以锁/端口空出后的完整 PASS 为准。若你的环境里 `pkg 重装后服务重新上线`
-  仍红，先确认宿主机没有另一个直接跑 `build.ps1 -Test` 的会话占用 12345
-  （TCP 和 UDP 都要看）。
+- **本会话完整回归**（提交 `15d15b0` 之后，共享树 HEAD `5a27b09`）：
+
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File tools\session-run.ps1 -Name pkg -QmpPort 4521 -Test
+  # === TEST PASS (182/182) ===   elapsed=53.3s
+  ```
+
+  串口里 §1 的 12 行全部出现，另有原有 15 条 pkg 行：
+  `pkg: install echosvc-1.0.0 ok`、`pkg: supervisor start echosvc ok`、
+  `pkg: uninstall running service ok`、`pkg: reinstall service online ok` 等。
+- 交叉证据：同一工作树上的 `fs` / `eng` / `net` / `mm` 会话 `-Test` 也各出现
+  `=== TEST PASS (182/182) ===`，说明 77 分发与 ELF/argv 启动栈没有破坏原路径。
+- 并行环境注记：`12345` 要同时看 **TCP 和 UDP**；直接跑 `build.ps1 -Test`
+  的会话不受 `session-run` 锁保护，会抢端口/QMP。`pkg` 固定用
+  `-QmpPort 4521` 避开默认 4511 与其他会话的 QMP 撞车。
 
 ## 6. 已知限制
 
