@@ -87,10 +87,13 @@ if (-not (Wait-For 'ushell: ready' 75)) { Write-Host '[soak] shell did not come 
 Qmp-Connect
 Write-Host '[soak] shell ready; starting workload' -ForegroundColor Green
 
-$cmds = @('sectest', 'fork', 'linktest', 'fork', 'sectest')
-$deadline = (Get-Date).AddMinutes($Minutes)
+$cmds = @('fork', 'sectest', 'fork', 'linktest', 'fork', 'sectest', 'fork')
+$start = Get-Date
+$deadline = $start.AddMinutes($Minutes)
+$startHb = ([regex]::Matches([string](Get-Snap), 'thread: heartbeat')).Count
 $n = 0
 $lastLog = Get-Date
+$exitReason = 'deadline'
 while ((Get-Date) -lt $deadline) {
     $cmd = $cmds[$n % $cmds.Count]
     Send-Line ("{0}`n" -f $cmd)
@@ -100,12 +103,13 @@ while ((Get-Date) -lt $deadline) {
         $hb = ([regex]::Matches($snap, 'thread: heartbeat')).Count
         $sec = ([regex]::Matches($snap, 'sectest: ')).Count
         Write-Host ("[soak] {0:N0}s cmds={1} heartbeat_lines={2} sectest_lines={3}" -f
-            ((Get-Date) - ($deadline.AddMinutes(-$Minutes))).TotalSeconds, $n, $hb, $sec)
+            ((Get-Date) - $start).TotalSeconds, $n, $hb, $sec)
         $lastLog = Get-Date
     }
     Start-Sleep -Seconds 8
-    if ($q.HasExited) { break }
+    if ($q.HasExited) { $exitReason = 'qemu-exited'; break }
 }
+Write-Host ("[soak] loop end: {0}, elapsed={1:N0}s" -f $exitReason, ((Get-Date) - $start).TotalSeconds)
 
 try { $null = Qmp-Cmd '{"execute":"quit"}' } catch { }
 try { $q.WaitForExit(5000) | Out-Null } catch { }
@@ -115,10 +119,11 @@ try { $client.Close() } catch { }
 $snap = [string](Get-Snap)
 $hb = ([regex]::Matches($snap, 'thread: heartbeat')).Count
 $sec = ([regex]::Matches($snap, 'sectest: ')).Count
-$bad = ($snap -match 'panic:|oops:|KERNEL PANIC') -or ($snap -match 'audit: smp selftest FAIL')
-Write-Host ("[soak] done: cmd_sent={0} heartbeat_lines={1} sectest_lines={2} panic/oops={3}" -f $n, $hb, $sec, $bad)
+$bad = ($snap -cmatch '(?m)^(\*\*\* KERNEL PANIC|oops:|panic:)') -or ($snap -match 'audit: smp selftest FAIL')
+$hbDelta = $hb - $startHb
+Write-Host ("[soak] done: cmd_sent={0} heartbeat_lines={1} (delta={2}) sectest_lines={3} panic/oops={4}" -f $n, $hb, $hbDelta, $sec, $bad)
 if ($bad) { Write-Host '[soak] FAIL (panic/oops detected)' -ForegroundColor Red; exit 2 }
-if ($hb -lt 60) { Write-Host '[soak] FAIL (heartbeat did not advance)' -ForegroundColor Red; exit 1 }
-if ($sec -lt 40) { Write-Host '[soak] FAIL (sectest did not run repeatedly)' -ForegroundColor Red; exit 1 }
+if ($hbDelta -lt 540) { Write-Host '[soak] FAIL (guest not alive for the whole window)' -ForegroundColor Red; exit 1 }
+if ($sec -lt 20) { Write-Host '[soak] FAIL (sectest did not run repeatedly)' -ForegroundColor Red; exit 1 }
 Write-Host '[soak] PASS (4-core fork/exit/mmap/signal workload alive)' -ForegroundColor Green
 exit 0

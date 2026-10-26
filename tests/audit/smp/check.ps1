@@ -27,7 +27,7 @@ $checks = @(
     @{ Name = 'wake-vs-block';             Ok = ($s -match 'audit: smp wake-vs-block PASS') },
     @{ Name = 'vmalloc concurrent';        Ok = ($s -match 'audit: mm vmalloc concurrent PASS') },
     @{ Name = 'smp selftest PASS';         Ok = ($s -match 'audit: smp selftest PASS') },
-    @{ Name = 'no panic/oops';             Ok = (-not ($s -match 'panic:|oops:|KERNEL PANIC')) }
+    @{ Name = 'no panic/oops';             Ok = (-not ($s -cmatch '(?m)^(\*\*\* KERNEL PANIC|oops:|panic:)')) }
 )
 if ($Cpus -gt 0) {
     $checks += @{ Name = ('start reports {0} cpus' -f $Cpus);

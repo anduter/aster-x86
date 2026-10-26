@@ -262,10 +262,29 @@ audit-net 报：启动负载下 `tcptest` 偶发卡住，60s 内既没有
   audit: smp selftest done
   ```
 - 4 核：`tools/audit-smp-run.ps1 -Smp 4`（独立镜像 `.dist-audit-smp4`），
-  自检同样 PASS，`audit: smp selftest start (cpus=4)`。4 核 12 分钟浸泡：
-  `tools/audit-smp-soak.ps1 -Minutes 12`（QMP 注入 `sectest/fork/linktest`
-  循环，4 核 fork/exit/mmap/signal 压测），结果见 `obj/audit/smp4-soak.log`。
-- 提交：`audit-smp` 提交（本文件与修复同一提交），哈希在 `git log` 中。
+  自检同样 PASS，`audit: smp selftest start (cpus=4)`。
+- 4 核 12 分钟浸泡：`tools/audit-smp-soak.ps1 -Minutes 12`（QMP 注入
+  `sectest/fork/linktest` 循环，4 核 fork/exit/mmap/signal 压测）：
+  `heartbeat_lines=503`、`sectest: ` 行 370、13 个 sectest 块、**0 panic /
+  0 oops**、`audit: smp selftest PASS`；`obj/audit/smp4-soak.log`。
+  说明：没有宿主回显服务器时 `sectest: tcp` 必失败；同一 shell 反复 `sectest`
+  到第 4 次后 `SYS_MMAP` 会因该进程 4 个 mmap 槽位耗尽而失败（sectest 自己不
+  munmap），随后 fs/blk 服务连接也因同一进程的 fd/连接状态退化——这是测试
+  程序资源不释放，不是内核 panic/hang，与本次并发修复无关，记录为已知现象。
+- `build.ps1` 的 225 项断言里有 6 条写死 2 核字符串（`madt: 2 cpu`、
+  `2 cpu(s) discovered`、`2/2 cpus online, 1 AP`、`smp: 2 cpus online`、
+  `ack=1/1`、`sched: pid N (spin) running on cpu 1`），所以 4 核跑同一套
+  检查**按设计**是 **219/225**（其余 219 项全 PASS，含 audit 自检/TCP/pkg/
+  fs/mm）。4 核用自检 + 12 分钟浸泡 + `tests/audit/smp/check.ps1` 验证
+  （`audit: smp selftest start (cpus=4)` / `smp: 4/4 cpus online` /
+  `tlb shootdown ack=3/3 ok`），现场 `obj/audit/test-smp4full.log`。
+- 提交：
+  - `f1e05d9` `[audit-smp] SMP concurrency fixes: slot/pid race, lost wakeup,
+    unlinked RUNNING starvation, vmalloc lock; sigreturn/kill/uaccess P0s +
+    selftests`（16 files，含本文件、内核修复、`tests/audit/smp/`、两个
+    `tools/audit-smp*.ps1`）
+  - `43b0720` `[audit-smp] NMI watchdog BSP tick-stall check; docs: tcptest
+    A/B 10%->0% root cause, build.ps1 check lines, tcp repro script`
 
 ## 5.1 可直接并入 `build.ps1` 的检查项（给父会话）
 
