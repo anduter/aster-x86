@@ -3,7 +3,7 @@
 
 /* 系统名称与版本号：改版本只改这里，日志、标题栏、README 都引用它 */
 #define OS_NAME     "x86 OS"
-#define OS_VERSION  "0.74.0"
+#define OS_VERSION  "0.74.1"
 
 /* 编译时间戳（由编译器内置宏展开） */
 #define OS_BUILD    __DATE__ " " __TIME__
