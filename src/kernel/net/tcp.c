@@ -85,6 +85,7 @@ typedef struct {
     uint32_t iss;
     uint32_t snd_una;
     uint32_t snd_nxt;
+    uint32_t snd_max;           /* 已发送过的最高序号（含 SYN/FIN）：ACK 的上界 */
     uint32_t rcv_nxt;
 
     uint32_t srtt, rttvar, rto;
@@ -384,6 +385,10 @@ static void tcp_rtt_sample(uint32_t rtt)
 
 static void tcp_ack_received(uint32_t ack)
 {
+    /* audit-net V9：确认了"从未发送过"的数据 -> 伪造 ACK，直接忽略。
+     * 以前只做正数推进，猜中 4 元组的人发一个 ACK 就能让 tcp_send_wait
+     * 提前返回（数据其实没到对端 -> 静默丢数据）。 */
+    if ((int32_t)(ack - conn.snd_max) > 0) return;
     if (ack == conn.snd_una) {
         conn.dup_acks++;
         return;
@@ -778,6 +783,9 @@ static int tcp_send_wait(uint32_t seq, uint8_t flags,
     uint32_t retries = 0;
     bool retransmitted = false;
 
+    /* 记录"已发送上界"：FIN 也占一个序号。tcp_ack_received() 用它挡住
+     * 确认未发送数据的伪造 ACK。 */
+    conn.snd_max = seq + len + (((flags & TCP_FIN) != 0U) ? 1U : 0U);
     if (tcp_xmit_data(seq, conn.rcv_nxt, flags, data, len) != 0) return -1;
     start = timer_ticks();
 
@@ -837,6 +845,7 @@ static void tcp_reset_state(uint16_t lport, const uint8_t peer_ip[4], uint16_t p
     conn.iss = tcp_iss_mix();                /* 客户端 ISS 也不可预测 */
     conn.snd_una = conn.iss;
     conn.snd_nxt = conn.iss + 1U;
+    conn.snd_max = conn.iss + 1U;            /* SYN 占一个序号 */
     conn.rto = TCP_RTO_INIT;
     conn.cwnd = TCP_MSS;
     conn.ssthresh = TCP_RECV_MAX;
@@ -1272,6 +1281,7 @@ static int tcp_self_test_ooo(void)
     c->rcv_nxt = 1000U;
     c->snd_una = 5000U;
     c->snd_nxt = 5000U;
+    c->snd_max = 5000U;
     c->rto = TCP_RTO_INIT;
     c->lport = 15010U;
     c->peer_port = NET_ECHO_PORT;
@@ -1852,6 +1862,34 @@ static int tcp_audit_selftest(void)
     }
     kprintln("net: audit tcp receive accounting ok (partial segment not over-ACKed)");
 
+    /* ---- 2b) 伪造 ACK：确认"从未发送过"的数据不得推进 snd_una ---- */
+    memset(c, 0, sizeof(*c));
+    c->synthetic = true;
+    c->state = 2;
+    c->cwnd = TCP_MSS;
+    c->ssthresh = TCP_RECV_MAX;
+    c->rcv_nxt = 4000U;
+    c->snd_una = 0x7000U;
+    c->snd_nxt = 0x7000U;
+    c->snd_max = 0x7010U;
+    memset(&s, 0, sizeof(s));
+    s.seq = 4000U;
+    s.flags = TCP_ACK;
+    s.ack = 0x7010U + 0x1000U;           /* 远超 snd_max：伪造 */
+    (void)tcp_input(&s);
+    if (c->snd_una != 0x7000U) {
+        kprintf("net: audit tcp forged ACK advanced snd_una (now=%x)\n",
+                (unsigned int)c->snd_una);
+        return -1;
+    }
+    s.ack = 0x7010U;                     /* 正向对照：合法 ACK 必须生效 */
+    (void)tcp_input(&s);
+    if (c->snd_una != 0x7010U) {
+        kprintln("net: audit tcp valid ACK not applied");
+        return -1;
+    }
+    kprintln("net: audit tcp forged ACK ignored ok");
+
     /* ---- 3) 半开握手：最后一个 ACK 的 seq 必须正确 ---- */
     /* 前两个用例是 synthetic（不真收发包）；这里要真的走一遍 loopback 解析，
      * 所以先清掉 synthetic 并排空可能残留的回环帧。 */
@@ -1993,6 +2031,10 @@ int net_tcp_robust_selftest(void)
     }
     if (net_audit_selftest() != 0) {
         kprintln("net: tcp selftest FAILED (audit net)");
+        return -1;
+    }
+    if (nb_dns_audit_selftest() != 0) {
+        kprintln("net: tcp selftest FAILED (audit dns)");
         return -1;
     }
 

@@ -603,7 +603,65 @@ static void nb_dhcp_selftest(void)
  * DNS 解析（A 记录）
  * ============================================================================= */
 static uint16_t nb_dns_id;
-static uint16_t nb_dns_sport = 53000U;
+
+/* -----------------------------------------------------------------------------
+ * audit-net V8：DNS 事务 ID / 源端口的熵
+ *
+ * 原来是 `nb_dns_id++` + 源端口 `53000++`：两者都可预测，off-path 攻击者只要
+ * 猜中（或等到）一个窗口就能盲伪造 DNS 响应（缓存投毒）。这里用一个 xorshift
+ * PRNG，首次用 TSC 播种（TSC 在 net_init 之前就可用，不依赖中断）。
+ * -------------------------------------------------------------------------- */
+static uint32_t nb_rand_state;
+
+static uint32_t nb_rand(void)
+{
+    uint32_t x = nb_rand_state;
+
+    if (x == 0U) {
+        x = nb_rdtsc32() ^ 0x9E3779B9U;
+        if (x == 0U) x = 0x1234567U;
+    }
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    nb_rand_state = x;
+    return x;
+}
+
+static uint16_t nb_dns_next_id(void)
+{
+    uint16_t id = (uint16_t)nb_rand();
+
+    return (id != 0U) ? id : 1U;
+}
+
+/* V8 回归：连续 8 次取样必须有足够熵、且不能是简单递增。 */
+int nb_dns_audit_selftest(void)
+{
+    uint16_t ids[8];
+    uint32_t distinct = 0;
+    uint32_t consecutive = 0;
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0; i < 8U; i++) ids[i] = nb_dns_next_id();
+    for (i = 0; i < 8U; i++) {
+        for (j = 0; j < i; j++) {
+            if (ids[j] == ids[i]) break;
+        }
+        if (j == i) distinct++;
+    }
+    for (i = 1; i < 8U; i++) {
+        if ((uint16_t)(ids[i - 1U] + 1U) == ids[i]) consecutive++;
+    }
+    if (distinct < 6U || consecutive >= 6U) {
+        kprintln("net: audit dns txid NOT randomized");
+        return -1;
+    }
+    kprintf("net: audit dns txid entropy ok (distinct=%u/8)\n",
+            (unsigned int)distinct);
+    return 0;
+}
 
 static int nb_dns_build(uint8_t *buf, size_t cap, const char *name)
 {
@@ -736,13 +794,12 @@ static int nb_dns_query(const char *name, uint8_t out[4], uint32_t budget_ms)
 
     if (nb_arp_resolve(dns, mac, NB_ARP_BUDGET_MS) != 0) return -1;
 
-    nb_dns_id++;
-    if (nb_dns_id == 0U) nb_dns_id = 1U;
+    /* audit-net V8：事务 ID 与源端口都不可预测（原来是 id++ / sport++） */
+    nb_dns_id = nb_dns_next_id();
     n = nb_dns_build(msg, sizeof(msg), name);
     if (n < 0) return -1;
 
-    sport = nb_dns_sport++;
-    if (nb_dns_sport >= 59000U) nb_dns_sport = 53000U;
+    sport = (uint16_t)(53000U + (nb_rand() % 6000U));
 
     if (nb_send_udp(ip, dns, mac, sport, 53U, msg, (uint32_t)n) != 0) return -1;
 

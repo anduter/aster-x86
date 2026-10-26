@@ -35,6 +35,9 @@ int net_tcp_pid_orphan_listeners(int pid);
 /* net_syscall.c 的 SYS_LISTEN 兜底 listener 归属/上限负向用例，返回 0 = 全过。 */
 int net_syscall_audit_selftest(void);
 
+/* net_boot.c 的 DNS 事务 ID 熵用例（防 off-path 伪造响应），返回 0 = 全过。 */
+int nb_dns_audit_selftest(void);
+
 /* net.c 的畸形包负向用例（ARP 欺骗 / UDP 校验和 / 分片 / 长度），返回 0 = 全过。 */
 int net_audit_selftest(void);
 
