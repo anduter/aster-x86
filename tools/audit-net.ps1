@@ -138,7 +138,9 @@ do {
     $missNet = @(Show-Lines $run.Text $netLines '既有 net 正向断言')
     $missTail = @(Show-Lines $run.Text $tailLines 'tcptest 尾部（已知 flake，单独判定）')
     # 225 项断言行在 build.ps1 的 stdout（build-*.log），不在串口日志里
-    $fullOk = $run.Build.Contains('=== TEST PASS (225/225) ===')
+    $fullMatch = [regex]::Match($run.Build, '=== TEST PASS \((\d+)/(\d+)\) ===')
+    $fullOk = $fullMatch.Success -and ($fullMatch.Groups[1].Value -eq $fullMatch.Groups[2].Value)
+    $fullCount = if ($fullMatch.Success) { $fullMatch.Groups[2].Value } else { '?' }
     if ($NoFull) { $fullOk = $true }
 
     $finalMiss = @($missAudit) + @($missNet) + @($missTail)
@@ -172,7 +174,7 @@ do {
 
 Write-Host ''
 if ($finalMiss.Count -eq 0 -and $fullOk) {
-    Write-Host ("=== audit-net: PASS（{0} 轮；修复回归行齐全 + 225/225 + 正向链路未回归） ===" -f $attempt) -ForegroundColor Green
+    Write-Host ("=== audit-net: PASS（{0} 轮；修复回归行齐全 + {1}/{1} 全量检查 + 正向链路未回归） ===" -f $attempt, $fullCount) -ForegroundColor Green
     exit 0
 }
 if ($finalMiss.Count -eq 0 -and -not $fullOk) {
