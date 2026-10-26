@@ -45,6 +45,8 @@ sys <nr> [a] [b] [c]      # 发一条 legacy int 0x81，参数为十进制
 | 18 | `sys 57 0 2097152 0` | ret=-1 | SYS_BLK_READ 内核目标 |
 | 19 | `res` | `res: mem free=...` | 校验器不误伤合法用户缓冲 |
 | 20 | `mouse` | `mouse: x=... y=...` | 同上 |
+| 21 | `loginlen` | `ushell: login len clamp ok` | LOGIN_WHO/LAST/INFO：size=0/1/8 返回 -1 且不越界写 |
+| 22 | `duptest` | `ushell: dup2 pipe read ref ok` | dup2 读端/关闭原 fd 后仍可读；fork 后父子 close 正确；EOF 不变 |
 
 特权用例（`-Suite priv`）：
 

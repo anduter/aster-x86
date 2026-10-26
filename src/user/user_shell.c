@@ -1495,6 +1495,102 @@ static void sig_handler(int sig)
     printf("ushell: caught signal %d, continuing\n", sig);
 }
 
+/* 审计回归：LOGIN_WHO/LAST/INFO 必须尊重调用方缓冲长度。
+ * 期望：0/1/8 字节缓冲返回 -1 且一个字节都不写；足够大的缓冲原行为不变。 */
+static void cmd_loginlen(void)
+{
+    char buf[80];
+    int ok = 1;
+    int i;
+    int n;
+
+    if (sc(SYS_LOGIN, LOGIN_INFO, (int)buf, 0) != -1) ok = 0;
+
+    for (i = 0; i < (int)sizeof(buf); i++) buf[i] = (char)0xAA;
+    if (sc(SYS_LOGIN, LOGIN_INFO, (int)buf, 1) != -1) ok = 0;
+    for (i = 0; i < (int)sizeof(buf); i++) {
+        if ((unsigned char)buf[i] != 0xAA) ok = 0;
+    }
+
+    if (sc(SYS_LOGIN, LOGIN_INFO, (int)buf, 8) != -1) ok = 0;
+    for (i = 0; i < (int)sizeof(buf); i++) {
+        if ((unsigned char)buf[i] != 0xAA) ok = 0;
+    }
+
+    /* WHO/LAST：无论成功与否，超过 max 的字节都不能被写 */
+    for (i = 0; i < (int)sizeof(buf); i++) buf[i] = (char)0xAA;
+    (void)sc(SYS_LOGIN, LOGIN_WHO, (int)buf, 8);
+    for (i = 8; i < (int)sizeof(buf); i++) {
+        if ((unsigned char)buf[i] != 0xAA) ok = 0;
+    }
+    for (i = 0; i < (int)sizeof(buf); i++) buf[i] = (char)0xAA;
+    (void)sc(SYS_LOGIN, LOGIN_LAST, (int)buf, 1);
+    for (i = 1; i < (int)sizeof(buf); i++) {
+        if ((unsigned char)buf[i] != 0xAA) ok = 0;
+    }
+
+    /* 足够大的缓冲：成功且以 NUL 结尾（原行为） */
+    for (i = 0; i < (int)sizeof(buf); i++) buf[i] = (char)0xAA;
+    if (sc(SYS_LOGIN, LOGIN_INFO, (int)buf, (int)sizeof(buf)) != 0) ok = 0;
+    n = 0;
+    while (n < (int)sizeof(buf) && buf[n] != '\0') n++;
+    if (n == (int)sizeof(buf)) ok = 0;
+
+    printf("ushell: login len clamp %s\n", ok ? "ok" : "FAIL");
+}
+
+/* 审计回归：管道读端引用计数。
+ * 1) dup2 读端后关闭原 read，dup 仍应读到 EOF(0)，而不是 -1；
+ * 2) fork 后父子各持读端，子进程先关掉并退出，父进程仍应读到 EOF；
+ * 3) 写端关闭后 EOF 语义不变。 */
+static void cmd_duptest(void)
+{
+    int p[2];
+    int dupfd;
+    int n = 0;
+    int st = 0;
+    char c = 'x';
+    int ok = 1;
+
+    if (sc(SYS_PIPE, (int)p, 0, 0) != 0) {
+        puterr("duptest: pipe failed\n");
+        return;
+    }
+    dupfd = sc(SYS_DUP2, p[0], 10, 0);
+    if (dupfd != 10) ok = 0;
+    sc(SYS_CLOSE, p[1], 0, 0);
+    sc(SYS_CLOSE, p[0], 0, 0);
+    n = sc(SYS_FREAD, dupfd, (int)&c, 1);
+    if (n != 0) ok = 0;
+    sc(SYS_CLOSE, dupfd, 0, 0);
+
+    if (sc(SYS_PIPE, (int)p, 0, 0) == 0) {
+        int pid = sc(SYS_FORK, 0, 0, 0);
+
+        if (pid == 0) {
+            sc(SYS_SLEEP, 20, 0, 0);
+            sc(SYS_CLOSE, p[1], 0, 0);
+            sc(SYS_CLOSE, p[0], 0, 0);
+            sc(SYS_EXIT, 0, 0, 0);
+        } else if (pid < 0) {
+            ok = 0;
+            sc(SYS_CLOSE, p[0], 0, 0);
+            sc(SYS_CLOSE, p[1], 0, 0);
+        } else {
+            sc(SYS_CLOSE, p[1], 0, 0);          /* 父进程先关写端 */
+            sc(SYS_SLEEP, 100, 0, 0);           /* 等子进程关掉它那份读端 */
+            sc(SYS_WAIT, pid, (int)&st, 0);
+            n = sc(SYS_FREAD, p[0], (int)&c, 1);
+            if (n != 0) ok = 0;
+            sc(SYS_CLOSE, p[0], 0, 0);
+        }
+    } else {
+        ok = 0;
+    }
+
+    printf("ushell: dup2 pipe read ref %s (last=%d)\n", ok ? "ok" : "FAIL", n);
+}
+
 /* 单命令帮助：help <cmd> */
 static void cmd_help_one(const char *name)
 {
@@ -1941,6 +2037,10 @@ static void run_line(char *cmd)
         int r = sc((int)nr, (int)a, (int)b, (int)c);
 
         printf("sys: nr=%u a=%u b=%u c=%u ret=%d\n", nr, a, b, c, r);
+    } else if (scmp(args[0], "loginlen") == 0) {
+        cmd_loginlen();
+    } else if (scmp(args[0], "duptest") == 0) {
+        cmd_duptest();
     } else if (scmp(args[0], "exit") == 0) {
         sc(SYS_EXIT, 0, 0, 0);
     } else {

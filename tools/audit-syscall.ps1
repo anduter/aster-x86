@@ -88,7 +88,9 @@ $guardLines = @(
     'sys 39 0 2097152 0',               # 16: ETH 内核目标 -> -1
     'sys 57 0 2097152 0',               # 17: BLK_READ 内核目标 -> -1
     'res',                              # 18: 合法用户缓冲
-    'mouse'                             # 19: 合法用户缓冲
+    'mouse',                            # 19: 合法用户缓冲
+    'loginlen',                         # 20: LOGIN_WHO/LAST/INFO 长度钳制
+    'duptest'                           # 21: dup2/fork 管道读端引用
 )
 $privLines = @(
     'drop 1000',
@@ -191,6 +193,8 @@ if ($Suite -eq 'full') {
         }
         Check 'guard: res 合法缓冲仍可用' ($out -match 'res: mem\s+free=\d+/\d+ pages')
         Check 'guard: mouse 合法缓冲仍可用' ($out -match 'mouse: x=-?\d+ y=-?\d+ buttons=\d+')
+        Check 'guard: 登录缓冲长度钳制（0/1/8）' ($out -match 'ushell: login len clamp ok')
+        Check 'guard: dup2/fork 管道读端引用' ($out -match 'ushell: dup2 pipe read ref ok')
         Check 'guard: 无 KERNEL PANIC' (-not $out.Contains('KERNEL PANIC'))
     } elseif ($Suite -eq 'priv') {
         Check 'priv: 已 drop 到 uid 1000' ($out.Contains('drop: now uid=1000'))
