@@ -202,8 +202,9 @@ fs: link selftest PASS
 
 - `tools/audit-fs-unit.ps1`：**27 checks / 0 failures**（真实 `fat16.c`）。
 - `tools/unit.ps1 -Only fat16,path`：**241 checks PASS**（FAT16 162 + path 79）。
-  早先 `pipe` 未改动时三套合计 287 checks PASS；最后复跑时 `pipe` 因
-  audit-syscall 正在修改 `fs/pipe.c` 而编译失败（不属于本提交改动）。
+  `pipe` host 套件在最终复跑时编译失败：audit-syscall 的读端引用计数改动引用了
+  `tests/unit/shim/include/proc.h` 里尚未定义的 `FD_KIND_PIPE_R`（不属于本提交；
+  修复前 `-Only fat16,path,pipe` 曾 287 checks PASS）。
 - fs 自检：`fs: 64KB file limit ok`、`fs: error-path selftest ok`、
   `selftest: rename ok`、`fs: xfs v5 image mount compat ok`、
   `fs: xfs v6 hardlink persisted ok` 全部保留。
