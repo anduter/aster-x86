@@ -52,3 +52,6 @@ desktop.ini
 
 # 浸泡/基准证据（本地保留，不入库）
 /artifacts/
+
+# Bark 推送 URL（含 key，本地保留）
+keys/*.url
