@@ -8,7 +8,7 @@ CI 分两层跑（托管 runner 只能跑静态检查，完整构建需要自托
 | 文件 | 作用 |
 |---|---|
 | `tools/ci.ps1` | 统一入口：`-Quick` 静态检查 + host 单元测试（约 2s）/ `-Full` 构建 + N 次回归 |
-| `tools/unit.ps1` | host 单元测试：真实内核源文件 + 最小 shim，不启动 QEMU |
+| `tools/unit.ps1` | host 单元测试：真实内核源文件 + 最小 shim，不启动 QEMU；当前 **10 组 / 520 checks** |
 | `tests/unit/` | 单元测试用例、签名夹具与 host shim |
 | `tools/pre-commit.ps1` | 提交守卫本体：BOM、禁用文件、`src/kernel/**` 模块边界 |
 | `tools/githooks/pre-commit` | bash 钩子入口，转调上面的 `.ps1` |
@@ -29,6 +29,12 @@ powershell -NoProfile -File tools/ci.ps1 -Quick
 
 # 只跑 host 单元测试（不启动 QEMU）
 powershell -NoProfile -File tools/unit.ps1
+
+# 只跑某几组（新增：path / pmm / fat16）
+powershell -NoProfile -File tools/unit.ps1 -Only path,pmm,fat16
+
+# path/PMM/FAT16 需要 32 位 host 编译器（默认取 gcc 同目录的 i686-w64-mingw32-gcc.exe）
+powershell -NoProfile -File tools/unit.ps1 -Gcc32 tools\w64devkit\bin\i686-w64-mingw32-gcc.exe
 
 # 完整验证：build.ps1 + 连续 2 次 build.ps1 -Test（各 ~14s）
 powershell -NoProfile -File tools/ci.ps1 -Full
@@ -61,8 +67,8 @@ powershell -NoProfile -File tools/ci.ps1 -Quick -FixBom
 --- static 4/5: module boundaries (check-deps) ---
   [PASS] check-deps 0 violations  (exit=0, violations=0)
 --- static 5/5: unit (host) ---
-  [PASS] host unit tests  (7 suites, 3.4s)
-elapsed: 2.1s
+  [PASS] host unit tests  (10 suites, 4.9s)
+elapsed: 6.0s
 === CI PASS ===
 ```
 
@@ -76,7 +82,7 @@ elapsed: 2.1s
 | 4 | `tools/check-deps.ps1` 0 违规 | 模块边界，规则见 `docs/modules.md` |
 | 5 | `tools/unit.ps1` 全 PASS | host 单元测试；`-NoUnit` 可跳过（仅排障） |
 | 6 | `-Full`：`build.ps1` 成功 | 产物用隔离目录 |
-| 7 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 131/131（98 + 账号系统 P1 14 项 + P2 10 项 + P3 9 项） |
+| 7 | `-Full`：连续 2 次 `build.ps1 -Test` 全 PASS 且项数一致 | 当前 **182/182**（131 + 组件 15 + SIP 10 + 64KB 2 + link 16 + TCP 8） |
 
 `-Full` 的隔离参数（结束自动清理，`-KeepArtifacts` 保留现场）：
 
@@ -87,8 +93,8 @@ elapsed: 2.1s
 构建/回归日志在 `obj/ci/build.log`、`obj/ci/test-1.log`、`test-2.log`（`obj/` 已忽略；
 CI 失败时直接把 `obj/ci/**` 上传成 artifact）。
 
-实测（2026-10-26，`5bcad98`，Windows 10 + PowerShell 5.1）：`-Quick` **2.1s**（含 7 组 host 单元测试）；
-`-Full` **65.8s**（构建 13.0s + `-Test` 30.2s/19.1s，各 **131/131**），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
+实测（2026-10-27，v0.73.0 开发线，Windows 10 + PowerShell 5.1）：`-Quick` **约 6s**（含 10 组 host 单元测试 / 520 checks：原 7 组 187 + 新增 path 79 + pmm 92 + fat16 162）；
+`-Full` **约 65s**（构建 + `-Test` ×2，各 **182/182**；本机数值随宿主负载浮动），结束后 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理、`git status` 仍干净。
 
 参数一览：
 
@@ -157,7 +163,7 @@ clang-tidy src/kernel/lib/string.c -- -Isrc/kernel -Isrc/kernel/include
 | 层 | 文件 | runner | 跑什么 | 为什么 |
 |---|---|---|---|---|
 | 静态 | `static.yml` | `ubuntu-latest`（托管） | BOM（`-StrictBom`）、禁用文件、`check-deps`、host 单元测试、`ci.ps1 -Quick -AllowDirty` | 只需 git + PowerShell + gcc，秒级 |
-| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 131 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
+| 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 182 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
 
 **托管 runner 上不要试图构建**：那里没有 vendored 工具链、没有 QEMU，
 `tools/i686-elf` 也不会随仓库分发（见 README 的"自带交叉工具链"一节）。
@@ -332,7 +338,7 @@ pre-commit: blocked: 1 issue(s)
 PS5.1 对**没有 BOM 的 UTF-8** 按系统 ANSI 码页解码，中文注释/字符串会变乱码，
 严重时直接语法错误 —— 这就是"`build.ps1` 丢 BOM 导致解析失败"事故的成因（已发生 3 次）。
 
-现状（2026-10-26）：**所有被跟踪的 `*.ps1`/`*.psm1` 都带 `EF BB BF`**，
+现状（2026-10-27）：**所有被跟踪的 `*.ps1`/`*.psm1` 都带 `EF BB BF`**，
 `tools/ci.ps1` 的 `$BomLegacy` 豁免表已清空，`-StrictBom` 不再有例外。
 `tools/pre-commit.ps1` 对暂存脚本始终严格，所以新增/改动脚本不可能漏 BOM。
 

@@ -6,6 +6,9 @@
 #
 # 设计要点：
 #   - 用 tools/w64devkit/bin/gcc.exe（或 PATH 上的 gcc）；不依赖 i686-elf。
+#   - 路径/PMM/FAT16 用例需要编译含 32 位内联汇编/32 位地址假设的真实内核源码，
+#     用同目录的 i686-w64-mingw32-gcc.exe 编译（-Gcc32 可覆盖；32 位 exe 在
+#     Windows WOW64 下直接运行）。
 #   - 内核符号在 host 上与 libc 冲突（memcpy/strcmp...），用 -D 改名，
 #     测试 TU 提供最小实现；不修改内核源码。
 #   - 依赖内核头的用例通过 tests/unit/shim 提供最小接口（自旋锁/阻塞原语退化为 no-op）。
@@ -15,12 +18,14 @@
 #   powershell -NoProfile -File tools/unit.ps1
 #   powershell -NoProfile -File tools/unit.ps1 -Only trust,pipe
 #   powershell -NoProfile -File tools/unit.ps1 -Gcc C:\msys64\mingw64\bin\gcc.exe
+#   powershell -NoProfile -File tools/unit.ps1 -Gcc32 tools\w64devkit\bin\i686-w64-mingw32-gcc.exe
 #
 # 退出码：0 = 全部 PASS，1 = 编译失败或断言失败
 # =============================================================================
 param(
     [string]$Repo = '',
     [string]$Gcc = '',
+    [string]$Gcc32 = '',
     [string[]]$Only = @()
 )
 
@@ -45,6 +50,17 @@ if (-not $Gcc) {
 }
 if (-not $Gcc -or -not (Test-Path $Gcc)) {
     throw 'unit: 找不到 host gcc（期望 tools/w64devkit/bin/gcc.exe 或 PATH 上的 gcc）'
+}
+
+# 32 位宿主编译器：给 path/pmm/fat16 用例（真实内核源码含 32 位汇编/地址假设）
+if (-not $Gcc32) {
+    $cand = Join-Path (Split-Path -Parent $Gcc) 'i686-w64-mingw32-gcc.exe'
+    if (Test-Path $cand) {
+        $Gcc32 = $cand
+    } else {
+        $cmd32 = Get-Command i686-w64-mingw32-gcc -ErrorAction SilentlyContinue
+        if ($cmd32) { $Gcc32 = $cmd32.Source }
+    }
 }
 
 $outDir = Join-Path $root 'obj/unit'
@@ -107,6 +123,50 @@ $tests = @(
         Sources = @('src/kernel/fs/pipe.c', 'tests/unit/test_fuzz_pipe.c')
         Defines = @('memset=unit_memset')
         Inc     = @('tests/unit/shim')
+    },
+    # ---- 32 位用例：直接编译真实内核源码（不改内核；见文件头注释） ----
+    @{
+        Name    = 'path'
+        Arch    = '32'
+        Sources = @('tests/unit/test_path.c',
+                    'src/kernel/proc/trap/syscall_util.c',
+                    'src/kernel/lib/string.c')
+        Defines = @(
+            'memcpy=k_memcpy', 'memset=k_memset', 'memmove=k_memmove',
+            'memcmp=k_memcmp', 'strlen=k_strlen', 'strcmp=k_strcmp',
+            'strncmp=k_strncmp', 'strcpy=k_strcpy', 'strncpy=k_strncpy',
+            'strchr=k_strchr', 'utoa=k_utoa', 'itoa=k_itoa'
+        )
+        Inc     = @('src/kernel')
+    },
+    @{
+        Name    = 'pmm'
+        Arch    = '32'
+        Sources = @('tests/unit/test_pmm.c',
+                    'src/kernel/mm/pmm.c',
+                    'src/kernel/lib/string.c')
+        Defines = @(
+            'memcpy=k_memcpy', 'memset=k_memset', 'memmove=k_memmove',
+            'memcmp=k_memcmp', 'strlen=k_strlen', 'strcmp=k_strcmp',
+            'strncmp=k_strncmp', 'strcpy=k_strcpy', 'strncpy=k_strncpy',
+            'strchr=k_strchr', 'utoa=k_utoa', 'itoa=k_itoa'
+        )
+        Inc     = @('tests/unit/shim', 'src/kernel')
+    },
+    @{
+        Name    = 'fat16'
+        Arch    = '32'
+        Sources = @('tests/unit/test_fat16.c',
+                    'src/kernel/fs/fat16.c',
+                    'src/kernel/lib/string.c')
+        Defines = @(
+            'memcpy=k_memcpy', 'memset=k_memset', 'memmove=k_memmove',
+            'memcmp=k_memcmp', 'strlen=k_strlen', 'strcmp=k_strcmp',
+            'strncmp=k_strncmp', 'strcpy=k_strcpy', 'strncpy=k_strncpy',
+            'strchr=k_strchr', 'utoa=k_utoa', 'itoa=k_itoa',
+            'kprintf=unit_kprintf'
+        )
+        Inc     = @('tests/unit/shim')
     }
 )
 
@@ -125,13 +185,27 @@ Write-Host ("  repo : {0}" -f $root) -ForegroundColor DarkGray
 Write-Host ("  gcc  : {0}" -f $Gcc) -ForegroundColor DarkGray
 $gccVer = (& $Gcc --version 2>&1 | Select-Object -First 1)
 Write-Host ("  ver  : {0}" -f $gccVer) -ForegroundColor DarkGray
+if ($Gcc32) {
+    $gcc32Ver = (& $Gcc32 --version 2>&1 | Select-Object -First 1)
+    Write-Host ("  gcc32: {0}  ({1})" -f $Gcc32, $gcc32Ver) -ForegroundColor DarkGray
+} else {
+    Write-Host '  gcc32: (not found; path/pmm/fat16 suites will fail)' -ForegroundColor Yellow
+}
 $swAll = [Diagnostics.Stopwatch]::StartNew()
 
 $failed = New-Object System.Collections.Generic.List[string]
 $passed = 0
+$totalChecks = 0
 foreach ($t in $tests) {
     $exe = Join-Path $outDir ('test-' + $t.Name + '.exe')
-    $args = @($common)
+    $compiler = $Gcc
+    $extra = @()
+    if ($t.Arch -eq '32') {
+        $compiler = $Gcc32
+        # 固定 PE 映像基址：pmm 测试的 arena 必须落在 HEAP_BASE(8MB) 以下
+        $extra += '-Wl,--disable-dynamicbase'
+    }
+    $args = @($common) + $extra
     foreach ($d in $t.Defines) { $args += ('-D' + $d) }
     foreach ($i in $t.Inc) { $args += ('-I' + $i) }
     $args += '-o', $exe
@@ -139,10 +213,15 @@ foreach ($t in $tests) {
 
     Write-Host ''
     Write-Host ("--- {0} ---" -f $t.Name) -ForegroundColor Cyan
+    if (-not $compiler -or -not (Test-Path $compiler)) {
+        Write-Host ("  [FAIL] compile ({0}): 32-bit compiler not found (use -Gcc32)" -f $t.Name) -ForegroundColor Red
+        $failed.Add(('{0}: compiler' -f $t.Name))
+        continue
+    }
     $savedEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $compile = (& $Gcc @args 2>&1 | Out-String)
+        $compile = (& $compiler @args 2>&1 | Out-String)
         $compileCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $savedEap
@@ -173,6 +252,7 @@ foreach ($t in $tests) {
     if ($ok) {
         Write-Host ("  [PASS] {0}  ({1} checks, {2:N0} ms)" -f $t.Name, $m.Groups[1].Value, $sw.Elapsed.TotalMilliseconds) -ForegroundColor Green
         $passed++
+        $totalChecks += [int]$m.Groups[1].Value
     } else {
         Write-Host ("  [FAIL] {0}  (exit={1})" -f $t.Name, $runCode) -ForegroundColor Red
         $failed.Add(('{0}: assertions' -f $t.Name))
@@ -182,6 +262,7 @@ foreach ($t in $tests) {
 $swAll.Stop()
 Write-Host ''
 Write-Host ("elapsed: {0:N1}s" -f $swAll.Elapsed.TotalSeconds) -ForegroundColor DarkGray
+Write-Host ("total checks: {0}" -f $totalChecks) -ForegroundColor DarkGray
 if ($failed.Count -eq 0) {
     Write-Host ("=== UNIT PASS ({0}/{0}) ===" -f $passed) -ForegroundColor Green
     Set-Location $startDir

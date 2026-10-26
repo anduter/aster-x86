@@ -4,6 +4,8 @@ English | [简体中文](README.md)
 
 A 32-bit x86 teaching operating system built from scratch: a hand-written boot sector, a two-stage loader, and a 32-bit C kernel. It boots on QEMU (`-vga std`, VBE 0x118 1024x768x24) and brings up a framebuffer text console, physical and virtual memory management, a heap, memory self-tests, an IDT, and timer/keyboard interrupts.
 
+Current version **v0.73.0** (development line): **182** end-to-end regression checks, and **10 host unit suites / 520 checks** (`tools/unit.ps1`, no QEMU; includes path normalization, the PMM bitmap, and FAT16 directory entries).
+
 ## System model (target architecture)
 
 [`docs/system-model.md`](docs/system-model.md) defines Aster's target structure: capability-driven strongly typed objects, per-process private namespaces, ring3 service-based filesystem/network/drivers, and a point-by-point comparison with Unix/Linux, Windows NT, seL4, Mach, Plan 9, Fuchsia, and Minix 3/QNX.
@@ -32,11 +34,13 @@ P3 security boundaries and engineering rules live in [`docs/security-model.md`](
 | Stack/heap/trampoline ASLR | Stack top within the top 512 KB; heap base and trampoline page randomized per process within their own 256 KB ranges |
 | Sandbox | legacy + native syscall allowlists; both `SYS_OPEN` and `HANDLE_DUP` denied, verified with `userdemo` |
 | Image signing | RSA-2048/SHA-256 PKCS#1 v1.5; verified at boot and in `user_exec`; tampered images are rejected |
+| Component model | **Signed `.pkg`** (manifest + file table + per-file SHA-256 + RSA-2048 signature), `_pkgd` install/remove/verify, the `system:/System/packages.db` component DB, and user apps installed under `~/Apps`; see [`docs/pkg.md`](docs/pkg.md) |
 | Address-space teardown | Process exit/exec frees user physical pages and PT/PD/PDPT; fork COW shared pages are reclaimed by refcount |
 | User mode | Per-process page directory + ELF32 loader + argc/argv startup stack + mini-libc; the user stack grows on demand; a signal trampoline page supports `sigreturn` |
 | Screen widgets | Heartbeat `hb N *` bottom-right, `uptime N s` on the left; periodic output only refreshes the status bar, the content area stays still |
-| Filesystem | **Drives are roots** (Windows-style `system:/bin`, `data:/a.txt`): the top level *is* the volume table; there is no virtual `/` |
-| Block devices / persistence | `DEV_BLOCK` + **ATA PIO (`ata0` XFS1 system disk + `ata1` FAT16 exchange disk) + `ram0` RAM disk**; `XFS1` v3; **files survive a reboot**; `fat:/` exchanges files directly with the host |
+| Filesystem | **Drives are roots** (Windows-style `system:/bin`, `data:/a.txt`): the top level *is* the volume table; there is no virtual `/`; **64 KB** per file; ramfs **hard links / symlinks** (`ln [-s]`, `readlink`; hard-link relationships are not persisted); **SIP-lite** makes `system:/System|bin|drivers` read-only at runtime (root included; the signed-updater scope is the exception) |
+| Block devices / persistence | `DEV_BLOCK` + **ATA PIO (`ata0` XFS1 system disk + `ata1` FAT16 exchange disk) + `ram0` RAM disk**; `XFS1` **v5**; **files survive a reboot**; `fat:/` exchanges files directly with the host |
+| Network | **ARP/ICMP/UDP**; **TCP client robustness**: sequence/ACK, MSS/window, checksum, RFC6298 RTO with exponential backoff, fast retransmit, out-of-order reassembly, FIN/RST/TIME_WAIT, slow start, 16 KB streaming echo; `listen/accept` and the user-space socket API are in a parallel batch |
 | Platform / peripherals | **Serial input (IRQ4), PCI enumeration, ACPI S5 poweroff, LAPIC probe + NMI watchdog, PS/2 mouse (IRQ12, `mouse`), e1000 NIC (MAC/link, ARP, ICMP echo rx/tx)** |
 
 ## Quick start
@@ -318,8 +322,10 @@ Properties:
 - **Directory tree**: nodes linked by `parent / first_child / next_sibling`, with segment-by-segment descent;
 - **Drives**: one independent tree per volume, root named after the drive, names up to 32 bytes, at most 4;
 - **Handle type safety**: a file handle is `OBJ_FILE`; using it as a device is rejected with `E_TYPE`;
-- **Capacity**: 64 nodes (shared by all volumes), file/directory names up to **64 characters**, 16 KB per file, at most 8 files open at once;
-- **Persistence**: `fs_sync` / `fs_mount_disk` serialize the whole tree to a block device (XFS1 v3); at boot `ata0` (the 8 MB disk image) is mounted first and `ram0` is the fallback when there is no disk; `write`/`mkdir`/`rm` in the shell flush automatically, and `sync` forces it;
+- **Capacity**: 64 nodes (shared by all volumes), file/directory names up to **64 characters**, **64 KB** per file, at most 32 files open at once;
+- **Persistence**: `fs_sync` / `fs_mount_disk` serialize the whole tree to a block device (XFS1 **v5**); at boot `ata0` (the 8 MB disk image) is mounted first and `ram0` is the fallback when there is no disk; `write`/`mkdir`/`rm` in the shell flush automatically, and `sync` forces it;
+- **Links**: ramfs supports hard links and symbolic links (`ln` / `ln -s` / `readlink`, max 8 hops); symlinks persist in XFS1, **hard-link relationships do not** (they degrade to independent copies after reboot);
+- **SIP-lite**: `system:/System`, `system:/bin`, `system:/drivers` are read-only at runtime (root included; `.`/`..` normalized before the decision); only the signed updater `_pkgd`'s install/remove scope may write; `sip=0` disables it;
 - **RTC timestamps**: files and directories record `mtime` (CMOS clock, interpreted as UTC); `stat` shows it and `date` prints the current time;
 - **Sector cache**: an 8-entry write-through cache at the block layer (invalidated on write) to cut repeated disk reads;
 - **fsck**: the `fsck` command checks types/sizes/child back-pointers/parent cycles and prints `nodes=… files=… dirs=… errors=…`.
@@ -623,7 +629,7 @@ Not covered: sustained network traffic, precise memory-leak quantification (whic
 
 - **SMP is 2-core shared-memory multiprocessing (limited)**: BSP + 1 AP. Per-CPU GDT/TSS, a shared IDT, LAPIC timer, IPI/TLB shootdown, and **per-CPU runqueues with load-based placement/migration** are all in place; `heartbeat` is pinned to the AP as a probe via a program flag (`PROG_F_PIN_AP`), other processes are placed by `sched_place()` according to load, and `sched_balance()` migrates READY processes when the load difference is ≥2;
 - **SMP shared state**: the object table, pipes, and the filesystem (one global ramfs lock, wrapped at the public entry points) are serialized; some process-table traversal (`proc_wakeup`/`proc_find`) and the kernel page-table modification paths are not locked entry by entry, so theoretical races remain under cross-core contention, and no stress validation has been done;
-- the filesystem lives in memory plus an `ata0` disk image (`dist/disk.img`, survives a reboot) or the `ram0` RAM disk: at most 4 drives, 64 nodes, names ≤64 characters, 16 KB per file, paths ≤255 characters; drive names are reserved and cannot be used as top-level directory names;
+- the filesystem lives in memory plus an `ata0` disk image (`dist/disk.img`, survives a reboot) or the `ram0` RAM disk: at most 4 drives, 64 nodes, names ≤64 characters, 64 KB per file, paths ≤255 characters; drive names are reserved and cannot be used as top-level directory names;
 - **FAT16 supports only the root directory with 8.3 short names** (no LFN, no subdirectories, mtime 0), and both reads and writes only target root-directory files;
 - RTC time is interpreted as **UTC** (no time zones or DST);
 - user mode gives each process its own page directory, but there is only one user program image, `/system/bin/shell`;

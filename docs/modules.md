@@ -270,3 +270,15 @@ M8 → 只依赖用户态 ABI（src/user/ulib.h）
 - src/kernel/types.h shim removed; include/types.h is the single definition
 - 64 source includes repointed to ../include/types.h (or same-dir "types.h")
 - -Isrc/kernel/include added to build.ps1 and Makefile so <stdint.h> resolves to the kernel shim
+
+## 9. v0.73.0 能力现状（按模块归属）
+
+截至 2026-10-27 开发线（整机回归 **182 项**；host 单测 **10 组 / 520 checks**）：
+
+| 能力 | 实现位置 | 归属 | 边界 / 说明 |
+|---|---|---|---|
+| 组件模型 | `src/kernel/pkg/{pkg_verify,pkgd,pkg_selftest}.c`、`include/pkg.h` | M9 | 签名 `.pkg` 解析/验签、`_pkgd` 安装/卸载/校验、`system:/System/packages.db`；只通过 `include/pkg.h` 暴露 |
+| SIP-lite | `src/kernel/fs/sip.c` | M4（策略入口在 fs） | 系统路径运行时只读；ramfs 写入口统一调 `sip_guard_write`；更新器作用域绑定 pid；不改 ABI |
+| 硬链接 / 符号链接 | `src/kernel/fs/ramfs.c`、`src/kernel/fs/vfs.c`、`fs/fs.h` | M4 | `SYS_LINK/SYMLINK/READLINK/LSTAT`（73–76）已追加；硬链接关系不落盘（XFS1 v5 限制），符号链接随盘持久化 |
+| TCP 健壮性 | `src/kernel/net/tcp.c`、`src/kernel/net/net.c` | M5 | 序号/ACK、RTO 重传、快重传、乱序重组、FIN/RST/TIME_WAIT、16KB 流式回显；`listen/accept`（预留 78/79）由并行 net 批次实现 |
+| 路径规范化 / PMM / FAT16 host 单测 | `tests/unit/test_{path,pmm,fat16}.c`、`tools/unit.ps1` | 工程化（eng） | 直接编译真实内核源文件；path/PMM/FAT16 用 i686 host 编译器；不改内核、不改 `abi.h` |

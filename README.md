@@ -6,6 +6,9 @@
 在 QEMU（`-vga std`，VBE 0x118 1024x768x24）上启动，带 framebuffer 文字控制台、
 物理/虚拟内存管理、堆、内存自检、IDT 与时钟/键盘中断。
 
+当前版本 **v0.73.0**（开发线）：整机回归 **182 项**，host 单元测试 **10 组 / 520 checks**
+（`tools/unit.ps1`，不启动 QEMU；含路径规范化、PMM 位图、FAT16 目录项）。
+
 ## 系统结构模型（目标架构）
 
 [`docs/system-model.md`](docs/system-model.md) 定义了 Aster 的目标结构：能力（capability）
@@ -38,11 +41,13 @@ ELF 段权限分离、代码页只读、COW 只作用于可写页、明确限制
 | 用户栈/堆/蹦床 ASLR | 栈顶在顶部 512KB、堆基址和蹦床页在各自 256KB 范围内每进程随机 |
 | 沙箱 | legacy + native syscall allowlist；`SYS_OPEN` 和 `HANDLE_DUP` 均被拒绝，`userdemo` 已验证 |
 | 镜像签名 | RSA-2048/SHA-256 PKCS#1 v1.5；启动与 `user_exec` 验签，篡改镜像被拒绝 |
+| 组件模型 | **签名 `.pkg`**（清单 + 文件表 + 每文件 SHA-256 + RSA-2048 签名）、`_pkgd` 安装/卸载/校验、`system:/System/packages.db` 组件 DB、用户应用装到 `~/Apps`；见 [`docs/pkg.md`](docs/pkg.md) |
 | 地址空间回收 | 进程退出/exec 释放用户物理页、PT/PD/PDPT；fork COW 共享页按引用计数回收 |
 | 用户态 | 每进程页目录 + ELF32 加载器 + argc/argv 启动栈 + mini-libc；用户栈按需增长；信号蹦床页支持 `sigreturn` |
 | 屏幕小部件 | 右下角心跳 `hb N *`、左侧 `uptime N s`；周期输出只更新状态栏，内容区保持静止 |
-| 文件系统 | **驱动器为根**（Windows 风格 `system:/bin`、`data:/a.txt`）：顶层是卷表本身，没有虚拟 `/` |
-| 块设备 / 持久化 | `DEV_BLOCK` + **ATA PIO（`ata0` XFS1 系统盘 + `ata1` FAT16 交换盘）+ `ram0` 内存盘**；`XFS1` v3；**重启后文件还在**；`fat:/` 可直接和宿主交换文件 |
+| 文件系统 | **驱动器为根**（Windows 风格 `system:/bin`、`data:/a.txt`）：顶层是卷表本身，没有虚拟 `/`；单文件 **64KB**；ramfs **硬链接/符号链接**（`ln [-s]`、`readlink`，硬链接关系不落盘）；**SIP-lite** 把 `system:/System|bin|drivers` 设为运行时只读（含 root，签名更新器作用域例外） |
+| 块设备 / 持久化 | `DEV_BLOCK` + **ATA PIO（`ata0` XFS1 系统盘 + `ata1` FAT16 交换盘）+ `ram0` 内存盘**；`XFS1` **v5**；**重启后文件还在**；`fat:/` 可直接和宿主交换文件 |
+| 网络 | **ARP/ICMP/UDP**；**TCP 客户端健壮性**：序号/ACK、MSS/窗口、校验和、RFC6298 RTO 与指数退避重传、快重传、乱序重组、FIN/RST/TIME_WAIT、慢启动、16KB 流式回显；`listen/accept` 与用户态 socket 在并行批次中 |
 | 平台 / 外设 | **串口输入（IRQ4）、PCI 枚举、ACPI S5 关机、LAPIC 探测 + NMI 看门狗、PS/2 鼠标（IRQ12，`mouse`）、e1000 网卡（MAC/链路、ARP、ICMP echo 收发）** |
 
 ## 快速开始
@@ -351,10 +356,14 @@ fs_listdir(path, index, ...)   目录遍历（路径为空时列出驱动器）
 - **目录树**：节点用 `parent / first_child / next_sibling` 组成，路径逐段下钻；
 - **驱动器**：每个卷一棵独立树，根节点名字即驱动号，名字最长 32 字节，最多 4 个；
 - **句柄类型安全**：文件句柄是 `OBJ_FILE`，拿它当设备用会被 `E_TYPE` 拒绝；
-- **容量**：64 个节点（所有卷共用）、文件名/目录名最长 **64 字符**、单文件 16KB、最多 8 个同时打开的文件；
-- **持久化**：`fs_sync` / `fs_mount_disk` 把整棵树序列化到块设备（XFS1 v3）；
+- **容量**：64 个节点（所有卷共用）、文件名/目录名最长 **64 字符**、单文件 **64KB**、最多 32 个同时打开的文件；
+- **持久化**：`fs_sync` / `fs_mount_disk` 把整棵树序列化到块设备（XFS1 **v5**）；
   启动时优先挂载 `ata0`（8MB 硬盘镜像），没有硬盘才退回 `ram0` 内存盘；
   shell 里 `write`/`mkdir`/`rm` 后会自动落盘，也可以手动 `sync`；
+- **链接**：ramfs 支持硬链接与符号链接（`ln` / `ln -s` / `readlink`，跳数上限 8）；
+  符号链接随 XFS1 落盘，**硬链接关系不持久化**（重启后退化为独立副本）；
+- **SIP-lite**：`system:/System`、`system:/bin`、`system:/drivers` 运行时只读（root 也被拒，
+  判定前规范化 `.`/`..`）；只有签名更新器 `_pkgd` 的安装/卸载作用域可写；`sip=0` 可关闭；
 - **RTC 时间戳**：文件/目录记录 `mtime`（CMOS 时钟，按 UTC 解释），
   `stat` 会显示，`date` 命令打印当前时间；
 - **扇区缓存**：块设备层 8 项写穿透缓存（写时失效），减少重复读盘；
@@ -680,7 +689,7 @@ New-Item stress-run\STOP                        # 提前停止
   都已串行化；仍未逐项加锁的是进程表的部分遍历（`proc_wakeup`/`proc_find`）和
   内核页表修改路径，跨核高并发下仍有理论竞态，也没有做过压力验证；
 - 文件系统在内存中 + `ata0` 硬盘镜像（`dist/disk.img`，重启保留）或 `ram0` 内存盘：
-  最多 4 个驱动器、64 个节点、名字 ≤64 字符、单文件 16KB、路径 ≤255 字符；
+  最多 4 个驱动器、64 个节点、名字 ≤64 字符、单文件 64KB、路径 ≤255 字符；
   驱动号是保留名，顶层不能建同名目录；
 - **FAT16 只支持根目录 + 8.3 短名**（无 LFN、无子目录、mtime 为 0），读写都只针对根目录文件；
 - RTC 时间按 **UTC** 解释（没有时区/夏令时）；

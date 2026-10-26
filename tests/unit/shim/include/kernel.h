@@ -29,11 +29,15 @@ static inline void spin_unlock_irqrestore(spinlock_t *l, uint32_t flags)
     (void)flags;
 }
 
-/* 内核字符串函数：测试 TU 用 -Dstrcmp=... 等改名后提供实现 */
+/* 内核字符串函数：测试 TU / lib/string.c 用 -D 改名后提供实现 */
 void  *memset(void *dst, int c, size_t n);
+void  *memcpy(void *dst, const void *src, size_t n);
+int    memcmp(const void *a, const void *b, size_t n);
 size_t strlen(const char *s);
 int    strcmp(const char *a, const char *b);
+int    strncmp(const char *a, const char *b, size_t n);
 char  *strncpy(char *dst, const char *src, size_t n);
+char  *strchr(const char *s, int c);
 
 /* 内核打印：host 侧退化为 no-op（或按需打印） */
 void kprintf(const char *fmt, ...);
