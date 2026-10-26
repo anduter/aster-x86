@@ -38,6 +38,20 @@ static int arg_string(char *dst, uint32_t max, uint32_t uptr)
     return (copy_user_string(dst, max, uptr) == E_OK) ? 0 : -1;
 }
 
+/* 把内核格式化好的文本写回用户缓冲。
+ * 调用方给的 max 必须放得下完整字符串（含 NUL），否则返回 -1 且一个字节都不写。
+ * 此前 LOGIN_WHO/LAST/INFO 完全忽略 max：用户传 8 字节缓冲也会被写进最多
+ * 192 字节，越界踩用户栈。 */
+static int copy_login_out(uint32_t uptr, uint32_t max, const char *out)
+{
+    uint32_t n;
+
+    if (uptr == 0U || max == 0U) return -1;
+    n = (uint32_t)strlen(out) + 1U;
+    if (n > max) return -1;
+    return (copy_to_user((void *)(uintptr_t)uptr, out, n) == E_OK) ? 0 : -1;
+}
+
 static int sys_seteuid(uint32_t euid)
 {
     proc_t *p = proc_current();
@@ -211,10 +225,7 @@ static int sys_login(uint32_t cmd, uint32_t a, uint32_t b)
             int n = acct_who(out, sizeof(out));
 
             if (n < 0) return -1;
-            if (copy_to_user((void *)(uintptr_t)a, out,
-                             (uint32_t)strlen(out) + 1U) != E_OK) {
-                return -1;
-            }
+            if (copy_login_out(a, b, out) != 0) return -1;
             return n;
         }
 
@@ -224,10 +235,7 @@ static int sys_login(uint32_t cmd, uint32_t a, uint32_t b)
             int n = acct_last(out, sizeof(out));
 
             if (n < 0) return -1;
-            if (copy_to_user((void *)(uintptr_t)a, out,
-                             (uint32_t)strlen(out) + 1U) != E_OK) {
-                return -1;
-            }
+            if (copy_login_out(a, b, out) != 0) return -1;
             return n;
         }
 
@@ -245,7 +253,7 @@ static int sys_login(uint32_t cmd, uint32_t a, uint32_t b)
         return acct_sudo_end();
 
     case LOGIN_INFO:
-        if (a == 0U) return -1;
+        if (a == 0U || b == 0U) return -1;
         {
             acct_user_t me;
             const char *name = "?";
@@ -257,10 +265,7 @@ static int sys_login(uint32_t cmd, uint32_t a, uint32_t b)
                       (unsigned int)p->uid, (unsigned int)p->euid,
                       (unsigned int)p->gid, (unsigned int)p->egid,
                       (unsigned int)p->ngroups, name);
-            if (copy_to_user((void *)(uintptr_t)a, out,
-                             (uint32_t)strlen(out) + 1U) != E_OK) {
-                return -1;
-            }
+            if (copy_login_out(a, b, out) != 0) return -1;
             return 0;
         }
 
