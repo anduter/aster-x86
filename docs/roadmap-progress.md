@@ -82,5 +82,24 @@
 - 遗留：FAT16 单文件上限仍是簇链限制；没有 v4 旧镜像的自动化测试（兼容路径
   靠代码 + 文档，-Test 每次重建 disk.img）。（4b/4c 见下）
 
+## 阶段 4b：硬链接 / 符号链接
 
-
+- 状态：**完成**
+- 内核：ramfs 增加 `canon/nlink`（硬链接）与 `FS_TYPE_LINK`（`data` 存目标）；
+  `resolve_path()` 统一展开软链接（跳数上限 8）；`O_NOFOLLOW`/`lstat`/`readlink`；
+  `ino_promote()` 处理"删掉宿主但还有链接"；fsck 允许 LINK、校验 canon 越界。
+- VFS：`fs_link_cred`/`fs_symlink_cred`/`fs_readlink_cred`/`fs_lstat_cred` 路由，
+  跨卷硬链接与 FAT16 的 link 操作一律 `E_INVAL`。
+- SIP 交互：写操作对**展开后**的路径复查，堵住 `/tmp` 软链接指向 `/bin` 的绕过。
+- 用户态：`SYS_LINK=73` / `SYS_SYMLINK=74` / `SYS_READLINK=75` / `SYS_LSTAT=76`
+  （`SYS_NR_MAX=76`，只追加）；ulib 封装；ring3 shell 增加 `ln [-s]`、`readlink`、
+  `linktest`，`-Test` 的注入命令里加了 `linktest`。
+- 持久化：符号链接进 XFS1（type 3）；**硬链接关系不落盘**（sync/remount 后退化为
+  独立副本），要真正持久化需要 XFS1 v6 的 inode `link_to/nlink`。
+- 检查项：**158 → 174**。
+- 测试证据：`=== TEST PASS (174/174) ===`（`serial-lnk5.log`）；11 条 `fs:` 链接断言
+  + 5 条 `ushell:` 链接断言全 PASS。
+- 遗留：
+  1. 硬链接不跨重启；
+  2. `fs_stat_t.nlink` 未暴露到 ABI（stat 结构仍是 24B，避免 ABI 变更）；
+  3. 软链接目标不支持跨卷；目录硬链接按 POSIX 禁止。

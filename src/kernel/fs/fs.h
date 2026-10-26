@@ -19,11 +19,16 @@
 #define FS_OPEN_READ   0x01U
 #define FS_OPEN_WRITE  0x02U
 #define FS_OPEN_CREAT  0x04U
+#define FS_OPEN_NOFOLLOW 0x08U  /* 末段是符号链接时不跟随（O_NOFOLLOW） */
+
+/* 符号链接跟随跳数上限（超过返回 E_INVAL，防环） */
+#define FS_LINK_MAX_HOPS 8U
 
 typedef enum {
     FS_TYPE_NONE = 0,
     FS_TYPE_FILE = 1,
-    FS_TYPE_DIR  = 2
+    FS_TYPE_DIR  = 2,
+    FS_TYPE_LINK = 3      /* 符号链接：data 里是目标路径 */
 } fs_type_t;
 
 typedef struct {
@@ -33,6 +38,7 @@ typedef struct {
     uint32_t  mode;       /* 权限位：rwxrwxrwx（低 9 位） */
     uint32_t  uid;        /* 属主 */
     uint32_t  gid;        /* 属组 */
+    uint32_t  nlink;      /* 硬链接数（软链接/目录 = 1；目录的 nlink 不模拟 . / ..） */
 } fs_stat_t;
 
 /* 权限位（和 Unix 一致的 9 位）+ setuid/setgid/sticky */
@@ -188,6 +194,37 @@ void sip_selftest(void);
 
 /* 已用节点数（诊断） */
 unsigned int fs_node_count(void);
+
+/* =============================================================================
+ * 硬链接 / 符号链接（阶段 4b）
+ *
+ * 只由 ramfs 实现；FAT16/svc/blk 统一返回 E_INVAL（见 vfs.c 的路由）。
+ *
+ * 硬链接：目标必须是普通文件（目录/符号链接禁止）、必须同卷；非 root 只能给
+ * 自己拥有的文件建链接。nlink 记在数据宿主节点上，fs_stat_t.nlink 可读。
+ * 运行时语义完整（stat/read/write/rename/unlink 都对同一个 inode 生效）；
+ * XFS1 v5 不持久化"链接关系"，sync/remount 后每个目录项变成独立文件（文档已注明）。
+ *
+ * 符号链接：目标可以是卷内绝对路径（'/' 开头）或相对父目录的路径；带 "卷:"
+ * 前缀的目标一律 E_INVAL（跨卷软链接不做）。跟随跳数上限 FS_LINK_MAX_HOPS。
+ * fs_open 默认跟随末段，FS_OPEN_NOFOLLOW 时不跟随；fs_lstat 不跟随；
+ * fs_readlink 读目标；unlink/rename 作用于链接本身；chmod/chown 跟随。
+ * ========================================================================== */
+int fs_link_as(const char *old_path, const char *new_path, uint32_t uid, uint32_t gid);
+int fs_symlink_as(const char *target, const char *path, uint32_t uid, uint32_t gid);
+int fs_readlink_as(const char *path, char *buf, uint32_t max, uint32_t uid, uint32_t gid);
+int fs_lstat_as(const char *path, fs_stat_t *out, uint32_t uid, uint32_t gid);
+
+int fs_link_cred(const char *old_path, const char *new_path, const fs_cred_t *c);
+int fs_symlink_cred(const char *target, const char *path, const fs_cred_t *c);
+int fs_readlink_cred(const char *path, char *buf, uint32_t max, const fs_cred_t *c);
+int fs_lstat_cred(const char *path, fs_stat_t *out, const fs_cred_t *c);
+
+/* 后端实现（ramfs），由 vfs.c 路由后调用 */
+int ramfs_link_cred(const char *oldrel, const char *newrel, const fs_cred_t *c);
+int ramfs_symlink_cred(const char *target, const char *linkrel, const fs_cred_t *c);
+int ramfs_readlink_cred(const char *path, char *buf, uint32_t max, const fs_cred_t *c);
+int ramfs_lstat_cred(const char *path, fs_stat_t *out, const fs_cred_t *c);
 
 /* =============================================================================
  * VFS 后端接口

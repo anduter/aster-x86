@@ -20,6 +20,26 @@ static inline int fs_rename(const char *oldpath, const char *newpath)
     return syscall3(SYS_RENAME, (int)(unsigned int)oldpath, (int)(unsigned int)newpath, 0);
 }
 
+
+/* ---- 硬链接 / 符号链接（ABI 追加：SYS_LINK/SYS_SYMLINK/SYS_READLINK/SYS_LSTAT）----
+ * fs_link：同卷、普通文件；fs_symlink：目标文本原样保存；fs_readlink 返回长度；
+ * fs_lstat 不跟随末段，输出布局与 fs_stat 一致（type/size/mtime/mode/uid/gid）。 */
+static inline int fs_link(const char *oldpath, const char *newpath)
+{
+    return syscall3(SYS_LINK, (int)(unsigned int)oldpath, (int)(unsigned int)newpath, 0);
+}
+static inline int fs_symlink(const char *target, const char *linkpath)
+{
+    return syscall3(SYS_SYMLINK, (int)(unsigned int)target, (int)(unsigned int)linkpath, 0);
+}
+static inline int fs_readlink(const char *path, char *buf, int max)
+{
+    return syscall3(SYS_READLINK, (int)(unsigned int)path, (int)(unsigned int)buf, max);
+}
+static inline int fs_lstat(const char *path, unsigned int *st)
+{
+    return syscall3(SYS_LSTAT, (int)(unsigned int)path, (int)(unsigned int)st, 0);
+}
 /* 基于 fd 的读写（0=stdin，1=stdout，其余是文件/管道） */
 int fd_read(int fd, void *buf, int len);
 int fd_write(int fd, const void *buf, int len);

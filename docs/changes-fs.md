@@ -228,3 +228,60 @@ fs: backend selftest ok
   `fs: 64KB file limit ok (wrote 65536 bytes, one-past rejected)`，
   `build.ps1 -Test` 158/158。
 - 本批未做：FAT16 单文件上限（仍是簇链限制）、append 模式、跨卷 rename。
+
+## 9. 更新（阶段 4b）：硬链接 / 符号链接
+
+### 9.1 语义
+
+| 操作 | 语义 |
+| --- | --- |
+| 硬链接 | 仅普通文件、仅同卷；`nlink` 记在数据宿主节点上；非 root 只能给自己拥有的文件建链接 |
+| 硬链接删除 | 先减 `nlink`；宿主被删且还有其它链接时，把 inode 数据/元数据搬到存活链接上（`ino_promote`） |
+| 符号链接 | `type=FS_TYPE_LINK`，目标存在 `data` 里；目标可以是卷内绝对路径或相对父目录的路径；带 `卷:` 前缀一律 `E_INVAL` |
+| 跟随 | 中间段总是跟随；末段按操作：open 默认跟随（`FS_OPEN_NOFOLLOW` 不跟随）、stat 跟随、lstat 不跟随、readlink 不跟随、unlink/rename 作用于链接本身、chmod/chown 跟随 |
+| 跳数 | `FS_LINK_MAX_HOPS = 8`，超过返回 `E_INVAL`（环不死循环） |
+| 其它后端 | FAT16/svc/blk 的 link/symlink/readlink 一律 `E_INVAL`（VFS 路由层拒绝） |
+
+### 9.2 持久化（诚实记录）
+
+- **符号链接会持久化**：XFS1 inode 的 `type=3`，数据区里存目标文本，remount 后还是链接。
+- **硬链接关系不持久化**：XFS1 v5 没有 link-to/nlink 字段（不想为此改 inode 布局而丢掉
+  v4 兼容）。`fs_sync` 会把每个目录项按宿主内容各写一份，remount 后变成两个独立文件。
+  即"运行时语义完整、跨重启退化为副本"。要真正持久化需要 XFS1 v6（inode 加
+  `link_to`/`nlink` + 按版本读 inode 表），留到后续。
+
+### 9.3 SIP 交互
+
+`/tmp` 下建一个指向 `/bin/shell` 的软链接再写，曾被 SIP 的"只看原始路径"放过。
+现在 `resolve_path()` 在 `write_op` 时对**展开后**的路径再做一次
+`sip_guard_write`，所以 `write("/tmp/lk-bypass")` 返回 `E_ACCES`；读仍然允许。
+自检里有 `fs: symlink into system path denied ok`。
+
+### 9.4 用户态接口
+
+- 新系统调用：`SYS_LINK=73`、`SYS_SYMLINK=74`、`SYS_READLINK=75`、`SYS_LSTAT=76`
+  （`SYS_NR_MAX=76`；只追加，不改旧编号）。
+- `ulib.h`：`fs_link` / `fs_symlink` / `fs_readlink` / `fs_lstat`。
+- shell（ring3）：`ln [-s] <old> <new>`、`readlink <path>`、`linktest`（回归）。
+
+### 9.5 回归证据
+
+`build.ps1 -Test` → **174/174**：
+
+```
+fs: hard link ok (nlink=2, write via link visible)
+fs: hard link unlink keeps data ok
+fs: hard link rejects directory ok / cross-volume ok
+fs: symlink follow ok / readlink/lstat ok
+fs: O_NOFOLLOW rejects symlink ok / symlink loop limited ok
+fs: FAT16 link ops E_INVAL ok / symlink into system path denied ok
+fs: link selftest PASS
+ushell: ln ok / ln -s ok / readlink ok / lstat link type ok / linktest PASS
+```
+
+### 9.6 本批未做
+
+- 硬链接跨重启持久化（见 9.2）；
+- 目录硬链接（POSIX 禁止，未实现）、软链接的跨卷目标；
+- `ls -l` 显示链接目标/`nlink`（`fs_stat_t.nlink` 已在核内可读，但 ABI 的 stat 结构
+  仍是 24 字节，没把 nlink 暴露给用户态）。

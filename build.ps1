@@ -24,7 +24,7 @@ param(
     [string]$Cpu = 'qemu32,+nx,+smep,+smap',
     [int]$FontScale = 1,
     [int]$TimeoutSec = 12,
-    [string]$Keys = "help`nfork`nsectest`necho hi`nreexec",
+    [string]$Keys = "help`nfork`nsectest`nlinktest`necho hi`nreexec",
     # 并行会话隔离：产物目录 / 镜像目录 / QMP 端口 / 串口日志都可就近覆盖
     [string]$ObjDir = 'obj',
     [string]$DistDir = 'dist',
@@ -785,6 +785,26 @@ if ($Test -or $Shot) {
             # ---- FS 64KB / XFS1 v5（阶段 4a） ----
             @{ Name = 'XFS1 v5 挂载 64KB 限额';    Ok = ($out -match 'fs: XFS1 v5 mounted, file limit 65536 bytes') },
             @{ Name = '单文件 64KB 上限生效';      Ok = ($out -match 'fs: 64KB file limit ok \(wrote 65536 bytes, one-past rejected\)') }
+
+            # ---- 硬链接 / 符号链接（阶段 4b） ----
+            @{ Name = '硬链接 nlink 与共享数据';   Ok = ($out -match 'fs: hard link ok \(nlink=2, write via link visible\)') },
+            @{ Name = '硬链接删一个名字不丢数据';  Ok = ($out -match 'fs: hard link unlink keeps data ok') },
+            @{ Name = '目录禁止硬链接';            Ok = ($out -match 'fs: hard link rejects directory ok') },
+            @{ Name = '跨卷硬链接被拒';            Ok = ($out -match 'fs: hard link rejects cross-volume ok') },
+            @{ Name = '符号链接可跟随';            Ok = ($out -match 'fs: symlink follow ok') },
+            @{ Name = 'readlink/lstat 可用';       Ok = ($out -match 'fs: readlink/lstat ok') },
+            @{ Name = 'O_NOFOLLOW 拒绝跟随';       Ok = ($out -match 'fs: O_NOFOLLOW rejects symlink ok') },
+            @{ Name = '软链接环有跳数上限';        Ok = ($out -match 'fs: symlink loop limited ok') },
+            @{ Name = 'FAT16 link 操作 E_INVAL';   Ok = ($out -match 'fs: FAT16 link ops E_INVAL ok') },
+            @{ Name = '软链接不能绕过 SIP';        Ok = ($out -match 'fs: symlink into system path denied ok') },
+            @{ Name = 'link 自检通过';             Ok = ($out -match 'fs: link selftest PASS') }
+
+            # ---- 用户态 ln / ln -s / readlink / lstat（阶段 4b） ----
+            @{ Name = 'shell 硬链接 ln';           Ok = ($out -match 'ushell: ln ok') },
+            @{ Name = 'shell 符号链接 ln -s';      Ok = ($out -match 'ushell: ln -s ok') },
+            @{ Name = 'shell readlink';            Ok = ($out -match 'ushell: readlink ok') },
+            @{ Name = 'shell lstat 报链接类型';    Ok = ($out -match 'ushell: lstat link type ok') },
+            @{ Name = '用户态 link 回归通过';      Ok = ($out -match 'ushell: linktest PASS') }
         )
 
         T 'checks begin'

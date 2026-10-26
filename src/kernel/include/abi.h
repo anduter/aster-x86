@@ -179,7 +179,11 @@
 #define SIG_IGN 1u
 
 /* 已分配的最大编号；新增调用必须从 SYS_NR_MAX + 1 开始 */
-#define SYS_NR_MAX 72
+#define SYS_LINK      73 /* ebx=old path, ecx=new path      -> 0 / -1（硬链接） */
+#define SYS_SYMLINK   74 /* ebx=target, ecx=link path      -> 0 / -1（符号链接） */
+#define SYS_READLINK  75 /* ebx=path, ecx=buf, edx=max     -> 目标长度 / -1 */
+#define SYS_LSTAT     76 /* ebx=path, ecx=&stat[6]         -> 0 / -1（不跟随末段） */
+#define SYS_NR_MAX 76
 
 /* =============================================================================
  * 3. 用户可见共享结构体（布局冻结，见文件末尾断言）

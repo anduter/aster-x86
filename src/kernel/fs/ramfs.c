@@ -88,13 +88,26 @@ int fs_check_impl(char *report, uint32_t max);
 /* 宏会把下面的公开名展开成 *_impl：fs_mount 在 fs_init 里被提前调用。 */
 int      fs_mount(const char *name);
 
-/* ---- 节点 ---- */
+/* ---- 节点 ----
+ *
+ * 一个节点 = 一个目录项（name/parent/sibling）+ 一份 inode 元数据。
+ *
+ * 硬链接：link 节点的 canon 指向"真正持有数据/元数据"的主节点，nlink 记在主
+ * 节点上（1 = 只有自己）。元数据/数据访问一律走 ino_of()，所以从任何名字
+ * stat/write 都看到同一份内容；rename/unlink 作用于目录项本身。
+ *
+ * 符号链接：type = FS_TYPE_LINK，data 里存目标路径（NUL 结尾），size = 长度。
+ * 解析规则见 resolve_path()：跳数上限 FS_LINK_MAX_HOPS，中间段和末段按操作
+ * 语义决定是否跟随（lstat/readlink/unlink 不跟随末段）。
+ */
 typedef struct fs_node {
     fs_type_t type;
     char      name[FS_NAME_MAX];
     struct fs_node *parent;
     struct fs_node *first_child;
     struct fs_node *next_sibling;
+    struct fs_node *canon;  /* 硬链接：0 = 自己就是 inode 宿主 */
+    uint32_t  nlink;        /* 数据宿主上的链接数（>=1） */
     uint32_t  size;
     uint32_t  mtime;        /* 最后修改时间（epoch 秒） */
     uint32_t  mode;         /* 权限位（rwxrwxrwx + setuid/setgid/sticky） */
@@ -102,6 +115,12 @@ typedef struct fs_node {
     uint32_t  gid;          /* 属组 */
     uint8_t   data[FS_FILE_MAX];
 } fs_node_t;
+
+/* 元数据/数据的宿主：普通节点返回自己，硬链接返回主节点 */
+static fs_node_t *ino_of(fs_node_t *n)
+{
+    return (n != 0 && n->canon != 0) ? n->canon : n;
+}
 
 static uint32_t perm_bits(const fs_node_t *n, const fs_cred_t *c);
 static bool     may_access(const fs_node_t *n, uint32_t want, const fs_cred_t *c);
@@ -331,6 +350,170 @@ static int split_parent_ex(const char *path, fs_volume_t **vol_out,
     return E_OK;
 }
 
+/* =============================================================================
+ * 符号链接解析
+ *
+ * resolve_path() 把一条卷内相对路径里的符号链接展开成"等价的无链接路径"：
+ *   - 中间段一律跟随；
+ *   - 末段是否跟随由 follow_final 决定（open 默认跟随、lstat/readlink/unlink/
+ *     rename 不跟随、chmod/chown 跟随）；
+ *   - 跳数上限 FS_LINK_MAX_HOPS，超了返回 E_INVAL（和 Linux 的 ELOOP 同义）；
+ *   - 只支持同卷目标：目标带 "卷:" 前缀直接 E_INVAL（跨卷软链接不做）；
+ *   - write_op 时对**展开后**的路径重新做一次 SIP 判定，堵住
+ *     "在 /tmp 建软链接指向 /bin/shell 再写" 的绕过（见 docs/security-model.md 4.13）。
+ * 目标可以是绝对路径（卷内以 '/' 开头）或相对父目录的路径。
+ * ========================================================================== */
+static int read_link_target(const fs_node_t *n, char *buf, uint32_t max)
+{
+    const fs_node_t *in = (n != 0 && n->canon != 0) ? n->canon : n;
+    uint32_t len;
+
+    if (in == 0 || in->type != FS_TYPE_LINK) return E_INVAL;
+    len = in->size;
+    if (len == 0U || len >= max) return E_INVAL;
+    memcpy(buf, in->data, len);
+    buf[len] = '\0';
+    return (int)len;
+}
+
+static int sip_resolved_write_ok(fs_volume_t *vol, const char *relpath)
+{
+    char full[FS_PATH_MAX];
+    int n;
+
+    if (!sip_enabled() || sip_updater_active()) return E_OK;
+    n = ksnprintf(full, sizeof(full), "%s:%s%s", vol->name,
+                  (relpath[0] == '/') ? "" : "/", relpath);
+    if (n <= 0 || (uint32_t)n >= sizeof(full)) return E_INVAL;
+    return sip_guard_write(full);
+}
+
+static int resolve_path(fs_volume_t *vol, const char *rel, const fs_cred_t *c,
+                        int follow_final, int write_op, uint32_t hops,
+                        char *out, uint32_t max)
+{
+    char prefix[FS_PATH_MAX];
+    char candidate[FS_PATH_MAX];
+    char target[FS_PATH_MAX];
+    char joined[FS_PATH_MAX];
+    const char *p = (rel != 0) ? rel : "";
+    uint32_t plen = 0;
+    int why = 0;
+
+    if (out == 0 || max == 0U || vol == 0) return E_INVAL;
+    prefix[0] = '\0';
+
+    while (*p != '\0') {
+        char comp[FS_NAME_MAX];
+        uint32_t n = 0;
+        const char *rest;
+        int is_last;
+
+        while (*p == '/') p++;
+        if (*p == '\0') break;
+
+        rest = p;
+        while (*rest != '\0' && *rest != '/') {
+            if (n + 1U < sizeof(comp)) comp[n++] = *rest;
+            rest++;
+        }
+        comp[n] = '\0';
+        is_last = (*rest == '\0');
+
+        if (strcmp(comp, ".") == 0 || strcmp(comp, "..") == 0) {
+            /* "." / ".." 原样保留：walk_rel_ex 自己会处理 */
+        }
+
+        if (plen == 0U) {
+            int k = ksnprintf(candidate, sizeof(candidate), "%s", comp);
+            if (k <= 0 || (uint32_t)k >= sizeof(candidate)) return E_INVAL;
+        } else {
+            int k = ksnprintf(candidate, sizeof(candidate), "%s/%s", prefix, comp);
+            if (k <= 0 || (uint32_t)k >= sizeof(candidate)) return E_INVAL;
+        }
+        plen = (uint32_t)strlen(candidate);
+
+        {
+            fs_node_t *node = walk_rel_ex(vol, candidate, c, &why);
+
+            if (node == 0) {
+                /* 不存在：把剩余部分原样接上，交给调用方按 E_NOENT/创建处理 */
+                int k = ksnprintf(out, max, "%s%s", candidate,
+                                   (rest[0] == '\0') ? "" : rest);
+                return (k > 0 && (uint32_t)k < max) ? E_OK : E_INVAL;
+            }
+            if (node->type == FS_TYPE_LINK && (!is_last || follow_final)) {
+                int tlen;
+
+                if (hops + 1U > FS_LINK_MAX_HOPS) return E_INVAL;
+                tlen = read_link_target(node, target, sizeof(target));
+                if (tlen < 0) return E_INVAL;
+
+                if (target[0] == '/') {
+                    int k = ksnprintf(joined, sizeof(joined), "%s%s", target, rest);
+                    if (k <= 0 || (uint32_t)k >= sizeof(joined)) return E_INVAL;
+                } else if (prefix[0] != '\0') {
+                    int k = ksnprintf(joined, sizeof(joined), "%s/%s%s",
+                                      prefix, target, rest);
+                    if (k <= 0 || (uint32_t)k >= sizeof(joined)) return E_INVAL;
+                } else {
+                    int k = ksnprintf(joined, sizeof(joined), "%s%s", target, rest);
+                    if (k <= 0 || (uint32_t)k >= sizeof(joined)) return E_INVAL;
+                }
+                if (strchr(joined, ':') != 0) return E_INVAL;   /* 跨卷软链接不做 */
+                if (write_op && sip_resolved_write_ok(vol, joined) != E_OK) {
+                    return E_ACCES;
+                }
+                return resolve_path(vol, joined, c, follow_final, write_op,
+                                    hops + 1U, out, max);
+            }
+            if (node->type == FS_TYPE_LINK && is_last && !follow_final) {
+                int k = ksnprintf(out, max, "%s", candidate);
+                return (k > 0 && (uint32_t)k < max) ? E_OK : E_INVAL;
+            }
+        }
+
+        {
+            int k = ksnprintf(prefix, sizeof(prefix), "%s", candidate);
+            if (k <= 0 || (uint32_t)k >= sizeof(prefix)) return E_INVAL;
+        }
+        p = rest;
+    }
+
+    {
+        int k = ksnprintf(out, max, "%s", prefix);
+        return (k >= 0 && (uint32_t)k < max) ? E_OK : E_INVAL;
+    }
+}
+
+/* 卷内路径解析 + 一条龙封装（调用方已拿到 vol/rel） */
+static int resolve_in_volume(fs_volume_t *vol, const char *rel, const fs_cred_t *c,
+                             int follow_final, int write_op, char *out, uint32_t max)
+{
+    /* 绝对路径的卷内形式统一去掉前导 '/'，再交给 resolve_path */
+    while (*rel == '/') rel++;
+    return resolve_path(vol, rel, c, follow_final, write_op, 0U, out, max);
+}
+
+/* 解析成"卷限定"的完整路径（mkdir/unlink/rename/link/symlink 用：它们后面还要
+ * 交给 split_parent_ex，必须保留 "卷:" 前缀，否则会落到默认卷上）。 */
+static int resolve_full_path(const char *path, const fs_cred_t *c,
+                             int follow_final, int write_op,
+                             char *out, uint32_t max)
+{
+    fs_volume_t *vol;
+    const char *rel;
+    char rpath[FS_PATH_MAX];
+    int r;
+
+    if (path == 0) return E_INVAL;
+    vol = path_volume(path, &rel);
+    if (vol == 0) return E_NOENT;
+    r = resolve_in_volume(vol, rel, c, follow_final, write_op, rpath, sizeof(rpath));
+    if (r != E_OK) return r;
+    r = ksnprintf(out, max, "%s:/%s", vol->name, rpath);
+    return (r > 0 && (uint32_t)r < max) ? E_OK : E_INVAL;
+}
 static fs_file_t *handle_from(uint32_t handle)
 {
     void *data = 0;
@@ -390,6 +573,7 @@ int fs_mount(const char *name)
 
     /* 驱动器根节点，名字就是驱动号 */
     root->type = FS_TYPE_DIR;
+    root->nlink = 1;
     strcpy(root->name, name);
     root->mtime = rtc_now();
     root->mode = FS_MODE_DIR_DEFAULT;
@@ -437,12 +621,15 @@ int fs_volume_name(uint32_t index, char *buf, uint32_t name_max)
  * 判定顺序与 Linux 一致：euid == 属主 -> user 位；否则 egid 或任一附加组
  * == 属组 -> group 位；否则 other 位。euid == 0 保留 CAP_DAC_OVERRIDE。 */
 
-/* 按“属主 / 属组 / 其他人”取出 3 位权限 */
+/* 按“属主 / 属组 / 其他人”取出 3 位权限（硬链接取宿主节点的元数据） */
 static uint32_t perm_bits(const fs_node_t *n, const fs_cred_t *c)
 {
-    if (c != 0 && c->euid == n->uid) return (n->mode >> 6) & 7U;
-    if (c != 0 && fs_cred_in_group(c, n->gid)) return (n->mode >> 3) & 7U;
-    return n->mode & 7U;
+    const fs_node_t *in = (n != 0 && n->canon != 0) ? n->canon : n;
+
+    if (in == 0) return 0;
+    if (c != 0 && c->euid == in->uid) return (in->mode >> 6) & 7U;
+    if (c != 0 && fs_cred_in_group(c, in->gid)) return (in->mode >> 3) & 7U;
+    return in->mode & 7U;
 }
 
 static bool may_access(const fs_node_t *n, uint32_t want, const fs_cred_t *c)
@@ -457,9 +644,11 @@ static bool may_access(const fs_node_t *n, uint32_t want, const fs_cred_t *c)
  * 能删除/改名目录里的项。没有 sticky 时只看目录的 w+x（由调用方先判）。 */
 static bool may_unlink_in(const fs_node_t *dir, const fs_node_t *node, const fs_cred_t *c)
 {
+    const fs_node_t *owner = (node != 0 && node->canon != 0) ? node->canon : node;
+
     if (fs_cred_is_root(c)) return true;
     if ((dir->mode & FS_MODE_STICKY) == 0U) return true;
-    if (node->uid == c->euid) return true;
+    if (owner != 0 && owner->uid == c->euid) return true;
     if (dir->uid == c->euid) return true;
     return false;
 }
@@ -500,6 +689,7 @@ static uint32_t new_mode_umasked(uint32_t base, const fs_cred_t *c)
 
 static int access_impl(const char *path, uint32_t want, const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *n;
@@ -509,6 +699,11 @@ static int access_impl(const char *path, uint32_t want, const fs_cred_t *c)
 
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
+    {
+        int rr = resolve_in_volume(vol, rel, c, 1, 0, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        rel = rpath;
+    }
 
     n = walk_rel_ex(vol, rel, c, &why);
     if (n == 0) return (why == 2) ? E_ACCES : E_NOENT;
@@ -531,6 +726,7 @@ int fs_access_cred_impl(const char *path, uint32_t want, const fs_cred_t *c)
 
 int fs_chmod_impl(const char *path, uint32_t mode, const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
     if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol;
     const char *rel;
@@ -542,8 +738,13 @@ int fs_chmod_impl(const char *path, uint32_t mode, const fs_cred_t *c)
 
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
+    {
+        int rr = resolve_in_volume(vol, rel, c, 1, 1, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        rel = rpath;
+    }
 
-    n = walk_rel_ex(vol, rel, c, 0);
+    n = ino_of(walk_rel_ex(vol, rel, c, 0));
     if (n == 0) return E_NOENT;
 
     /* 只有 root 或属主能改权限 */
@@ -564,6 +765,7 @@ int fs_chmod_impl(const char *path, uint32_t mode, const fs_cred_t *c)
 
 int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
     if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol;
     const char *rel;
@@ -573,8 +775,13 @@ int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t 
 
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
+    {
+        int rr = resolve_in_volume(vol, rel, c, 1, 1, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        rel = rpath;
+    }
 
-    n = walk_rel_ex(vol, rel, c, 0);
+    n = ino_of(walk_rel_ex(vol, rel, c, 0));
     if (n == 0) return E_NOENT;
 
     if (!fs_cred_is_root(c)) return E_ACCES;    /* 只有 root 能改属主 */
@@ -589,6 +796,7 @@ int fs_chown_impl(const char *path, uint32_t uid, uint32_t gid, const fs_cred_t 
 
 static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
     if ((flags & (FS_OPEN_WRITE | FS_OPEN_CREAT)) != 0U &&
         sip_guard_write(path) != E_OK) {
         return 0;
@@ -604,6 +812,14 @@ static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *
 
     vol = path_volume(path, &rel);
     if (vol == 0) return 0;
+    {
+        int rr = resolve_in_volume(vol, rel, c,
+                                  ((flags & FS_OPEN_NOFOLLOW) == 0U) ? 1 : 0,
+                                  ((flags & (FS_OPEN_WRITE | FS_OPEN_CREAT)) != 0U) ? 1 : 0,
+                                  rpath, sizeof(rpath));
+        if (rr != E_OK) return 0;
+        rel = rpath;
+    }
 
     node = walk_rel_ex(vol, rel, c, &why);
 
@@ -622,6 +838,7 @@ static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *
         if (node == 0) return 0;
 
         node->type = FS_TYPE_FILE;
+        node->nlink = 1;
         strcpy(node->name, name);
         node->size = 0;
         node->mode = new_mode_umasked(FS_MODE_FILE_DEFAULT, c);
@@ -631,6 +848,8 @@ static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *
         link_child(dir, node);
     } else if (node->type == FS_TYPE_DIR) {
         return 0;                       /* 不支持打开目录 */
+    } else if (node->type == FS_TYPE_LINK) {
+        return 0;                       /* O_NOFOLLOW：不跟随末段软链接 */
     } else {
         /* 已存在的文件：按打开标志检查读写权限 */
         uint32_t want = 0;
@@ -663,19 +882,21 @@ static uint32_t fs_open_impl(const char *path, uint32_t flags, const fs_cred_t *
 int fs_read(uint32_t handle, void *buf, uint32_t len)
 {
     fs_file_t *f = handle_from(handle);
+    fs_node_t *ino;
     uint32_t n;
 
     if (f == 0 || buf == 0) return E_TYPE;
+    ino = ino_of(f->node);   /* 硬链接：读的是宿主节点的数据 */
     if ((f->flags & FS_OPEN_READ) == 0U) return E_INVAL;
 
     /* 偏移超出节点当前大小说明节点被截断/回收过：无符号相减会下溢成巨大值，
      * 直接拒绝，避免越界读（正常路径 offset 永远 <= size）。 */
-    if (f->offset > f->node->size) return E_INVAL;
+    if (f->offset > ino->size) return E_INVAL;
 
-    n = f->node->size - f->offset;
+    n = ino->size - f->offset;
     if (n > len) n = len;
 
-    memcpy(buf, f->node->data + f->offset, n);
+    memcpy(buf, ino->data + f->offset, n);
     f->offset += n;
     return (int)n;
 }
@@ -683,9 +904,11 @@ int fs_read(uint32_t handle, void *buf, uint32_t len)
 int fs_write(uint32_t handle, const void *buf, uint32_t len)
 {
     fs_file_t *f = handle_from(handle);
+    fs_node_t *ino;
     uint32_t space;
 
     if (f == 0 || buf == 0) return E_TYPE;
+    ino = ino_of(f->node);
     if ((f->flags & FS_OPEN_WRITE) == 0U) return E_INVAL;
 
     /* 超过单文件上限时整次写入失败，一个字节都不写。
@@ -695,13 +918,13 @@ int fs_write(uint32_t handle, const void *buf, uint32_t len)
     space = (f->offset < fs_limit_current) ? (fs_limit_current - f->offset) : 0U;
     if (len > space) return E_NOSPC;
 
-    memcpy(f->node->data + f->offset, buf, len);
+    memcpy(ino->data + f->offset, buf, len);
     f->offset += len;
-    if (f->offset > f->node->size) {
-        f->node->size = f->offset;
+    if (f->offset > ino->size) {
+        ino->size = f->offset;
     }
     if (len != 0U) {
-        f->node->mtime = rtc_now();     /* 记录最后修改时间 */
+        ino->mtime = rtc_now();     /* 记录最后修改时间 */
     }
     return (int)len;
 }
@@ -736,8 +959,10 @@ int fs_ref(uint32_t handle)
     return E_OK;
 }
 
-static int stat_impl(const char *path, fs_stat_t *out, const fs_cred_t *c)
+static int stat_impl(const char *path, fs_stat_t *out, const fs_cred_t *c,
+                   int follow_final)
 {
+    char rpath[FS_PATH_MAX];
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *n;
@@ -747,38 +972,251 @@ static int stat_impl(const char *path, fs_stat_t *out, const fs_cred_t *c)
 
     vol = path_volume(path, &rel);
     if (vol == 0) return E_NOENT;
+    {
+        int rr = resolve_in_volume(vol, rel, c, follow_final, 0, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        rel = rpath;
+    }
 
     n = walk_rel_ex(vol, rel, c, &why);
     if (n == 0) return (why == 2) ? E_ACCES : E_NOENT;
     if (out != 0) {
-        out->type = n->type;
-        out->size = (n->type == FS_TYPE_FILE) ? n->size : 0U;
-        out->mtime = n->mtime;
-        out->mode = n->mode;
-        out->uid = n->uid;
-        out->gid = n->gid;
+        fs_node_t *in = ino_of(n);
+
+        out->type = n->type;          /* 符号链接本身报 LINK（跟随已在上面做过） */
+        out->size = (n->type == FS_TYPE_DIR) ? 0U : in->size;
+        out->mtime = in->mtime;
+        out->mode = in->mode;
+        out->uid = in->uid;
+        out->gid = in->gid;
+        out->nlink = (n->type == FS_TYPE_DIR) ? 1U : in->nlink;
     }
     return E_OK;
 }
 
 int fs_stat(const char *path, fs_stat_t *out)
 {
-    return stat_impl(path, out, 0);
+    return stat_impl(path, out, 0, 1);
 }
 
 int fs_stat_cred_impl(const char *path, fs_stat_t *out, const fs_cred_t *c)
 {
-    return stat_impl(path, out, c);
+    return stat_impl(path, out, c, 1);
 }
 
+/* =============================================================================
+ * 硬链接 / 符号链接
+ * ========================================================================== */
+
+static fs_node_t *child_by_name(fs_node_t *dir, const char *name)
+{
+    if (dir == 0 || dir->type != FS_TYPE_DIR || name == 0) return 0;
+    for (fs_node_t *c = dir->first_child; c != 0; c = c->next_sibling) {
+        if (strcmp(c->name, name) == 0) return c;
+    }
+    return 0;
+}
+
+/* 硬链接：old 必须是普通文件（目录/符号链接禁止），目标不能已存在，
+ * 必须同卷。非 root 只能给自己拥有的文件建链接（Linux protected_hardlinks 的
+ * 简化版），避免"给别人的文件加一个自己能改的名字"。 */
+static int link_impl(const char *oldrel, const char *newrel, const fs_cred_t *c)
+{
+    fs_volume_t *ovol = 0;
+    fs_volume_t *nvol = 0;
+    const char *orel = 0;
+    const char *nrel = 0;
+    char rpath[FS_PATH_MAX];
+    char rpath2[FS_PATH_MAX];
+    fs_node_t *onode;
+    fs_node_t *ndir = 0;
+    fs_node_t *nn;
+    fs_node_t *ino;
+    char nname[FS_NAME_MAX];
+    int why = 0;
+    int r;
+
+    if (oldrel == 0 || newrel == 0) return E_INVAL;
+    ovol = path_volume(oldrel, &orel);
+    if (ovol == 0) return E_NOENT;
+    r = resolve_in_volume(ovol, orel, c, 0, 0, rpath, sizeof(rpath));
+    if (r != E_OK) return r;
+    onode = walk_rel_ex(ovol, rpath, c, &why);
+    if (onode == 0) return E_NOENT;
+    if (onode->type != FS_TYPE_FILE) return E_INVAL;     /* 目录 / 符号链接禁止 */
+    ino = ino_of(onode);
+    if (!fs_cred_is_root(c) && ino->uid != c->euid) return E_ACCES;
+
+    nvol = path_volume(newrel, &nrel);
+    if (nvol == 0) return E_NOENT;
+    if (nvol != ovol) return E_INVAL;                    /* 跨卷硬链接禁止 */
+    r = resolve_full_path(newrel, c, 0, 1, rpath2, sizeof(rpath2));
+    if (r != E_OK) return r;
+    r = split_parent_ex(rpath2, &nvol, &ndir, nname, c, &why);
+    if (r != E_OK) return (why == 2) ? E_ACCES : r;
+    if (!may_access(ndir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, c)) return E_ACCES;
+    if (child_by_name(ndir, nname) != 0) return E_EXIST;
+
+    nn = node_alloc();
+    if (nn == 0) return E_FULL;
+    nn->type = FS_TYPE_FILE;
+    nn->canon = ino;
+    nn->nlink = 0;                      /* 计数只记在宿主上 */
+    strncpy(nn->name, nname, FS_NAME_MAX - 1U);
+    nn->name[FS_NAME_MAX - 1U] = '\0';
+    ino->nlink++;
+    link_child(ndir, nn);
+    return E_OK;
+}
+
+/* 符号链接：目标长度 < FS_PATH_MAX；不解析目标（悬空链接合法）。 */
+static int symlink_impl(const char *target, const char *linkrel, const fs_cred_t *c)
+{
+    fs_volume_t *vol = 0;
+    const char *rel = 0;
+    char rpath[FS_PATH_MAX];
+    fs_node_t *dir = 0;
+    fs_node_t *node;
+    char name[FS_NAME_MAX];
+    uint32_t tlen;
+    int why = 0;
+    int r;
+
+    if (target == 0 || linkrel == 0) return E_INVAL;
+    tlen = (uint32_t)strlen(target);
+    if (tlen == 0U || tlen >= FS_PATH_MAX) return E_INVAL;
+    if (strchr(target, ':') != 0) return E_INVAL;        /* 跨卷软链接不做 */
+
+    vol = path_volume(linkrel, &rel);
+    if (vol == 0) return E_NOENT;
+    r = resolve_full_path(linkrel, c, 0, 1, rpath, sizeof(rpath));
+    if (r != E_OK) return r;
+    r = split_parent_ex(rpath, &vol, &dir, name, c, &why);
+    if (r != E_OK) return (why == 2) ? E_ACCES : r;
+    if (!may_access(dir, FS_ACCESS_WRITE | FS_ACCESS_EXEC, c)) return E_ACCES;
+    if (child_by_name(dir, name) != 0) return E_EXIST;
+
+    node = node_alloc();
+    if (node == 0) return E_FULL;
+    node->type = FS_TYPE_LINK;
+    node->nlink = 1;
+    node->size = tlen;
+    memcpy(node->data, target, tlen);
+    node->data[tlen] = '\0';
+    node->mode = 0777U;                  /* lrwxrwxrwx */
+    node->uid = (c != 0) ? c->euid : 0U;
+    node->gid = (c != 0) ? c->egid : 0U;
+    node->mtime = rtc_now();
+    strncpy(node->name, name, FS_NAME_MAX - 1U);
+    node->name[FS_NAME_MAX - 1U] = '\0';
+    link_child(dir, node);
+    return E_OK;
+}
+
+/* readlink：不跟随末段；返回目标长度（不含 NUL），非链接 E_INVAL。 */
+static int readlink_impl(const char *path, char *buf, uint32_t max, const fs_cred_t *c)
+{
+    fs_volume_t *vol = 0;
+    const char *rel = 0;
+    char rpath[FS_PATH_MAX];
+    fs_node_t *node;
+    int why = 0;
+    int r;
+
+    if (path == 0 || buf == 0 || max == 0U) return E_INVAL;
+    vol = path_volume(path, &rel);
+    if (vol == 0) return E_NOENT;
+    r = resolve_in_volume(vol, rel, c, 0, 0, rpath, sizeof(rpath));
+    if (r != E_OK) return r;
+    node = walk_rel_ex(vol, rpath, c, &why);
+    if (node == 0) return (why == 2) ? E_ACCES : E_NOENT;
+    return read_link_target(node, buf, max);
+}
+
+/* lstat：不跟随末段（符号链接本身） */
+static int lstat_impl(const char *path, fs_stat_t *out, const fs_cred_t *c)
+{
+    return stat_impl(path, out, c, 0);
+}
+/* 对外入口：整次操作持 fs_lock（和 fs_open/fs_rename 一致） */
+int ramfs_link_cred(const char *oldrel, const char *newrel, const fs_cred_t *c)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = link_impl(oldrel, newrel, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int ramfs_symlink_cred(const char *target, const char *linkrel, const fs_cred_t *c)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = symlink_impl(target, linkrel, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int ramfs_readlink_cred(const char *path, char *buf, uint32_t max, const fs_cred_t *c)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = readlink_impl(path, buf, max, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int ramfs_lstat_cred(const char *path, fs_stat_t *out, const fs_cred_t *c)
+{
+    uint32_t fl = spin_lock_irqsave(&fs_lock);
+    int r = lstat_impl(path, out, c);
+    spin_unlock_irqrestore(&fs_lock, fl);
+    return r;
+}
+
+int fs_link_as(const char *oldrel, const char *newrel, uint32_t uid, uint32_t gid)
+{
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return fs_link_cred(oldrel, newrel, &c);   /* 先过 VFS 路由：FAT16 -> E_INVAL */
+}
+
+int fs_symlink_as(const char *target, const char *linkrel, uint32_t uid, uint32_t gid)
+{
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return fs_symlink_cred(target, linkrel, &c);
+}
+
+int fs_readlink_as(const char *path, char *buf, uint32_t max, uint32_t uid, uint32_t gid)
+{
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return fs_readlink_cred(path, buf, max, &c);
+}
+
+int fs_lstat_as(const char *path, fs_stat_t *out, uint32_t uid, uint32_t gid)
+{
+    fs_cred_t c;
+
+    fs_cred_from_ids(&c, uid, gid);
+    return fs_lstat_cred(path, out, &c);
+}
 static int mkdir_impl(const char *path, const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
     if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
     fs_node_t *node;
     char name[FS_NAME_MAX];
     int why = 0;
+    /* SIP/软链接：先展开路径里的符号链接（末段不跟随：mkdir/unlink 作用于链接本身） */
+    {
+        int rr = resolve_full_path(path, c, 0, 1, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        path = rpath;
+    }
     int r = split_parent_ex(path, &vol, &dir, name, c, &why);
 
     if (r != E_OK) return (why == 2) ? E_ACCES : r;
@@ -791,6 +1229,7 @@ static int mkdir_impl(const char *path, const fs_cred_t *c)
     if (node == 0) return E_FULL;
 
     node->type = FS_TYPE_DIR;
+    node->nlink = 1;
     strcpy(node->name, name);
     node->mode = new_mode_umasked(FS_MODE_DIR_DEFAULT, c);
     node->uid = (c != 0) ? c->euid : 0U;
@@ -813,14 +1252,51 @@ int fs_mkdir_cred_impl(const char *path, const fs_cred_t *c)
     return mkdir_impl(path, c);
 }
 
+/* 主节点要被删除但还有硬链接：把 inode 元数据/数据搬到第一个存活的链接上，
+ * 让它变成新的宿主（否则剩下的链接会指向已释放的节点）。 */
+static void ino_promote(fs_node_t *ino)
+{
+    fs_node_t *survivor = 0;
+
+    for (uint32_t i = 0; i < FS_MAX_NODES; i++) {
+        if (nodes[i].type != FS_TYPE_NONE && nodes[i].canon == ino) {
+            survivor = &nodes[i];
+            break;
+        }
+    }
+    if (survivor == 0) return;
+
+    survivor->type = ino->type;
+    survivor->size = ino->size;
+    survivor->mtime = ino->mtime;
+    survivor->mode = ino->mode;
+    survivor->uid = ino->uid;
+    survivor->gid = ino->gid;
+    memcpy(survivor->data, ino->data, ino->size);
+    survivor->canon = 0;
+    survivor->nlink = ino->nlink - 1U;
+
+    for (uint32_t i = 0; i < FS_MAX_NODES; i++) {
+        if (nodes[i].type != FS_TYPE_NONE && nodes[i].canon == ino) {
+            nodes[i].canon = survivor;
+        }
+    }
+}
 static int unlink_impl(const char *path, const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
     if (sip_guard_write(path) != E_OK) return E_ACCES;
     fs_volume_t *vol = 0;
     fs_node_t *dir = 0;
     fs_node_t *node;
     char name[FS_NAME_MAX];
     int why = 0;
+    /* SIP/软链接：先展开路径里的符号链接（末段不跟随：mkdir/unlink 作用于链接本身） */
+    {
+        int rr = resolve_full_path(path, c, 0, 1, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        path = rpath;
+    }
     int r = split_parent_ex(path, &vol, &dir, name, c, &why);
 
     if (r != E_OK) return (why == 2) ? E_ACCES : r;
@@ -831,8 +1307,28 @@ static int unlink_impl(const char *path, const fs_cred_t *c)
     node = find_child(dir, name);
     if (node == 0) return E_NOENT;
     if (!may_unlink_in(dir, node, c)) return E_ACCES;   /* sticky 目录 */
-    if (node_is_open(node)) return E_BUSY;
-    if (node->type == FS_TYPE_DIR && node->first_child != 0) return E_NOSPC;
+    {
+        fs_node_t *ino = ino_of(node);
+
+        /* 打开的句柄可能是通过任一链接名拿到的：两个都查 */
+        if (node_is_open(node) || node_is_open(ino)) return E_BUSY;
+        if (node->type == FS_TYPE_DIR && node->first_child != 0) return E_NOSPC;
+
+        /* 删的是硬链接的目录项：inode 还在，只减计数 + 释放这个名字 */
+        if (node->type != FS_TYPE_DIR && ino != node) {
+            if (ino->nlink > 0U) ino->nlink--;
+            unlink_child(dir, node);
+            memset(node, 0, sizeof(*node));
+            return E_OK;
+        }
+        /* 删的是 inode 宿主、但还有别的链接：先把 inode 搬到存活链接上 */
+        if (node->type != FS_TYPE_DIR && ino == node && ino->nlink > 1U) {
+            ino_promote(ino);
+            unlink_child(dir, node);
+            memset(node, 0, sizeof(*node));
+            return E_OK;
+        }
+    }
 
     unlink_child(dir, node);
     memset(node, 0, sizeof(*node));
@@ -856,6 +1352,7 @@ static int listdir_impl(const char *path, uint32_t index,
                         char *name, uint32_t name_max, fs_stat_t *out,
                         const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
     fs_volume_t *vol;
     const char *rel;
     fs_node_t *dir;
@@ -888,6 +1385,11 @@ static int listdir_impl(const char *path, uint32_t index,
     }
 
     vol = path_volume(path, &rel);
+    {
+        int rr = resolve_in_volume(vol, rel, c, 1, 0, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        rel = rpath;
+    }
     if (vol == 0) return E_NOENT;
 
     dir = walk_rel_ex(vol, rel, c, &why);
@@ -902,12 +1404,15 @@ static int listdir_impl(const char *path, uint32_t index,
                 name[name_max - 1U] = '\0';
             }
             if (out != 0) {
+                fs_node_t *ci = ino_of(c_);
+
                 out->type = c_->type;
-                out->size = (c_->type == FS_TYPE_FILE) ? c_->size : 0U;
-                out->mtime = c_->mtime;
-                out->mode = c_->mode;
-                out->uid = c_->uid;
-                out->gid = c_->gid;
+                out->size = (c_->type == FS_TYPE_DIR) ? 0U : ci->size;
+                out->mtime = ci->mtime;
+                out->mode = ci->mode;
+                out->uid = ci->uid;
+                out->gid = ci->gid;
+                out->nlink = (c_->type == FS_TYPE_DIR) ? 1U : ci->nlink;
             }
             return E_OK;
         }
@@ -956,6 +1461,8 @@ static bool dir_is_inside(fs_node_t *dir, fs_node_t *node)
 static int ramfs_rename_impl(const char *oldrel, const char *newrel,
                              const fs_cred_t *c)
 {
+    char rpath[FS_PATH_MAX];
+    char rpath2[FS_PATH_MAX];
     /* 源和目标任一在受保护目录都拒绝（rename 会同时改两边目录项） */
     if (sip_guard_write(oldrel) != E_OK || sip_guard_write(newrel) != E_OK) {
         return E_ACCES;
@@ -971,6 +1478,16 @@ static int ramfs_rename_impl(const char *oldrel, const char *newrel,
     int why = 0;
     int r;
 
+    /* 源/目标都先展开中间段的符号链接；末段不跟随（rename 改的是链接本身） */
+    {
+        int rr = resolve_full_path(oldrel, c, 0, 1, rpath, sizeof(rpath));
+        if (rr != E_OK) return rr;
+        oldrel = rpath;
+
+        rr = resolve_full_path(newrel, c, 0, 1, rpath2, sizeof(rpath2));
+        if (rr != E_OK) return rr;
+        newrel = rpath2;
+    }
     r = split_parent_ex(oldrel, &ovol, &odir, oname, c, &why);
     if (r != E_OK) return E_NOENT;              /* 父路径不合法/不存在 */
 
@@ -1079,9 +1596,13 @@ unsigned int fs_node_count(void)
         if (n->type == FS_TYPE_NONE) continue;
         node_count++;
 
-        if (n->type == FS_TYPE_FILE) {
+        if (n->type == FS_TYPE_FILE || n->type == FS_TYPE_LINK) {
             file_count++;
-            if (n->size > fs_limit_current) errors++;
+            if (ino_of(n)->size > fs_limit_current) errors++;
+            if (n->canon != 0 &&
+                (n->canon < &nodes[0] || n->canon >= &nodes[FS_MAX_NODES])) {
+                errors++;
+            }
         } else if (n->type == FS_TYPE_DIR) {
             dir_count++;
             if (n->size != 0U) errors++;
@@ -1185,20 +1706,26 @@ static int dump_tree(fs_node_t *n, uint32_t parent, uint32_t vol,
 
     idx = dump_count++;
     in = &dump_inodes[idx];
-    memset(in, 0, sizeof(*in));
-    in->used = 1U;
-    in->type = (uint32_t)n->type;
-    in->parent = parent;
-    in->size = n->size;
-    in->volume = vol;
-    in->mtime = n->mtime;
-    in->mode = n->mode;
-    in->uid = n->uid;
-    in->gid = n->gid;
+    {
+        /* 硬链接的目录项自己不带数据：序列化用宿主节点的内容。
+         * 链接关系不落盘（见 fs.h 说明），remount 后每个名字是独立文件。 */
+        fs_node_t *ino = ino_of(n);
+
+        memset(in, 0, sizeof(*in));
+        in->used = 1U;
+        in->type = (uint32_t)ino->type;
+        in->parent = parent;
+        in->size = ino->size;
+        in->volume = vol;
+        in->mtime = ino->mtime;
+        in->mode = ino->mode;
+        in->uid = ino->uid;
+        in->gid = ino->gid;
+    }
     strncpy(in->name, n->name, FS_NAME_MAX - 1U);
     in->name[FS_NAME_MAX - 1U] = '\0';
 
-    if (n->type == FS_TYPE_FILE && n->size > 0U) {
+    if ((n->type == FS_TYPE_FILE || n->type == FS_TYPE_LINK) && n->size > 0U) {
         uint32_t sectors = (n->size + BLK_SECTOR - 1U) / BLK_SECTOR;
         static uint8_t buf[BLK_SECTOR];
 
@@ -1207,10 +1734,10 @@ static int dump_tree(fs_node_t *n, uint32_t parent, uint32_t vol,
 
         for (uint32_t s = 0; s < sectors; s++) {
             uint32_t off = s * BLK_SECTOR;
-            uint32_t nbytes = n->size - off;
+            uint32_t nbytes = ino_of(n)->size - off;
             if (nbytes > BLK_SECTOR) nbytes = BLK_SECTOR;
             memset(buf, 0, sizeof(buf));
-            memcpy(buf, n->data + off, nbytes);
+            memcpy(buf, ino_of(n)->data + off, nbytes);
             if (blk_write(blk, *lba + s, buf) != E_OK) return E_INVAL;
         }
         *lba += sectors;
@@ -1403,11 +1930,11 @@ int fs_mount_disk(const char *blk_name)
 
         /* 损坏/越界 inode：size 超过当前限额、或数据区超出设备，整次挂载失败。
          * 不做这个检查的话，按 size 往 n->data（FS_FILE_MAX）里 memcpy 会溢出。 */
-        if (in->used > 1U || in->type > (uint32_t)FS_TYPE_DIR) {
+        if (in->used > 1U || in->type > (uint32_t)FS_TYPE_LINK) {
             (void)mount_disk_fail();
             return E_INVAL;
         }
-        if (in->type == (uint32_t)FS_TYPE_FILE) {
+        if (in->type == (uint32_t)FS_TYPE_FILE || in->type == (uint32_t)FS_TYPE_LINK) {
             if (in->size > fs_limit_current) {
                 (void)mount_disk_fail();
                 return E_INVAL;
@@ -1428,6 +1955,8 @@ int fs_mount_disk(const char *blk_name)
         }
 
         n->type = (fs_type_t)in->type;
+        n->nlink = 1;
+        n->canon = 0;
         n->size = in->size;
         n->mtime = in->mtime;
         n->mode = in->mode;
@@ -1436,7 +1965,7 @@ int fs_mount_disk(const char *blk_name)
         strncpy(n->name, in->name, FS_NAME_MAX - 1U);
         n->name[FS_NAME_MAX - 1U] = '\0';
 
-        if (n->type == FS_TYPE_FILE && n->size > 0U) {
+        if ((n->type == FS_TYPE_FILE || n->type == FS_TYPE_LINK) && n->size > 0U) {
             uint32_t sectors = (n->size + BLK_SECTOR - 1U) / BLK_SECTOR;
             for (uint32_t s = 0; s < sectors; s++) {
                 uint8_t buf[BLK_SECTOR];

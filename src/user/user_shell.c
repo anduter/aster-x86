@@ -408,6 +408,74 @@ static void cmd_rm(const char *path)
 
 /* mv <old> <new>：同卷内改名/移动（不跨卷、不做"移入目录"语义）。
  * 内核返回的失败码在 syscall 层压成 -1，这里只能给通用错误信息。 */
+/* ---- ln / ln -s / readlink（阶段 4b）---- */
+static void cmd_ln(const char *a, const char *b, int symbolic)
+{
+    int r = symbolic ? sc(SYS_SYMLINK, (int)a, (int)b, 0)
+                     : sc(SYS_LINK, (int)a, (int)b, 0);
+    putstr((r == 0) ? "ok\n" : (symbolic ? "ln: symlink failed\n" : "ln: failed\n"));
+    sc(SYS_SYNC, 0, 0, 0);
+}
+
+static void cmd_readlink(const char *path)
+{
+    char buf[128];
+    int n = sc(SYS_READLINK, (int)path, (int)buf, (int)sizeof(buf));
+
+    if (n < 0) {
+        putstr("readlink: not a symlink\n");
+        return;
+    }
+    buf[n] = '\0';
+    putstr(buf);
+    putstr("\n");
+}
+
+/* 回归用：硬链接 / 软链接 / readlink / lstat 一条链跑完（build.ps1 收集 "ushell: ln..."） */
+static void cmd_linktest(void)
+{
+    char buf[64];
+    int h, n, ok = 1;
+    unsigned int st[6];
+
+    sc(SYS_UNLINK, (int)"/tmp/lt-a", 0, 0);
+    sc(SYS_UNLINK, (int)"/tmp/lt-b", 0, 0);
+    sc(SYS_UNLINK, (int)"/tmp/lt-sl", 0, 0);
+
+    h = sc(SYS_OPEN, (int)"/tmp/lt-a", FS_WRITE | FS_CREAT, 0);
+    if (h < 0) { putstr("ushell: linktest FAILED (open)\n"); return; }
+    sc(SYS_FWRITE, h, (int)"ln", 2);
+    sc(SYS_CLOSE, h, 0, 0);
+
+    if (sc(SYS_LINK, (int)"/tmp/lt-a", (int)"/tmp/lt-b", 0) != 0) ok = 0;
+    h = sc(SYS_OPEN, (int)"/tmp/lt-b", FS_READ, 0);
+    if (h < 0) ok = 0;
+    else {
+        n = sc(SYS_FREAD, h, (int)buf, (int)sizeof(buf));
+        sc(SYS_CLOSE, h, 0, 0);
+        if (n != 2 || buf[0] != 'l' || buf[1] != 'n') ok = 0;
+    }
+    if (ok) putstr("ushell: ln ok\n"); else putstr("ushell: ln FAILED\n");
+
+    if (sc(SYS_SYMLINK, (int)"lt-b", (int)"/tmp/lt-sl", 0) != 0) ok = 0;
+    h = sc(SYS_OPEN, (int)"/tmp/lt-sl", FS_READ, 0);
+    if (h < 0) ok = 0;
+    else { sc(SYS_CLOSE, h, 0, 0); }
+    if (ok) putstr("ushell: ln -s ok\n"); else putstr("ushell: ln -s FAILED\n");
+
+    n = sc(SYS_READLINK, (int)"/tmp/lt-sl", (int)buf, (int)sizeof(buf));
+    if (n > 0) { buf[n] = '\0'; ok = (buf[0] == 'l' && buf[1] == 't'); } else ok = 0;
+    if (ok) putstr("ushell: readlink ok\n"); else putstr("ushell: readlink FAILED\n");
+
+    if (sc(SYS_LSTAT, (int)"/tmp/lt-sl", (int)st, 0) == 0 && st[0] == 3U) ok = 1;
+    else ok = 0;
+    if (ok) putstr("ushell: lstat link type ok\n"); else putstr("ushell: lstat FAILED\n");
+
+    if (ok) putstr("ushell: linktest PASS\n"); else putstr("ushell: linktest FAILED\n");
+    sc(SYS_UNLINK, (int)"/tmp/lt-a", 0, 0);
+    sc(SYS_UNLINK, (int)"/tmp/lt-b", 0, 0);
+    sc(SYS_UNLINK, (int)"/tmp/lt-sl", 0, 0);
+}
 static void cmd_mv(const char *oldpath, const char *newpath)
 {
     putstr((sc(SYS_RENAME, (int)oldpath, (int)newpath, 0) == 0) ? "ok\n" : "mv: failed\n");
@@ -1269,6 +1337,9 @@ static void cmd_help_one(const char *name)
         { "mkdir",   "mkdir <path>          create a directory" },
         { "rm",      "rm <path>             remove a file/dir" },
         { "mv",      "mv <old> <new>        rename/move (same volume)" },
+        { "ln",      "ln [-s] <old> <new>   hard/symbolic link" },
+        { "readlink","readlink <path>       print symlink target" },
+        { "linktest","linktest              hard/symlink regression" },
         { "cd",      "cd <path> | cd -      change directory" },
         { "pwd",     "pwd                   show current directory" },
         { "stat",    "stat <path>           type/size/mtime" },
@@ -1370,6 +1441,14 @@ static void run_line(char *cmd)
         cmd_mkdir(args[1]);
     } else if (scmp(args[0], "rm") == 0 && nargs >= 2) {
         cmd_rm(args[1]);
+    } else if (scmp(args[0], "ln") == 0 && nargs >= 4 && scmp(args[1], "-s") == 0) {
+        cmd_ln(args[2], args[3], 1);
+    } else if (scmp(args[0], "ln") == 0 && nargs >= 3) {
+        cmd_ln(args[1], args[2], 0);
+    } else if (scmp(args[0], "readlink") == 0 && nargs >= 2) {
+        cmd_readlink(args[1]);
+    } else if (scmp(args[0], "linktest") == 0) {
+        cmd_linktest();
     } else if (scmp(args[0], "mv") == 0 && nargs >= 3) {
         cmd_mv(args[1], args[2]);
     } else if (scmp(args[0], "cd") == 0 && nargs >= 2) {

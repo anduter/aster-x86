@@ -376,6 +376,9 @@ static void step_selftests(void)
     /* VFS 后端一致性：ramfs / FAT16 走同一条 ops 表 */
     fs_backend_selftest();
 
+    /* 硬链接 / 符号链接（含软链接绕过 SIP 的拦截） */
+    fs_link_selftest();
+
     /* SIP-lite：root 写系统目录被拒、穿越规范化、更新器放行、开关有效 */
     sip_selftest();
 }

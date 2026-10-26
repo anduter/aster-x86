@@ -11,5 +11,6 @@
 /* selftests */
 void fs_backend_selftest(void);
 void fs_rename_selftest(void);
+void fs_link_selftest(void);
 
 #endif

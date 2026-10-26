@@ -375,6 +375,79 @@ static int sys_drives_user(uint32_t index, uint32_t ubuf, uint32_t max)
     return 0;
 }
 
+/* 硬链接：old 必须是普通文件、同卷；权限/存在性由 fs_link_cred 判。 */
+static int sys_link_user(uint32_t old_ptr, uint32_t new_ptr)
+{
+    char oldrel[FS_PATH_MAX];
+    char newrel[FS_PATH_MAX];
+    char oldpath[FS_PATH_MAX];
+    char newpath[FS_PATH_MAX];
+    fs_cred_t cred;
+
+    if (copy_user_string(oldrel, sizeof(oldrel), old_ptr) != E_OK) return -1;
+    if (copy_user_string(newrel, sizeof(newrel), new_ptr) != E_OK) return -1;
+    make_abs_path(oldpath, sizeof(oldpath), oldrel);
+    make_abs_path(newpath, sizeof(newpath), newrel);
+    cur_cred(&cred);
+    return (fs_link_cred(oldpath, newpath, &cred) == E_OK) ? 0 : -1;
+}
+
+/* 符号链接：目标文本原样保存（不做 cwd 规范化），链接路径按 cwd 规范化。 */
+static int sys_symlink_user(uint32_t target_ptr, uint32_t link_ptr)
+{
+    char target[FS_PATH_MAX];
+    char linkrel[FS_PATH_MAX];
+    char linkpath[FS_PATH_MAX];
+    fs_cred_t cred;
+
+    if (copy_user_string(target, sizeof(target), target_ptr) != E_OK) return -1;
+    if (copy_user_string(linkrel, sizeof(linkrel), link_ptr) != E_OK) return -1;
+    make_abs_path(linkpath, sizeof(linkpath), linkrel);
+    cur_cred(&cred);
+    return (fs_symlink_cred(target, linkpath, &cred) == E_OK) ? 0 : -1;
+}
+
+static int sys_readlink_user(uint32_t path_ptr, uint32_t ubuf, uint32_t max)
+{
+    char rel[FS_PATH_MAX];
+    char path[FS_PATH_MAX];
+    char target[FS_PATH_MAX];
+    fs_cred_t cred;
+    int n;
+
+    if (max == 0U || max >= FS_PATH_MAX) return -1;
+    if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
+    make_abs_path(path, sizeof(path), rel);
+    cur_cred(&cred);
+    n = fs_readlink_cred(path, target, sizeof(target), &cred);
+    if (n < 0) return -1;
+    if ((uint32_t)n >= max) n = (int)max - 1;
+    if (copy_to_user((void *)(uintptr_t)ubuf, target, (uint32_t)n + 1U) != E_OK) return -1;
+    return n;
+}
+
+/* lstat：不跟随末段（符号链接本身），输出布局和 SYS_STAT 一样 */
+static int sys_lstat_user(uint32_t path_ptr, uint32_t ubuf)
+{
+    char rel[FS_PATH_MAX];
+    char path[FS_PATH_MAX];
+    fs_stat_t st;
+    fs_cred_t cred;
+    uint32_t out[6];
+
+    if (copy_user_string(rel, sizeof(rel), path_ptr) != E_OK) return -1;
+    make_abs_path(path, sizeof(path), rel);
+    cur_cred(&cred);
+    if (fs_lstat_cred(path, &st, &cred) != E_OK) return -1;
+
+    out[0] = (uint32_t)st.type;
+    out[1] = st.size;
+    out[2] = st.mtime;
+    out[3] = st.mode;
+    out[4] = st.uid;
+    out[5] = st.gid;
+    return (copy_to_user((void *)(uintptr_t)ubuf, out, sizeof(out)) == E_OK) ? 0 : -1;
+}
 bool fs_syscall_owns(uint32_t nr)
 {
     switch (nr) {
@@ -396,6 +469,10 @@ bool fs_syscall_owns(uint32_t nr)
     case SYS_FSCK:
     case SYS_CHMOD:
     case SYS_CHOWN:
+    case SYS_LINK:
+    case SYS_SYMLINK:
+    case SYS_READLINK:
+    case SYS_LSTAT:
         return true;
     default:
         return false;
@@ -433,6 +510,18 @@ int fs_syscall(interrupt_frame_t *f)
         break;
     case SYS_RENAME:
         ret = sys_rename_user(f->ebx, f->ecx);
+        break;
+    case SYS_LINK:
+        ret = sys_link_user(f->ebx, f->ecx);
+        break;
+    case SYS_SYMLINK:
+        ret = sys_symlink_user(f->ebx, f->ecx);
+        break;
+    case SYS_READLINK:
+        ret = sys_readlink_user(f->ebx, f->ecx, f->edx);
+        break;
+    case SYS_LSTAT:
+        ret = sys_lstat_user(f->ebx, f->ecx);
         break;
     case SYS_STAT:
         ret = sys_stat_user(f->ebx, f->ecx);

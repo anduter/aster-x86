@@ -107,7 +107,7 @@ int fs_open_ex(const char *path, uint32_t flags, uint32_t uid, uint32_t gid, uin
     b = route(path, &rel);
     if (b == 0) return -1;
 
-    h = b->open(rel, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT), uid, gid);
+    h = b->open(rel, flags & (FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREAT | FS_OPEN_NOFOLLOW), uid, gid);
     if (h < 0) return -1;
     if (be != 0) *be = be_id(b);
     return h;
@@ -440,6 +440,64 @@ int fs_rename_cred(const char *old_path, const char *new_path, const fs_cred_t *
         return ramfs_rename_cred(orel, nrel, c);
     }
     return ob->rename(orel, nrel, (c != 0) ? c->euid : 0U, (c != 0) ? c->egid : 0U);
+}
+
+/* =============================================================================
+ * 硬链接 / 符号链接（阶段 4b）
+ *
+ * 只有 ramfs 有 inode 概念；FAT16/svc/blk 一律 E_INVAL（不是"失败得很奇怪"，
+ * 而是"这个后端不提供这种语义"）。跨卷硬链接在 VFS 层就拒绝，后端还会再判一次。
+ * ========================================================================== */
+int fs_link_cred(const char *old_path, const char *new_path, const fs_cred_t *c)
+{
+    const fs_backend_t *ob;
+    const fs_backend_t *nb;
+    const char *orel;
+    const char *nrel;
+
+    if (old_path == 0 || new_path == 0) return E_INVAL;
+    ob = route(old_path, &orel);
+    nb = route(new_path, &nrel);
+    if (ob == 0 || nb == 0) return E_INVAL;
+    if (ob != nb) return E_INVAL;                 /* 跨卷硬链接禁止 */
+    if (ob != &ramfs_backend) return E_INVAL;     /* FAT16 等：不支持 */
+    return ramfs_link_cred(orel, nrel, c);
+}
+
+int fs_symlink_cred(const char *target, const char *path, const fs_cred_t *c)
+{
+    const fs_backend_t *b;
+    const char *rel;
+
+    if (target == 0 || path == 0) return E_INVAL;
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b != &ramfs_backend) return E_INVAL;      /* FAT16 没有符号链接 */
+    return ramfs_symlink_cred(target, rel, c);
+}
+
+int fs_readlink_cred(const char *path, char *buf, uint32_t max, const fs_cred_t *c)
+{
+    const fs_backend_t *b;
+    const char *rel;
+
+    if (path == 0) return E_INVAL;
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b != &ramfs_backend) return E_INVAL;
+    return ramfs_readlink_cred(rel, buf, max, c);
+}
+
+int fs_lstat_cred(const char *path, fs_stat_t *out, const fs_cred_t *c)
+{
+    const fs_backend_t *b;
+    const char *rel;
+
+    if (path == 0 || out == 0) return E_INVAL;
+    b = route(path, &rel);
+    if (b == 0) return E_INVAL;
+    if (b != &ramfs_backend) return E_INVAL;
+    return ramfs_lstat_cred(rel, out, c);
 }
 
 /* 内核内部调用按 root 身份执行 */
