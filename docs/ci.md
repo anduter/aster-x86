@@ -166,7 +166,7 @@ clang-tidy src/kernel/lib/string.c -- -Isrc/kernel -Isrc/kernel/include
 | 完整 | `full.yml` | `[self-hosted, windows, x64]`（自托管） | `tools/ci.ps1 -Full`（构建 + 全 PASS ×2，当前 248 项） | 需要 `tools/i686-elf`（约 3.5GB，gitignored）与 QEMU |
 
 **托管 runner 上不要试图构建**：那里没有 vendored 工具链、没有 QEMU，
-`tools/i686-elf` 也不会随仓库分发（见 README 的"自带交叉工具链"一节）。
+`tools/i686-elf` 也不会随仓库分发（见 README「快速开始」里关于交叉工具链的说明）。
 `static.yml` 只跑静态子集；想跑完整回归就注册一个自托管 Windows runner。
 
 ### 自托管 runner 要求

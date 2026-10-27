@@ -46,7 +46,7 @@ P3 security boundaries and engineering rules live in [`docs/security-model.md`](
 ## Quick start
 
 Requirements: `nasm`, `i686-elf-gcc/ld/objcopy`, `qemu-system-i386`, `openssl`.
-The repo ships a cross toolchain under `tools/i686-elf/bin` (`build.ps1` adds it to `PATH` automatically).
+**The cross toolchain is not shipped in the repo** (about 2.7 GB; `.gitignore` excludes `tools/`, so a fresh `git clone` does not contain it): unpack it into `tools/i686-elf/bin` (`build.ps1` prepends that directory to `PATH`), or make `i686-elf-gcc/ld/objcopy` available on `PATH`.
 
 **The signing private key is not in the repo** (an open-source repo must not carry private keys). Generate a key pair locally before the first build:
 

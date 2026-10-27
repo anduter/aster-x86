@@ -53,7 +53,7 @@ ELF 段权限分离、代码页只读、COW 只作用于可写页、明确限制
 ## 快速开始
 
 需要：`nasm`、`i686-elf-gcc/ld/objcopy`、`qemu-system-i386`、`openssl`。
-仓库自带交叉工具链在 `tools/i686-elf/bin`（`build.ps1` 会自动加入 PATH）。
+**交叉工具链不随仓库分发**（约 2.7 GB，`.gitignore` 排除了 `tools/`，所以 `git clone` 之后没有）：解压到 `tools/i686-elf/bin`（`build.ps1` 会自动把它加到 PATH 最前面），或者让 `i686-elf-gcc/ld/objcopy` 直接在 PATH 上。
 
 **签名私钥不在仓库里**（开源仓库不能带私钥）。首次构建先本地生成密钥对：
 
