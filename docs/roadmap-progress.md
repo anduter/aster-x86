@@ -147,3 +147,15 @@
 4. FS：硬链接持久化需要 XFS1 v6（inode 加 `link_to/nlink`），顺带把 `nlink`
    暴露到用户态 stat。
 5. TCP：流水线发送/SACK/窗口缩放、IP 分片重组、listen/accept 与用户态 socket API。
+
+## v0.73.0 发布与 8h 浸泡（2026-10-27）
+
+- 状态：**完成**；tag `v0.73.0`（annotated）→ `f982d3b`。
+- 版本：`0.72.0` → **`0.73.0`**；检查项保持 **182**（本版只做发布，不新增检查）。
+- 门禁：`ci.ps1 -Full -StrictBom` → **`182/182` ×2 PASS**（84.1 s，worktree clean）。
+- 8h 浸泡：**PASS**，8h00m02s，28,639 心跳（0..28,638 连续），
+  0 CRASH / panic / 停滞；`free_pages=26492`、`procs=19`、`faults=1`
+  在 478 个快照中不变。
+- 证据：`docs/soak-0.73.0.md`、`docs/status-2026-10-27.md`、`obj/release-0.73.0.log`。
+- 注：此后并行会话把 main 推进到 v0.74.1（248 项）；本文件阶段 1–4 的 182 项
+  是 v0.73.0 基线，0.74.x 的门禁见 `docs/integration-2026-10-27.md`。
