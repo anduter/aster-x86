@@ -63,7 +63,8 @@ if (-not $Gcc32) {
     }
 }
 
-$Gcc32Pe = ($Gcc32 -and ((Split-Path -Leaf $Gcc32) -match 'i686-w64-mingw32'))
+$Gcc32Pe = $false
+if ($Gcc32) { $Gcc32Pe = ((Split-Path -Leaf $Gcc32) -match 'i686-w64-mingw32') }
 
 $outDir = Join-Path $root 'obj/unit'
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
