@@ -220,8 +220,14 @@ foreach ($t in $tests) {
     $extra = @()
     if ($t.Arch -eq '32') {
         $compiler = $Gcc32
-        # 固定 PE 映像基址（仅 Windows PE 需要）：pmm 测试的 arena 必须落在 HEAP_BASE(8MB) 以下
-        if ($Gcc32Pe) { $extra += '-Wl,--disable-dynamicbase' }
+        # pmm 测试的 arena 必须落在 HEAP_BASE(8MB) 以下：
+        #   PE  : --disable-dynamicbase 固定基址（默认已 <8MB）
+        #   ELF : -no-pie + 低地址段，避免 Linux 默认 0x8048000 以上
+        if ($Gcc32Pe) {
+            $extra += '-Wl,--disable-dynamicbase'
+        } else {
+            $extra += '-no-pie', '-Wl,-Ttext-segment=0x00400000'
+        }
     }
     $args = @($common) + $extra
     foreach ($d in $t.Defines) { $args += ('-D' + $d) }
