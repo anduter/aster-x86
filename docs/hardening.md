@@ -120,3 +120,39 @@ ushell: einr kill ok
   SIGKILL 仍可能被错误投递。后续把 SIGKILL/SIGSTOP 语义单列。
 - 管道写返回部分字节 + 后续 `-EINTR` 的组合已按 POSIX 语义处理，但用户态
   libc 没有 errno 全局变量，调用方只能看返回值 -4。
+---
+
+## 3. chroot 绝对软链接绕过（P1 安全）
+
+**现象**：chroot 到 `system:/jail` 后，进程内 `/link -> /etc/passwd` 仍能读到
+卷根的 `/etc/passwd`（真实口令文件）。
+
+**根因**：chroot 是在 syscall 层用 `make_abs_path()` 给**用户传入的路径**
+加根前缀实现的；`ramfs.c` 的 `resolve_path()` 在跟随软链接时只拿到卷内相对
+路径，不知道进程根。绝对目标 `"/x"` 被当成“卷根”而不是“chroot 根”解析。
+
+**修复**（`fs/ramfs.c`）：
+
+- 解析软链接时取当前进程的 chroot 根（`proc_root_of()`，新增到模块接口
+  `include/proc.h`），换算成本卷内前缀（如 `jail`）。
+- 绝对目标 `"/x"` 重定位为 `<chroot>/x`；相对链接语义不变。
+- chroot 生效时，目标路径含 `".."` 分量一律拒绝（跳数上限只防环，不防
+  向上爬出 chroot）；嵌套链接递归解析时同样应用。
+- 未 chroot / 内核线程（`proc_current()==0`）路径完全保持原行为。
+
+**回归**（`sectest`，-Test 构建）：子进程在 `/tmp` 建
+`/tmp/ct-link -> /etc/passwd`，chroot 到 `system:/tmp` 后打开 `/ct-link`，
+必须失败：
+
+```text
+fs: audit chroot symlink containment ok
+```
+
+`build.ps1` 新增 1 项检查；`-Test` **253/253 PASS**。
+
+**遗留**：
+
+- chroot 只做路径前缀重定位，没有独立的 root 目录对象/引用计数；chroot
+  根被删除后行为未定义（与 Linux 的“已 chroot 进程仍持有根”不同）。
+- 只堵了符号链接这一条；`/proc/self/root` 之类接口不存在，暂无其它绕过面。
+- 绝对硬链接不可能（link 只接受同卷路径），不在本项范围。

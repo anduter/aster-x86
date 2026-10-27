@@ -11,6 +11,7 @@
 #include "fs.h"
 #include "include/mm.h"
 #include "include/kernel.h"
+#include "include/proc.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/dev.h"
@@ -394,6 +395,43 @@ static int sip_resolved_write_ok(fs_volume_t *vol, const char *relpath)
     return sip_guard_write(full);
 }
 
+/* 路径里是否有 ".." 分量（整段匹配，不误伤 "a..b"）。 */
+static int has_dotdot_component(const char *p)
+{
+    while (*p != '\0') {
+        const char *s;
+
+        while (*p == '/') p++;
+        s = p;
+        while (*p != '\0' && *p != '/') p++;
+        if ((uint32_t)(p - s) == 2U && s[0] == '.' && s[1] == '.') return 1;
+    }
+    return 0;
+}
+
+/* 当前进程的 chroot 根在本卷内的相对前缀（无前导/尾随 '/'）。
+ * 返回 0 表示未 chroot / 根不在本卷 / 根就是卷根。 */
+static const char *proc_chroot_prefix(fs_volume_t *vol, char *buf, uint32_t max)
+{
+    proc_t *p = proc_current();
+    const char *root;
+    uint32_t nl, rl = 0;
+
+    if (p == 0 || vol == 0) return 0;
+    root = proc_root_of(p);
+    if (root == 0 || root[0] == '\0') return 0;
+
+    nl = (uint32_t)strlen(vol->name);
+    if (strncmp(root, vol->name, nl) != 0 || root[nl] != ':') return 0;
+    root += nl + 1U;
+    while (*root == '/') root++;
+    while (root[rl] != '\0' && rl + 1U < max) { buf[rl] = root[rl]; rl++; }
+    while (rl > 0U && buf[rl - 1U] == '/') rl--;
+    if (rl == 0U || rl + 1U > max) return 0;
+    buf[rl] = '\0';
+    return buf;
+}
+
 static int resolve_path(fs_volume_t *vol, const char *rel, const fs_cred_t *c,
                         int follow_final, int write_op, uint32_t hops,
                         char *out, uint32_t max)
@@ -402,12 +440,15 @@ static int resolve_path(fs_volume_t *vol, const char *rel, const fs_cred_t *c,
     char candidate[FS_PATH_MAX];
     char target[FS_PATH_MAX];
     char joined[FS_PATH_MAX];
+    char jail[FS_PATH_MAX];
+    const char *root;
     const char *p = (rel != 0) ? rel : "";
     uint32_t plen = 0;
     int why = 0;
 
     if (out == 0 || max == 0U || vol == 0) return E_INVAL;
     prefix[0] = '\0';
+    root = proc_chroot_prefix(vol, jail, sizeof(jail));
 
     while (*p != '\0') {
         char comp[FS_NAME_MAX];
@@ -456,14 +497,32 @@ static int resolve_path(fs_volume_t *vol, const char *rel, const fs_cred_t *c,
                 if (tlen < 0) return E_INVAL;
 
                 if (target[0] == '/') {
-                    int k = ksnprintf(joined, sizeof(joined), "%s%s", target, rest);
+                    int k;
+
+                    /* chroot：绝对软链接目标（"/x"）必须重定位到 chroot 根，
+                     * 否则会从卷根解析——/link -> /etc/passwd 能读到真实
+                     * /etc/passwd。目标里的 ".." 一律拒绝（不能借它爬出
+                     * chroot；跳数上限只防环，不防越界）。 */
+                    if (root != 0) {
+                        if (has_dotdot_component(target)) return E_ACCES;
+                        k = ksnprintf(joined, sizeof(joined), "%s%s%s",
+                                      root, target, rest);
+                    } else {
+                        k = ksnprintf(joined, sizeof(joined), "%s%s", target, rest);
+                    }
                     if (k <= 0 || (uint32_t)k >= sizeof(joined)) return E_INVAL;
                 } else if (prefix[0] != '\0') {
-                    int k = ksnprintf(joined, sizeof(joined), "%s/%s%s",
-                                      prefix, target, rest);
+                    int k;
+
+                    if (root != 0 && has_dotdot_component(target)) return E_ACCES;
+                    k = ksnprintf(joined, sizeof(joined), "%s/%s%s",
+                                  prefix, target, rest);
                     if (k <= 0 || (uint32_t)k >= sizeof(joined)) return E_INVAL;
                 } else {
-                    int k = ksnprintf(joined, sizeof(joined), "%s%s", target, rest);
+                    int k;
+
+                    if (root != 0 && has_dotdot_component(target)) return E_ACCES;
+                    k = ksnprintf(joined, sizeof(joined), "%s%s", target, rest);
                     if (k <= 0 || (uint32_t)k >= sizeof(joined)) return E_INVAL;
                 }
                 if (strchr(joined, ':') != 0) return E_INVAL;   /* 跨卷软链接不做 */

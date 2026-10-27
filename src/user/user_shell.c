@@ -1150,6 +1150,38 @@ static void einr_selftest(void)
 }
 #endif
 
+#if defined(OS_TEST_BUILD) && OS_TEST_BUILD
+/* chroot 内绝对软链接不能指回卷根：/link -> /etc/passwd 必须解析到
+ * <chroot>/etc/passwd（不存在），而不是真实 /etc/passwd。 */
+static void chroot_symlink_selftest(void)
+{
+    int pid = sc(SYS_FORK, 0, 0, 0);
+
+    if (pid == 0) {
+        int ok = 0;
+
+        sc(SYS_UNLINK, (int)"/tmp/ct-link", 0, 0);
+        if (sc(SYS_SYMLINK, (int)"/etc/passwd", (int)"/tmp/ct-link", 0) == 0 &&
+            sc(SYS_CHROOT, (int)"system:/tmp", 0, 0) == 0) {
+            int f = sc(SYS_OPEN, (int)"/ct-link", 0, 0);
+
+            if (f < 0) {
+                ok = 1;                       /* 读不到真实 /etc/passwd */
+            } else {
+                sc(SYS_CLOSE, f, 0, 0);
+            }
+            sc(SYS_UNLINK, (int)"/ct-link", 0, 0);
+        }
+        putstr(ok ? "fs: audit chroot symlink containment ok\n"
+                  : "fs: audit chroot symlink containment FAIL\n");
+        sc(SYS_EXIT, 0, 0, 0);
+    } else if (pid > 0) {
+        int st = 0;
+        sc(SYS_WAIT, pid, (int)&st, 0);
+    }
+}
+#endif
+
 /* 安全回归：子进程分别尝试写代码页、写栈 guard、执行栈、执行 rodata。 */
 static void cmd_sectest(void)
 {
@@ -1516,6 +1548,7 @@ static void cmd_sectest(void)
 
 #if defined(OS_TEST_BUILD) && OS_TEST_BUILD
     einr_selftest();
+    chroot_symlink_selftest();
 #endif
 }
 

@@ -900,6 +900,7 @@ if ($Test -or $Shot) {
             @{ Name = 'fs 审计：syscall 缓冲守卫'; Ok = ($out.Contains('fs: audit syscall chroot/time/fsck buffer guards ok')) },
             @{ Name = 'fs 审计：硬链接/nlink';     Ok = ($out.Contains('fs: audit hardlink nlink / ino_promote ok')) },
             @{ Name = 'fs 审计：路径边界';         Ok = ($out.Contains('fs: audit deep/long/.. path edges ok')) },
+            @{ Name = 'chroot 绝对软链接不逃逸';   Ok = ($out.Contains('fs: audit chroot symlink containment ok')) },
             @{ Name = 'fs 审计自检通过';           Ok = ($out.Contains('fs: audit selftest PASS')) },
             @{ Name = 'net 审计：IPv4 入口';       Ok = ($out.Contains('net: audit tcp ip ingress rejects malformed ok')) },
             @{ Name = 'net 审计：UDP 入口';        Ok = ($out.Contains('net: audit udp ingress rejects malformed ok')) },
