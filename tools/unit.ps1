@@ -71,8 +71,8 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 # Linux/multilib fallback: 用 gcc -m32 包一层 wrapper，供 path/pmm/fat16 编译
 if (-not $Gcc32) {
-    $probeC = Join-Path $env:TEMP 'unit_m32_probe.c'
-    $probeExe = Join-Path $env:TEMP 'unit_m32_probe'
+    $probeC = Join-Path ([IO.Path]::GetTempPath()) 'unit_m32_probe.c'
+    $probeExe = Join-Path ([IO.Path]::GetTempPath()) 'unit_m32_probe'
     Set-Content -Path $probeC -Value 'int main(void){return 0;}' -Encoding ASCII
     & $Gcc -m32 $probeC -o $probeExe 2>$null
     if ($LASTEXITCODE -eq 0) {
