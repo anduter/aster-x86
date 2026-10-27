@@ -183,6 +183,10 @@ void proc_wake_sleepers(uint32_t now);
 /* 给进程投递一个信号 */
 void proc_send_signal(proc_t *p, int sig);
 
+/* 当前进程是否有待处理（未屏蔽）信号。阻塞系统调用在睡眠前后调用：
+ * 有信号则返回 -EINTR，让返回用户态前的 proc_check_signals() 投递。 */
+bool proc_signal_pending(void);
+
 /* 设置信号处理函数；返回旧值（0=默认，1=忽略，其它=用户地址） */
 int proc_signal_set(int sig, uint32_t handler);
 

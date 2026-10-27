@@ -1016,6 +1016,8 @@ int net_tcp_accept(int sock, uint8_t peer_ip[4], uint16_t *peer_port,
             return (int)(c - srv);
         }
         if (waited >= timeout_ticks) return -1;
+        /* 未屏蔽信号：accept 不再重新睡，返回 -EINTR，由 syscall 返回路径投递 */
+        if (proc_signal_pending()) return -EINTR;
         tcp_drain();
         proc_sleep_ticks(1U);
     }
@@ -1048,6 +1050,8 @@ int net_tcp_conn_read(int conn_id, void *buf, uint32_t max_len, uint32_t timeout
         }
         if (c->peer_fin || c->state == TCP_SRV_CLOSED || c->closed) return 0;
         if (waited >= timeout_ticks) return -1;
+        /* 有数据时优先返回数据；完全没数据才因信号返回 -EINTR */
+        if (proc_signal_pending()) return -EINTR;
         tcp_drain();
         proc_sleep_ticks(1U);
     }

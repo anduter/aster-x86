@@ -72,6 +72,8 @@ int pipe_read(int idx, char *dst, uint32_t len)
             break;
         }
         spin_unlock_irqrestore(&pipe_lock, flags);
+        /* 未屏蔽信号：已读到的部分照常返回，没读到则 -EINTR，不吞信号 */
+        if (proc_signal_pending()) return (n > 0U) ? (int)n : -EINTR;
         proc_block(PROC_WAIT_PIPE);
     }
 
@@ -106,6 +108,8 @@ int pipe_write(int idx, const char *src, uint32_t len)
             break;
         }
         spin_unlock_irqrestore(&pipe_lock, flags);
+        /* 管道满 + 有未屏蔽信号：返回已写入字节数，一个都没写则 -EINTR */
+        if (proc_signal_pending()) return (n > 0U) ? (int)n : -EINTR;
         proc_block(PROC_WAIT_PIPE);
     }
 

@@ -191,6 +191,7 @@ Write-Host "=== user program ===" -ForegroundColor Cyan
 Invoke-Step 'user_shell.c' 'i686-elf-gcc' @(
     '-ffreestanding', '-fno-pic', '-fno-pie', '-m32', '-nostdlib', '-fno-builtin',
     '-fno-stack-protector', '-fno-asynchronous-unwind-tables', '-Wall', '-Wextra', '-Werror', '-O0',
+    ("-DOS_TEST_BUILD={0}" -f [int]($Test -or $Shot)),
     '-c', 'src/user/user_shell.c', '-o', (Join-Path $objRoot 'user_shell.o')
 )
 Invoke-Step 'ulib.c' 'i686-elf-gcc' @(
@@ -828,6 +829,11 @@ if ($Test -or $Shot) {
             @{ Name = 'shell readlink';            Ok = ($out -match 'ushell: readlink ok') },
             @{ Name = 'shell lstat 报链接类型';    Ok = ($out -match 'ushell: lstat link type ok') },
             @{ Name = '用户态 link 回归通过';      Ok = ($out -match 'ushell: linktest PASS') }
+
+            # ---- 信号打断阻塞 syscall：EINTR / SIGKILL（v0.74.2 加固）----
+            @{ Name = 'EINTR 打断 pipe read';      Ok = ($out.Contains('ushell: einr read ok')) },
+            @{ Name = 'EINTR 打断 TCP accept';     Ok = ($out.Contains('ushell: einr accept ok')) },
+            @{ Name = 'SIGKILL 杀阻塞进程';        Ok = ($out.Contains('ushell: einr kill ok')) }
 
             # ---- TCP 健壮性（阶段 4c） ----
             @{ Name = 'TCP 握手 SYN/SYN-ACK/ACK';  Ok = ($out -match 'net: tcp handshake ok \(SYN/SYN-ACK/ACK\)') },

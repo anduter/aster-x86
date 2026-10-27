@@ -142,6 +142,10 @@ int sys_getchar_block(void)
         unsigned int flags;
         int c;
 
+        /* 未屏蔽信号：不再睡，返回 -EINTR；返回用户态前 proc_check_signals()
+         * 会投递 handler 或按 SIGKILL 默认动作终止，不会把信号吞掉。 */
+        if (proc_signal_pending()) return -EINTR;
+
         __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags));
         c = keyboard_getchar();
         if (c >= 0) {

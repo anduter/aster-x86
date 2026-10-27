@@ -525,6 +525,9 @@ int proc_wait_options(int pid, int *status, int options)
         /* 有子进程但都活着：WNOHANG 不阻塞，直接告诉调用方“还没好” */
         if ((options & PROC_WAIT_WNOHANG) != 0U) return 0;
 
+        /* 被信号叫醒后不再重新睡：返回 -EINTR，返回用户态前统一投递信号 */
+        if (proc_signal_pending()) return -EINTR;
+
         proc_block(PROC_WAIT_CHILD);
     }
 }
@@ -663,10 +666,19 @@ void proc_send_signal(proc_t *p, int sig)
 
     p->pending_sig = (uint32_t)sig;
 
-    /* 被阻塞的进程要醒过来才有机会处理信号 */
-    if (p->state == PROC_BLOCKED) {
-        sched_wake(p);
-    }
+    /* 必须无条件走 sched_wake：目标可能处在“检查完条件、还没真正 BLOCKED”
+     * 的 RUNNING 窗口里。旧实现只对 BLOCKED 调用，信号会丢唤醒——进程在
+     * read/accept/wait 里永久睡着，SIGKILL 也杀不掉（EINTR 回归实测偶发
+     * 卡死）。sched_wake 对 RUNNING/READY 只置 wake_pending，由
+     * proc_block() 的 sched_lock 临界区消费，不会把运行中的进程搬走。 */
+    sched_wake(p);
+}
+
+bool proc_signal_pending(void)
+{
+    proc_t *p = proc_current();
+
+    return (p != 0 && p->pending_sig != 0U);
 }
 
 int proc_signal_set(int sig, uint32_t handler)

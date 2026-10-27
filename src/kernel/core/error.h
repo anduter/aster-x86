@@ -13,4 +13,8 @@
 #define E_ACCES  (-8)   /* 权限不足 */
 #define E_BUSY   (-9)   /* 对象仍被引用/占用（例如删除打开中的文件） */
 
+/* 阻塞系统调用被未屏蔽信号打断：返回 -EINTR（errno=4，与 Linux 一致）。
+ * 调用方返回用户态前 proc_check_signals() 会投递 handler/SIGKILL，不吞信号。 */
+#define EINTR     4
+
 #endif

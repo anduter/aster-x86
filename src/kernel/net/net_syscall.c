@@ -140,7 +140,7 @@ static int tcp_sys_accept(proc_t *p, uint32_t sock_arg, uint32_t addr_ptr)
     if (sock < 0) return -1;
 
     conn = net_tcp_accept(sock, peer_ip, &peer_port, NET_TCP_ACCEPT_WAIT);
-    if (conn < 0) return -1;
+    if (conn < 0) return conn;          /* -1 超时/失败，-EINTR 被信号打断 */
 
     fd = fd_alloc_kind(p, FD_KIND_TCP, NET_TCP_HDL_CONN | (uint32_t)conn,
                        FD_RIGHT_READ | FD_RIGHT_WRITE);
@@ -304,7 +304,8 @@ int net_syscall(interrupt_frame_t *f)
 
             if (conn < 0) { ret = -1; break; }
             n = net_tcp_conn_read(conn, req.data, sizeof(req.data), NET_TCP_RECV_WAIT);
-            if (n <= 0) { ret = -1; break; }     /* 超时 / 对端已关 */
+            if (n < 0) { ret = n; break; }       /* -EINTR 原样返回，不吞信号 */
+            if (n == 0) { ret = -1; break; }     /* 超时 / 对端已关 */
             req.len = (uint16_t)n;
             ret = (copy_to_user((void *)(uintptr_t)f->ecx, &req, sizeof(req)) == E_OK) ? n : -1;
             break;

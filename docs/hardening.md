@@ -64,3 +64,59 @@ smp: ap tick skew ok (max_delta=4%, limit=10%, window=2s)
   应改成“上线后 2s 窗口”的增量比较。
 - 校准仍是启发式（100 tick 平均），TCG 负载极端时 190±10% 是预期下限；
   `max_delta` 打印出来便于观察长期漂移。
+---
+
+## 2. 信号打断阻塞 syscall → EINTR（P1）
+
+**现象**：阻塞在 `accept`/`read`/pipe/wait 上的进程收不到 `-EINTR`；发了
+SIGKILL 也不一定退出，只能等超时（TCP accept 2s、管道永久）。
+
+**根因**：两层。
+
+1. `proc_send_signal()` 只在目标 `state == PROC_BLOCKED` 时调用
+   `sched_wake()`。目标如果处在“检查完条件、还没真正置 BLOCKED”的 RUNNING
+   窗口，信号只写入 `pending_sig`，没有 wake latch；随后 `proc_block()` 正常
+   睡下，再也没有人叫醒它 —— 信号（含 SIGKILL）丢唤醒。这正是回归里偶发
+   卡死的原因：同样的测试有时过、有时 100s 超时。
+2. 阻塞循环本身不检查 `pending_sig`。即使被唤醒，`accept` 的超时计数、
+   `pipe_read` 的条件循环都会重新睡回去，把这次唤醒“吃掉”。
+
+**修复**：
+
+- `proc/process.c`：`proc_send_signal()` 改为**无条件** `sched_wake()`。
+  `sched_wake()` 对 RUNNING/READY 目标只置 `wake_pending`（由
+  `proc_block()` 的 `sched_lock` 临界区消费），不会迁移正在运行的进程；
+  对 BLOCKED 目标才真正入队。与 `proc_wakeup()` 的既有语义一致。
+- 新增 `proc_signal_pending()`（当前进程有未屏蔽信号）。
+- `net/tcp.c`：`net_tcp_accept()`/`net_tcp_conn_read()` 睡前检查，返回
+  `-EINTR`；`net/net_syscall.c` 原样透传（SYS_ACCEPT、SYS_RECVFROM 不再
+  统一改写成 -1）。
+- `fs/pipe.c`：`pipe_read`/`pipe_write` 睡前检查；已传输的部分字节照常返回，
+  一个字节都没有时返回 `-EINTR`。
+- `proc/process.c`：`proc_wait_options()` 在真正 block 前检查；僵尸仍优先
+  回收，SIGCHLD 不会抢走可回收的子进程。
+- `proc/trap/syscall_util.c`：`sys_getchar_block()` 检查；`fs/fs_syscall.c`
+  把 stdin 的 `-EINTR` 和管道写的 `-EINTR` 原样透传，不折叠成 -1。
+- `core/error.h`：`#define EINTR 4`（Linux errno 4，syscall 返回 -4）。
+- 返回用户态前 `proc_check_signals()` 本来就会跑：SIGKILL 走默认终止
+  （退出码 128+9），装了 handler 的信号跳转到 handler，不会吞掉。
+
+**回归**（`-Test` 注入 `sectest` 时跑，避免启动期并发影响信号到达时机）：
+
+```text
+ushell: einr read ok
+ushell: einr accept ok
+ushell: einr kill ok
+```
+
+`build.ps1` 新增 3 项检查；`-Test` **252/252 PASS**，连续两次。
+
+**遗留**：
+
+- `proc_t.pending_sig` 仍是单槽位（同信号覆盖、不同信号后者覆盖前者）。
+  多信号排队需要 `sigset_t`/位图 + 屏蔽字，属于设计级改动，本批不做。
+- SIGKILL 在 `proc_check_signals()` 里走通用“默认终止”，没有单独的
+  “不可捕获/不可忽略”快速路径；功能正确，但若 handler 表被写坏，
+  SIGKILL 仍可能被错误投递。后续把 SIGKILL/SIGSTOP 语义单列。
+- 管道写返回部分字节 + 后续 `-EINTR` 的组合已按 POSIX 语义处理，但用户态
+  libc 没有 errno 全局变量，调用方只能看返回值 -4。

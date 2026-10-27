@@ -1050,6 +1050,106 @@ static void sectest_mprotect(void)
     }
 }
 
+/* EINTR 回归：阻塞 read/accept 收到信号必须返回 -4（且 SIGKILL 能杀掉阻塞
+ * 进程）。放在 sectest（-Test 注入）里而不是 shell 启动路径：启动期服务/
+ * 中断并发大，测试信号到达时机不稳定。 */
+#if defined(OS_TEST_BUILD) && OS_TEST_BUILD
+static void einr_selftest(void)
+{
+    int pfd[2];
+
+    /* a) 父进程阻塞在空管道读；子进程 200ms 后退出 -> SIGCHLD 打断 -> -EINTR */
+    if (sc(SYS_PIPE, (int)pfd, 0, 0) == 0) {
+        int pid = sc(SYS_FORK, 0, 0, 0);
+
+        if (pid == 0) {
+            sc(SYS_SLEEP, 200, 0, 0);
+            sc(SYS_EXIT, 0, 0, 0);
+        }
+        {
+            char c = 0;
+            int r = sc(SYS_FREAD, pfd[0], (int)&c, 1);
+
+            if (r == -4) putstr("ushell: einr read ok\n");
+            else printf("ushell: einr read FAIL (r=%d)\n", r);
+        }
+        {
+            int st = 0;
+            sc(SYS_WAIT, pid, (int)&st, 0);
+        }
+        sc(SYS_CLOSE, pfd[0], 0, 0);
+        sc(SYS_CLOSE, pfd[1], 0, 0);
+    }
+
+    /* b) 父进程阻塞在监听 socket accept；子进程 200ms 后退出 -> -EINTR */
+    {
+        int ls = sc(SYS_SOCKET, 2, 1, 0);    /* AF_INET, SOCK_STREAM */
+
+        if (ls >= 0 && sc(SYS_LISTEN, 43211, 2, 0) == 0) {
+            int pid = sc(SYS_FORK, 0, 0, 0);
+
+            if (pid == 0) {
+                sc(SYS_SLEEP, 200, 0, 0);
+                sc(SYS_EXIT, 0, 0, 0);
+            }
+            {
+                unsigned char addr[8];
+                int r = sc(SYS_ACCEPT, ls, (int)addr, 0);
+
+                if (r == -4) putstr("ushell: einr accept ok\n");
+                else printf("ushell: einr accept FAIL (r=%d)\n", r);
+            }
+            {
+                int st = 0;
+                sc(SYS_WAIT, pid, (int)&st, 0);
+            }
+            sc(SYS_CLOSE, ls, 0, 0);
+        } else {
+            if (ls >= 0) sc(SYS_CLOSE, ls, 0, 0);
+            putstr("ushell: einr accept SKIP (listen failed)\n");
+        }
+    }
+
+    /* c) SIGKILL 杀掉阻塞在管道读上的子进程，父进程能 wait 到退出码 */
+    if (sc(SYS_PIPE, (int)pfd, 0, 0) == 0) {
+        int sync[2];
+
+        if (sc(SYS_PIPE, (int)sync, 0, 0) != 0) sync[0] = sync[1] = -1;
+        if (sync[0] >= 0) {
+            int pid = sc(SYS_FORK, 0, 0, 0);
+
+            if (pid == 0) {
+                char c;
+                char go = 'x';
+
+                sc(SYS_CLOSE, sync[0], 0, 0);
+                sc(SYS_FWRITE, sync[1], (int)&go, 1);   /* 马上要睡在 read 上 */
+                sc(SYS_CLOSE, sync[1], 0, 0);
+                (void)sc(SYS_FREAD, pfd[0], (int)&c, 1);
+                sc(SYS_EXIT, 0, 0, 0);   /* 正常路径：被 kill 时走不到 */
+            }
+            {
+                char go = 0;
+                sc(SYS_CLOSE, sync[1], 0, 0);
+                sc(SYS_FREAD, sync[0], (int)&go, 1);
+                sc(SYS_CLOSE, sync[0], 0, 0);
+            }
+            sc(SYS_SLEEP, 50, 0, 0);
+            sc(SYS_KILL, pid, 9, 0);
+            {
+                int st = 0;
+                int w = sc(SYS_WAIT, pid, (int)&st, 0);
+
+                if (w == pid && st == 128 + 9) putstr("ushell: einr kill ok\n");
+                else printf("ushell: einr kill FAIL (w=%d st=%d)\n", w, st);
+            }
+        }
+        sc(SYS_CLOSE, pfd[0], 0, 0);
+        sc(SYS_CLOSE, pfd[1], 0, 0);
+    }
+}
+#endif
+
 /* 安全回归：子进程分别尝试写代码页、写栈 guard、执行栈、执行 rodata。 */
 static void cmd_sectest(void)
 {
@@ -1413,6 +1513,10 @@ static void cmd_sectest(void)
     sectest_waitpid();
     sectest_sigchld();
     sectest_mprotect();
+
+#if defined(OS_TEST_BUILD) && OS_TEST_BUILD
+    einr_selftest();
+#endif
 }
 
 #pragma GCC pop_options
@@ -2238,6 +2342,10 @@ void _start(int argc, char **argv)
         sc(SYS_KILL, me, 15, 0);
         putstr("ushell: signal selftest done\n");
     }
+
+    /* EINTR 自检：阻塞的 read/accept 收到未屏蔽信号必须返回 -4，且返回用户态
+     * 前投递 handler；SIGKILL 也必须能把阻塞进程杀掉（不是永远睡）。
+     * 只在 -Test 构建里跑：会临时占用 43211 端口，不能进生产 shell。 */
 
     /* P1 凭据自检：fork 出来的子进程必须继承 euid/egid（不是回到 root）。
      * 只打印一行结论，父进程等子进程退出后继续，不改变交互时序。 */

@@ -126,7 +126,11 @@ static int sys_fread_user(int fd, uint32_t ubuf, uint32_t len)
         uint32_t got = 0;
         while (got < len) {
             int c = sys_getchar_block();
-            if (c < 0) break;
+            if (c < 0) {
+                /* 一个字节都没读到：把 -EINTR 原样返回；已有数据先交付 */
+                if (got == 0U && c == -EINTR) return c;
+                break;
+            }
             buf[got++] = (char)c;
             if (ubuf == 0U) break;
         }
@@ -173,7 +177,9 @@ static int sys_fwrite_user(int fd, uint32_t ubuf, uint32_t len)
              * 日志行插进用户输出中间（fork/sectest 的假失败来源）。 */
             console_write_n_atomic(buf, n);
         } else if (f->kind == FD_KIND_PIPE_W) {
-            if (pipe_write((int)f->handle, buf, n) != (int)n) return -1;
+            int w = pipe_write((int)f->handle, buf, n);
+            if (w < 0) return w;                 /* -EINTR：不吞信号 */
+            if (w != (int)n) return -1;
         } else {
             if (fs_write_ex(f->fs_be, (int)f->handle, buf, n) != (int)n) return -1;
         }
