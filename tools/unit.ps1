@@ -63,8 +63,25 @@ if (-not $Gcc32) {
     }
 }
 
+$Gcc32Pe = ($Gcc32 -and ((Split-Path -Leaf $Gcc32) -match 'i686-w64-mingw32'))
+
 $outDir = Join-Path $root 'obj/unit'
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+# Linux/multilib fallback: 用 gcc -m32 包一层 wrapper，供 path/pmm/fat16 编译
+if (-not $Gcc32) {
+    $probeC = Join-Path $env:TEMP 'unit_m32_probe.c'
+    $probeExe = Join-Path $env:TEMP 'unit_m32_probe'
+    Set-Content -Path $probeC -Value 'int main(void){return 0;}' -Encoding ASCII
+    & $Gcc -m32 $probeC -o $probeExe 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $wrapper = Join-Path $outDir 'gcc32.sh'
+        Set-Content -Path $wrapper -Value ("#!/bin/sh`nexec `"{0}`" -m32 `"`$@`"" -f $Gcc) -Encoding ASCII
+        & bash -c ("chmod +x '" + ($wrapper -replace '\\','/') + "'") 2>$null
+        $Gcc32 = $wrapper
+        $Gcc32Pe = $false
+    }
+}
 
 # 每个用例：真实内核源文件 + 测试 TU；Defines 负责符号改名/BOOT_VERIFY
 $tests = @(
@@ -202,8 +219,8 @@ foreach ($t in $tests) {
     $extra = @()
     if ($t.Arch -eq '32') {
         $compiler = $Gcc32
-        # 固定 PE 映像基址：pmm 测试的 arena 必须落在 HEAP_BASE(8MB) 以下
-        $extra += '-Wl,--disable-dynamicbase'
+        # 固定 PE 映像基址（仅 Windows PE 需要）：pmm 测试的 arena 必须落在 HEAP_BASE(8MB) 以下
+        if ($Gcc32Pe) { $extra += '-Wl,--disable-dynamicbase' }
     }
     $args = @($common) + $extra
     foreach ($d in $t.Defines) { $args += ('-D' + $d) }
