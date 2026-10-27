@@ -76,7 +76,12 @@ void ap_entry(void)
 /* BSP 校准 LAPIC 频率后写入这里，每颗 AP 在自己的定时器中断里取用并重装。
  * 旧实现用单个 ap_timer_count + “取走清零”，只有第一个中断的 AP 能重装，
  * >2 核时其余 AP 会一直跑未校准的初始计数（tick 频率不对甚至被看门狗误判）。
- * 现在按 CPU 记“已应用值”，每颗 AP 只重装自己的定时器一次。 */
+ * 现在按 CPU 记“已应用值”，每颗 AP 只重装自己的定时器一次。
+ *
+ * 重装时把本 CPU 的 tick 基准对齐到 BSP 墙钟：AP 在 BSP 完成校准前用
+ * 未校准的初始计数跑过一段（启动早期），那部分 tick 会让 2s 自检偏大；
+ * 校准完成后以 BSP tick 为基准重新起算，四颗核的 per-CPU tick 才是同一
+ * 时间尺度（之后各自按 10ms 推进，偏差由 irq.c 的 skew 自检盯住）。 */
 static volatile uint32_t ap_timer_count;
 static volatile uint32_t ap_timer_applied[SMP_MAX_CPUS];
 
@@ -94,6 +99,7 @@ void smp_timer_tick(void)
     /* 第一次拿到校准值时重装本 AP 的定时器，使所有 AP tick 与 BSP 100Hz 对齐 */
     if (want != 0U && id < SMP_MAX_CPUS && ap_timer_applied[id] != want) {
         ap_timer_applied[id] = want;
+        c->ticks = timer_ticks();
         (void)apic_start_timer_ap(0x30U, want);
     }
 

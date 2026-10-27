@@ -25,7 +25,8 @@ uint32_t apic_id_from_cpuid(void);
 uint32_t rdmsr_low(uint32_t msr);
 void     wrmsr_low(uint32_t msr, uint32_t value);
 
-/* NMI 看门狗：映射 LAPIC、打开 APIC、校准 LAPIC 定时器并用 NMI 投递 */
+/* NMI 看门狗：映射 LAPIC、打开 APIC、校准 LAPIC 定时器并用 NMI 投递。
+ * 校准按 BSP 的 PIT tick 计数推进（apic_tick），不依赖墙钟。 */
 int  apic_watchdog_start(void);
 void apic_tick(void);        /* 由 PIT 中断每 tick 调用（校准阶段） */
 

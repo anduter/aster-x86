@@ -352,6 +352,41 @@ static char kbd_translate(unsigned char sc)
 static uint32_t pit_rate_rtc0;
 static bool     pit_rate_armed;
 
+/* SMP AP tick 偏斜自检：AP 在自己的定时器校准完成时把 tick 基准对齐到 BSP
+ * 墙钟（proc/smp.c），之后都按 10ms 推进。2s 时四颗核的 per-CPU tick 应
+ * 落在 BSP 的 ±10% 内；旧实现校准分频错（/2 当 /1）时会出现 AP 385/300/216
+ * vs BSP 200。 */
+static void smp_tick_skew_check(void)
+{
+    uint32_t bsp;
+    uint32_t max_pct = 0;
+
+    if (smp_cpu_count <= 1U) return;
+
+    bsp = per_cpu[0].ticks;
+    if (bsp == 0U) return;
+
+    for (uint32_t c = 1; c < SMP_MAX_CPUS; c++) {
+        uint32_t ap, diff, pct;
+
+        if (!per_cpu[c].online) continue;
+        ap = per_cpu[c].ticks;
+        diff = (ap > bsp) ? (ap - bsp) : (bsp - ap);
+        pct = diff * 100U / bsp;
+        if (pct > max_pct) max_pct = pct;
+    }
+
+    if (max_pct <= 10U) {
+        kprintf("smp: ap tick skew ok (max_delta=%u%%, limit=10%%, window=2s)\n",
+                (unsigned int)max_pct);
+    } else {
+        kprintf("smp: ap tick skew FAIL (max_delta=%u%%, bsp=%u ap=%u ap2=%u ap3=%u)\n",
+                (unsigned int)max_pct, per_cpu[0].ticks, per_cpu[1].ticks,
+                per_cpu[2].online ? per_cpu[2].ticks : 0U,
+                per_cpu[3].online ? per_cpu[3].ticks : 0U);
+    }
+}
+
 static void timer_handler(void *arg)
 {
     (void)arg;
@@ -369,6 +404,7 @@ static void timer_handler(void *arg)
                 per_cpu[2].online ? per_cpu[2].ticks : 0U,
                 per_cpu[3].online ? per_cpu[3].ticks : 0U,
                 (unsigned int)smp_cpu_count);
+        smp_tick_skew_check();
     }
 
     /* 浸泡测试：每 60 秒往串口打一行运行状态（只走串口，不刷屏幕）。
@@ -408,7 +444,7 @@ static void timer_handler(void *arg)
     /* 唤醒到期的睡眠者 */
     proc_wake_sleepers(ticks);
 
-    /* NMI 看门狗校准/推进（apic.c） */
+    /* NMI 看门狗校准（apic.c） */
     apic_tick();
 }
 

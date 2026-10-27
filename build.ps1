@@ -882,6 +882,7 @@ if ($Test -or $Shot) {
             # ---- 并行批次：per-CPU 调度 / IOAPIC（2026-10-27）----
             @{ Name = 'SMP 双核 online';           Ok = ($out -match 'smp: \d+ cpus online') },
             @{ Name = 'SMP TLB shootdown ack';     Ok = ($out -match 'smp: tlb shootdown ack=\d+/\d+ ok') },
+            @{ Name = 'AP tick 校准无偏斜';        Ok = ($out -match 'smp: ap tick skew ok \(max_delta=\d+%, limit=10%') },
             @{ Name = 'per-CPU 调度锁';            Ok = ($out.Contains('sched: per-cpu locks ok')) },
             @{ Name = 'runqueue cpu0';             Ok = ($out -match 'sched: runqueue cpu0 mask=0x[0-9a-f]+') },
             @{ Name = 'runqueue cpu1';             Ok = ($out -match 'sched: runqueue cpu1 mask=0x[0-9a-f]+') },
