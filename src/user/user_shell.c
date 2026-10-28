@@ -1151,6 +1151,56 @@ static void einr_selftest(void)
 #endif
 
 #if defined(OS_TEST_BUILD) && OS_TEST_BUILD
+/* FAT16 并发：两个子进程同时写/读各自文件（共享 sec_buf、handles、FAT 表）。
+ * 没有每卷锁时 sec_buf 会串数据/FAT 链会踩坏；这里只验“各自数据完好”。 */
+static void fat16_smp_selftest(void)
+{
+    int pids[2];
+    int bad = 0;
+
+    for (int i = 0; i < 2; i++) {
+        pids[i] = sc(SYS_FORK, 0, 0, 0);
+        if (pids[i] == 0) {
+            const char *path = (i == 0) ? "fat:/SMPA.TXT" : "fat:/SMPB.TXT";
+            char wbuf[64];
+            char rbuf[64];
+            int ok = 1;
+
+            for (int j = 0; j < 64; j++) wbuf[j] = (char)('A' + i);
+            for (int n = 0; n < 20 && ok; n++) {
+                int h = sc(SYS_OPEN, (int)path, FS_WRITE | FS_CREAT, 0);
+
+                if (h < 0) { ok = 0; break; }
+                if (sc(SYS_FWRITE, h, (int)wbuf, 64) != 64) ok = 0;
+                sc(SYS_CLOSE, h, 0, 0);
+                if (!ok) break;
+
+                h = sc(SYS_OPEN, (int)path, FS_READ, 0);
+                if (h < 0) { ok = 0; break; }
+                for (int j = 0; j < 64; j++) rbuf[j] = 0;
+                if (sc(SYS_FREAD, h, (int)rbuf, 64) != 64) ok = 0;
+                sc(SYS_CLOSE, h, 0, 0);
+                for (int j = 0; j < 64; j++) {
+                    if (rbuf[j] != wbuf[j]) ok = 0;
+                }
+            }
+            sc(SYS_EXIT, ok ? 0 : 1, 0, 0);
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        int st = 0;
+        if (pids[i] > 0) {
+            int w = sc(SYS_WAIT, pids[i], (int)&st, 0);
+            if (w != pids[i] || st != 0) bad = 1;
+        } else {
+            bad = 1;
+        }
+    }
+    putstr(bad ? "fs: fat16 smp lock FAIL\n" : "fs: fat16 smp lock ok\n");
+}
+#endif
+
+#if defined(OS_TEST_BUILD) && OS_TEST_BUILD
 /* chroot 内绝对软链接不能指回卷根：/link -> /etc/passwd 必须解析到
  * <chroot>/etc/passwd（不存在），而不是真实 /etc/passwd。 */
 static void chroot_symlink_selftest(void)
@@ -1549,6 +1599,7 @@ static void cmd_sectest(void)
 #if defined(OS_TEST_BUILD) && OS_TEST_BUILD
     einr_selftest();
     chroot_symlink_selftest();
+    fat16_smp_selftest();
 #endif
 }
 

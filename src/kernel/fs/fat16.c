@@ -252,7 +252,7 @@ static int find_free_entry(uint32_t *out_lba, uint32_t *out_idx)
 
 /* ==================== 挂载 ==================== */
 
-int fat16_mount(const char *blk_name, const char *drive)
+static int fat16_mount_impl(const char *blk_name, const char *drive)
 {
     block_device_t *dev = blk_lookup(blk_name);
     uint8_t sb[512];
@@ -343,7 +343,7 @@ static const char *rel_of(const char *rel)
     return rel;
 }
 
-int fat16_listdir(const char *rel, uint32_t index, char *name, uint32_t max,
+static int fat16_listdir_impl(const char *rel, uint32_t index, char *name, uint32_t max,
                   fs_stat_t *out)
 {
     uint32_t seen = 0;
@@ -375,7 +375,7 @@ int fat16_listdir(const char *rel, uint32_t index, char *name, uint32_t max,
     return E_NOENT;
 }
 
-int fat16_stat(const char *rel, fs_stat_t *out)
+static int fat16_stat_impl(const char *rel, fs_stat_t *out)
 {
     fat_dirent_t de;
     int r = find_root_entry(rel, &de, 0, 0);
@@ -389,7 +389,7 @@ int fat16_stat(const char *rel, fs_stat_t *out)
     return E_OK;
 }
 
-int fat16_unlink(const char *rel)
+static int fat16_unlink_impl(const char *rel)
 {
     fat_dirent_t de;
     uint32_t lba = 0, idx = 0;
@@ -418,7 +418,7 @@ int fat16_unlink(const char *rel)
     return E_OK;
 }
 
-int fat16_mkdir(const char *rel)
+static int fat16_mkdir_impl(const char *rel)
 {
     (void)rel;
     return E_NOSPC;             /* 只支持根目录里的文件 */
@@ -435,7 +435,7 @@ int fat16_mkdir(const char *rel)
  *
  * 目录项位置 (dir_lba, dir_idx) 不变，所以打开中的文件改名是安全的：
  * 句柄用 dir_lba/dir_idx 回写簇号和大小，不依赖名字。 */
-int fat16_rename(const char *oldrel, const char *newrel)
+static int fat16_rename_impl(const char *oldrel, const char *newrel)
 {
     fat_dirent_t de;
     fat_dirent_t other;
@@ -477,7 +477,7 @@ int fat16_rename(const char *oldrel, const char *newrel)
 
 /* ==================== 文件句柄 ==================== */
 
-int fat16_open(const char *rel, uint32_t flags)
+static int fat16_open_impl(const char *rel, uint32_t flags)
 {
     fat_dirent_t de;
     int h = -1;
@@ -563,7 +563,7 @@ int fat16_open(const char *rel, uint32_t flags)
     return h;
 }
 
-int fat16_read(int h, void *buf, uint32_t len)
+static int fat16_read_impl(int h, void *buf, uint32_t len)
 {
     fat_handle_t *fh;
     uint8_t *p = (uint8_t *)buf;
@@ -608,7 +608,7 @@ int fat16_read(int h, void *buf, uint32_t len)
     return (int)done;
 }
 
-int fat16_write(int h, const void *buf, uint32_t len)
+static int fat16_write_impl(int h, const void *buf, uint32_t len)
 {
     fat_handle_t *fh;
     const uint8_t *p = (const uint8_t *)buf;
@@ -664,7 +664,7 @@ int fat16_write(int h, const void *buf, uint32_t len)
     return (int)done;
 }
 
-int fat16_close(int h)
+static int fat16_close_impl(int h)
 {
     fat_handle_t *fh;
     int r = 0;
@@ -792,3 +792,95 @@ const fs_backend_t fat16_backend = {
     fat16_be_unlink,
     fat16_be_rename
 };
+
+/* =============================================================================
+ * SMP 串行化
+ *
+ * sec_buf（单扇区暂存）、handles[]、FAT 表/根目录/簇链都是全局共享状态；
+ * BSP/AP 上的进程并发 open/read/write/unlink 会互相踩。用一把全局锁覆盖
+ * 所有公开入口：先改名成 *_impl，再在文件末尾统一加锁，避免逐条 return
+ * 漏解锁。锁内不调用 VFS 锁（FAT 后端不走 ramfs 的 fs_lock），不存在
+ * VFS→FAT 的反向边；持锁期间只做块设备同步 I/O，不睡眠。
+ * ========================================================================== */
+static spinlock_t fat16_lock = SPINLOCK_INIT;
+
+int fat16_mount(const char *blk_name, const char *drive)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_mount_impl(blk_name, drive);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_listdir(const char *rel, uint32_t index, char *name, uint32_t max,
+                  fs_stat_t *out)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_listdir_impl(rel, index, name, max, out);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_stat(const char *rel, fs_stat_t *out)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_stat_impl(rel, out);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_unlink(const char *rel)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_unlink_impl(rel);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_mkdir(const char *rel)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_mkdir_impl(rel);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_rename(const char *oldrel, const char *newrel)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_rename_impl(oldrel, newrel);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_open(const char *rel, uint32_t flags)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_open_impl(rel, flags);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_read(int h, void *buf, uint32_t len)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_read_impl(h, buf, len);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_write(int h, const void *buf, uint32_t len)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_write_impl(h, buf, len);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}
+
+int fat16_close(int h)
+{
+    uint32_t f = spin_lock_irqsave(&fat16_lock);
+    int r = fat16_close_impl(h);
+    spin_unlock_irqrestore(&fat16_lock, f);
+    return r;
+}

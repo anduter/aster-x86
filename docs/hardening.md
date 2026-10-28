@@ -156,3 +156,38 @@ fs: audit chroot symlink containment ok
   根被删除后行为未定义（与 Linux 的“已 chroot 进程仍持有根”不同）。
 - 只堵了符号链接这一条；`/proc/self/root` 之类接口不存在，暂无其它绕过面。
 - 绝对硬链接不可能（link 只接受同卷路径），不在本项范围。
+---
+
+## 4. FAT16 SMP 锁
+
+**现象**：多核并发读写 FAT16 交换盘时偶发串数据/串目录项；`sec_buf` 是**单个**
+512 字节扇区暂存，两个 CPU 同时用会互相覆盖。
+
+**根因**：`fat16.c` 的 `sec_buf`、`handles[8]`、FAT 表/根目录/簇链都是全局状态，
+没有任何串行化；ramfs 有 `fs_lock`，FAT16 后端没有。
+
+**修复**（`fs/fat16.c`）：沿用内核 `spinlock_t`，加一把全局 `fat16_lock`。
+把 10 个公开入口（mount/listdir/stat/unlink/mkdir/rename/open/read/write/close）
+改名成 `*_impl`，文件末尾统一加锁包装，避免逐条 return 漏解锁。
+
+锁序：FAT 后端不拿 ramfs 的 `fs_lock`，VFS 分发时也不持锁进入 FAT，
+因此不存在 VFS→FAT 的反向边；持锁期间只做块设备同步 I/O，不睡眠。
+`fat16_mounted()`/`fat16_drive()` 只读标量，不加锁。
+
+**回归**（`sectest`，-Test 构建）：两个子进程并发对 `fat:/SMPA.TXT`、
+`fat:/SMPB.TXT` 各写/读 20 轮，校验各自 64 字节数据完好：
+
+```text
+fs: fat16 smp lock ok
+```
+
+`build.ps1` 新增 1 项检查；`-Test` **254/254 PASS**（全新 obj 目录）。
+
+**遗留**：
+
+- 锁是全局单把，不是“每卷一把”；当前只有一张 FAT16 交换盘，够用。多卷
+  时应改成 `fat_volume_t` 内嵌锁。
+- 块设备缓存（`dev/block/block.c` 的 `blk_cache`）本身也没有锁；本轮只按
+  任务范围修 FAT16 层。多卷/多设备并发仍可能踩缓存，记入未修项。
+- 持锁做 ATA PIO 轮询会拉长另一颗 CPU 的等锁时间；功能正确，但高并发下
+  应改成“先拷贝到栈上、锁内只做元数据”的细粒度方案。
