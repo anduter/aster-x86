@@ -191,3 +191,37 @@ fs: fat16 smp lock ok
   任务范围修 FAT16 层。多卷/多设备并发仍可能踩缓存，记入未修项。
 - 持锁做 ATA PIO 轮询会拉长另一颗 CPU 的等锁时间；功能正确，但高并发下
   应改成“先拷贝到栈上、锁内只做元数据”的细粒度方案。
+---
+
+## 5. 未修项（本轮时间原因，留待下一批）
+
+以下三项是小加固清单里的“时间允许”项。本轮先保证 P1 四项（AP tick /
+EINTR / chroot 软链接 / FAT16 锁）独立提交且回归全绿，这三项未动代码，
+避免在发布前引入调度器/语义级回归。
+
+1. **`sched_tick` READY 窗口持锁**（`proc/sched.c`）
+   - 现状：timer tick 里把 current 置 READY 与重新入队之间存在窗口；目前靠
+     `sched_lock` + `wake_pending` latch 兜底，audit-smp 压测未复现。
+   - 需要：把“置 READY + 入队”收进同一临界区，并补一条 RUNNING⇒在队断言
+     的负向测试。属调度器核心改动，建议单独一批并跑 12 分钟 4 核浸泡。
+
+2. **`sched_deliver_pending` 尊重 `cpu_pin`**（`proc/sched.c`）
+   - 现状：补投路径按 `sched_place()` 选 CPU，未检查目标 `cpu_pin`；
+     pinned 进程在唤醒/补投时可能落到别的 CPU。
+   - 需要：选 CPU 前先看 `cpu_pin >= 0`，并补 `-smp 4` + pin 的回归；
+     会改动放置策略，需和负载均衡一起验证。
+
+3. **`O_CREAT` 悬空软链接语义**（`fs/ramfs.c` / `fs/fs_syscall.c`）
+   - 现状：`O_CREAT` 打开一个末段是悬空软链接的路径时，会沿链接创建
+     “被遮蔽”的目标文件（而不是 Linux 的“跟随链接创建目标/或拒绝”）。
+   - 需要：明确跟随语义并补 open/lstat 回归；属 ABI 行为变更，需同步
+     `docs/api.md` 与用户态预期。
+
+## 6. 结论 / 验收
+
+- 新增检查：AP tick skew、EINTR read/accept/kill、chroot 软链接、FAT16 SMP
+  锁，共 6 项；整机回归 248 → **254**。
+- 每项独立提交，回归：`-Test` 248→254 全绿（见各节）。
+- 最终 `tools/ci.ps1 -Full -StrictBom` 连跑两轮、`unit.ps1` 10/10、
+  `check-deps` 0 违规。
+- `-smp 4` 证据见第 1 节（`serial-smp4.log`）。
