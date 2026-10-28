@@ -19,6 +19,7 @@ void *unit_memset(void *dst, int c, unsigned int n)
     return dst;
 }
 
+bool proc_signal_pending(void) { return false; }
 void proc_block(unsigned int chan) { (void)chan; }
 void proc_wakeup(unsigned int chan) { (void)chan; }
 

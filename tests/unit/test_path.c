@@ -16,6 +16,7 @@ static const char *fake_root = "";
 
 proc_t *proc_current(void) { return &fake_proc; }
 const char *proc_root_of(proc_t *p) { (void)p; return fake_root; }
+bool proc_signal_pending(void) { return false; }
 void proc_block(unsigned int chan) { (void)chan; }
 int keyboard_getchar(void) { return -1; }
 

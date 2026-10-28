@@ -28,6 +28,8 @@ struct process {
 };
 
 void proc_block(unsigned int chan);
+/* v0.74.2：阻塞 syscall 的 EINTR 检查；host 单测里没有信号，恒 false。 */
+bool proc_signal_pending(void);
 void proc_wakeup(unsigned int chan);
 
 #endif /* PROC_H_MODULE_H */
