@@ -35,24 +35,26 @@
 
 - `dev/intc/apic.c`：校准前显式 `DCR = 0x0B`（divide-by-1）；NMI 周期也用
   /1 计数，公式才成立。
-- 校准窗口从 10 个 tick 加长到 100 个 tick（`APIC_CAL_TICKS`）。per-CPU tick
-  要和 BSP 的 PIT tick 直接比较，因此 AP 的“10ms 计数”按 BSP 实际 tick
-  间隔（含被合并的边沿）来定；100 tick 把启动早期的高延迟摊平。
-- `proc/smp.c`：AP 在第一次拿到校准计数、重装自己的 LAPIC 时，把
-  `per_cpu[c].ticks` 置为 `timer_ticks()`（BSP 墙钟），之后按校准后的周期推进。
-  这消除了 AP 启动先后和校准前未校准 tick 的影响。
+- 校准窗口从 10 个 tick 加长到 150 个 tick（`APIC_CAL_TICKS`），并在 tick 150
+  一次完成：AP 的“10ms 计数”按 BSP 实际 tick 间隔（含被合并的边沿）来定。
+  选择 150 而不是 100，是因为 QEMU/TCG 启动早期的 PIT 延迟随负载剧烈变化，
+  一次性窗口越长越接近平均值；而校准点距离 2s 检查只剩 50 tick，残余频率
+  误差被限制在很短的窗口里（实测 AP 198 vs BSP 200）。
+- `proc/trap/apic.c`：校准完成时把每颗在线 AP 的 `per_cpu[c].ticks` 原子写为
+  BSP 的 `per_cpu[0].ticks`，之后各自按 10ms 推进。AP 侧 tick 用
+  `__atomic_add_fetch`，避免“同步前旧值 +1”覆盖对齐结果。
 - `proc/trap/irq.c`：tick 200 时新增自检行，比较所有在线 CPU 的绝对 tick
   与 BSP 的偏差，`max_delta <= 10%` 打印 ok。
 
 **回归**：
 
 ```text
-smp: tick check after 2s bsp=200 ap=189 ap2=0 ap3=0 (online=2)
-smp: ap tick skew ok (max_delta=5%, limit=10%, window=2s)
+smp: tick check after 2s bsp=200 ap=198 ap2=0 ap3=0 (online=2)
+smp: ap tick skew ok (max_delta=0%, limit=10%, window=2s)
 
 # -smp 4 手工（serial-smp4.log）
-smp: tick check after 2s bsp=200 ap=191 ap2=192 ap3=191 (online=4)
-smp: ap tick skew ok (max_delta=4%, limit=10%, window=2s)
+smp: tick check after 2s bsp=200 ap=201 ap2=202 ap3=201 (online=4)
+smp: ap tick skew ok (max_delta=1%, limit=10%, window=2s)
 ```
 
 `build.ps1` 新增检查 `AP tick 校准无偏斜`；`-Test` 249/249 PASS。

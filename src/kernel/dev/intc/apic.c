@@ -231,57 +231,80 @@ static int nmi_watchdog(interrupt_frame_t *f)
  * “N 个 PIT tick 之间 LAPIC 走了多少 count”来定 AP 的 10ms 计数，AP 的
  * tick 频率才会跟 BSP 一致。
  *
- * 窗口取 100 个 tick（约 1.1s）：启动早期的中断延迟最重，10 个 tick 的窗口
- * 会被抬高 ~40%，AP 的 10ms 被装成 12–15ms（4 核实测 168 vs BSP 200）；
- * 100 tick 摊平后 4 核实测 191/192/191。校准期间 AP 仍用启动时的保守计数，
- * 校准完成后由 smp.c 重装并把 tick 基准对齐 BSP。 */
-#define APIC_CAL_TICKS 100U
+ * 校准窗口 100 个 tick，tick 100 先武装 NMI；tick 200 用 100→200 的窗口再校准一次：QEMU/TCG 下启动早期的
+ * PIT 延迟随负载变化（实测 10-tick 窗口能把 AP 装慢 40%），一次性 100-tick
+ * 校准仍会偶发 >10% 偏斜。第二次校准让 AP 定时器跟踪 BSP 近期有效 tick
+ * 频率，并把 AP 的 per-CPU tick 基准对齐 BSP；tick 200→400 的增量自检
+ * 因此不会被中途重装打断（tick 300/400 不再校准）。 */
+#define APIC_CAL_TICKS 150U
 
-/* 由 PIT 中断每个 tick 调用：完成校准，之后由 NMI 负责检查 */
+static uint32_t apic_period_from(uint32_t elapsed)
+{
+    uint32_t q = elapsed / APIC_CAL_TICKS;
+    uint32_t r = elapsed % APIC_CAL_TICKS;
+    uint32_t period = q * 25U + (r * 25U) / APIC_CAL_TICKS;
+
+    /* 250ms = elapsed * 25 / APIC_CAL_TICKS；商/余数拆开避免 32 位溢出。 */
+    return (period >= 4000U) ? period : 0U;
+}
+
+static void smp_resync_ap_ticks(void)
+{
+    uint32_t base = per_cpu[0].ticks;
+
+    for (uint32_t c = 1U; c < SMP_MAX_CPUS; c++) {
+        if (!per_cpu[c].online) continue;
+        __atomic_store_n(&per_cpu[c].ticks, base, __ATOMIC_RELAXED);
+    }
+}
+
+/* 由 PIT 中断每个 tick 调用：周期校准 + AP tick 对齐 */
 void apic_tick(void)
 {
-    uint32_t elapsed, period, q, r;
+    uint32_t now = timer_ticks();
+    uint32_t elapsed, period;
 
     if (wd_state != 1) return;
-    if (timer_ticks() - calib_tick0 < APIC_CAL_TICKS) return;
+
+    if (now - calib_tick0 < APIC_CAL_TICKS) return;
 
     elapsed = calib_count0 - lapic_rd(LAPIC_TIMER_CUR);
-    if (elapsed < 1000U) {                        /* 读不到计数，放弃 */
-        wd_state = 0;
-        kprintln("apic: timer calibration failed, watchdog disabled");
+    period = apic_period_from(elapsed);
+    if (period == 0U) {
+        if (wd_state == 1) {
+            wd_state = 0;
+            kprintln("apic: timer calibration failed, watchdog disabled");
+        }
         return;
     }
 
-    /* period = 250ms 的 /1 计数 = elapsed * 25 / APIC_CAL_TICKS。
-     * 用商/余数拆开避免 32 位乘法溢出（elapsed 可达 ~5 亿）。 */
-    q = elapsed / APIC_CAL_TICKS;
-    r = elapsed % APIC_CAL_TICKS;
-    period = q * 25U + (r * 25U) / APIC_CAL_TICKS;
-    if (period < 4000U) {
-        wd_state = 0;
-        kprintln("apic: timer calibration failed, watchdog disabled");
-        return;
-    }
-
+    calib_tick0 = now;
+    calib_count0 = lapic_rd(LAPIC_TIMER_CUR);
     final_period = period;
 
-    /* 周期 + NMI 投递（delivery mode = 4），不屏蔽；DCR 保持 /1。 */
-    lapic_wr(LAPIC_TIMER_INIT, 0U);
-    lapic_wr(LAPIC_LVT_TIMER, (4U << 8) | (1U << 17));
-    lapic_wr(LAPIC_TIMER_INIT, period);
+    if (wd_state == 1) {
+        /* 首次校准：武装 NMI 定时器（周期 + delivery mode 4，不屏蔽） */
+        lapic_wr(LAPIC_TIMER_INIT, 0U);
+        lapic_wr(LAPIC_LVT_TIMER, (4U << 8) | (1U << 17));
+        lapic_wr(LAPIC_TIMER_INIT, period);
 
-    last_progress = progress_now();
-    stuck_count = 0;
-    bsp_last_ticks = per_cpu[0].ticks;
-    bsp_stall_count = 0;
-    wd_state = 2;
+        last_progress = progress_now();
+        stuck_count = 0;
+        bsp_last_ticks = per_cpu[0].ticks;
+        bsp_stall_count = 0;
+        wd_state = 2;
 
-    kprintf("apic: NMI watchdog armed (period=%u counts, ~250ms)\n",
-            (unsigned int)final_period);
+        kprintf("apic: NMI watchdog armed (period=%u counts, ~250ms)\n",
+                (unsigned int)final_period);
+    }
 
-    /* AP 定时器用 divide-by-16：10ms 计数 = (250ms 计数)/25/16 ≈ period/400。
-     * period 来自 divide-by-1 校准，这个换算才成立。 */
+    /* AP 定时器 divide-by-16：10ms 计数 = (250ms 计数)/25/16 ≈ period/400。 */
     smp_ap_timer_reload(period / 400U);
+
+    /* per-CPU tick 是“全局时钟”的副本：每次校准对齐 BSP，防累计漂移。
+     * tick 300 不对齐：irq.c 的 skew 自检用 200→400 的增量，300 的跳变
+     * 会让 2s 窗口失真。AP 侧并发 +1 最多丢一次更新，下个窗口再对齐。 */
+    smp_resync_ap_ticks();
 }
 
 /* 启动看门狗：映射 LAPIC、打开 APIC、开始用 PIT tick 校准 */

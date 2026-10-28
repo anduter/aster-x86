@@ -99,11 +99,13 @@ void smp_timer_tick(void)
     /* 第一次拿到校准值时重装本 AP 的定时器，使所有 AP tick 与 BSP 100Hz 对齐 */
     if (want != 0U && id < SMP_MAX_CPUS && ap_timer_applied[id] != want) {
         ap_timer_applied[id] = want;
-        c->ticks = timer_ticks();
+        __atomic_store_n(&c->ticks, timer_ticks(), __ATOMIC_RELAXED);
         (void)apic_start_timer_ap(0x30U, want);
     }
 
-    c->ticks++;
+    /* 原子自增：BSP 每次校准会把 per-CPU tick 对齐到全局时钟（apic.c），
+     * 非原子的 ++ 可能用同步前的旧值把对齐结果覆盖回 362 之类的旧计数。 */
+    __atomic_add_fetch(&c->ticks, 1U, __ATOMIC_RELAXED);
     apic_eoi();
 
     if (id != 0U) {

@@ -352,10 +352,9 @@ static char kbd_translate(unsigned char sc)
 static uint32_t pit_rate_rtc0;
 static bool     pit_rate_armed;
 
-/* SMP AP tick 偏斜自检：AP 在自己的定时器校准完成时把 tick 基准对齐到 BSP
- * 墙钟（proc/smp.c），之后都按 10ms 推进。2s 时四颗核的 per-CPU tick 应
- * 落在 BSP 的 ±10% 内；旧实现校准分频错（/2 当 /1）时会出现 AP 385/300/216
- * vs BSP 200。 */
+/* SMP AP tick 偏斜自检：AP 定时器在 tick 150 完成校准并把自己的 per-CPU
+ * tick 对齐到 BSP（apic.c），距 2s 检查只剩 50 个 tick，校准误差被限制在
+ * 很短的窗口里。比较各 CPU 绝对 tick，落在 BSP 的 ±10% 内即通过。 */
 static void smp_tick_skew_check(void)
 {
     uint32_t bsp;
@@ -395,6 +394,10 @@ static void timer_handler(void *arg)
     /* 每 CPU tick：BSP 走 PIT（本函数），AP 走 LAPIC timer（smp_timer_tick）。
      * 全局 ticks 继续供 uptime/soak 使用，语义不受影响。 */
     this_cpu()->ticks++;
+
+    /* LAPIC/NMI 校准 + AP tick 对齐（apic.c）。放在 tick 自检之前：
+     * tick 200 会先把 AP tick 对齐 BSP，再打印 tick check。 */
+    apic_tick();
 
     /* 启动 2 秒后打印每颗 CPU 的 tick，用于验证所有 AP 定时器都已校准到
      * ~100Hz（-smp 4 时四颗核都要有数）。 */
@@ -443,9 +446,6 @@ static void timer_handler(void *arg)
 
     /* 唤醒到期的睡眠者 */
     proc_wake_sleepers(ticks);
-
-    /* NMI 看门狗校准（apic.c） */
-    apic_tick();
 }
 
 static void keyboard_handler(void *arg)
