@@ -2,8 +2,8 @@
 
 - 批次：2026-10-31 三层架构 P4（`docs/design/three-layer.md` §8）
 - 基线 HEAD：`4fe9c55`（288 项检查 / `ci -Full` 288/288 ×2 / 工作区干净）
-- 交付提交：`484765d`（`[pkgd] P4: ring3 pkgd daemon + kernel verify/commit
-  primitives + ring0 fallback`）
+- 交付提交：`484765d`（实现）、`bca1e17`（claims/design）、`364fc44`
+  （ring3 list 回复文本缓冲 1KiB）、`aedde60`（CI 记录）
 - 允许改动范围：`src/user/pkgd.c`、`src/user/ulib.*`、`src/kernel/pkg/**`、
   `src/kernel/include/pkg.h`、`src/kernel/svc/supervisor.c`（只加启动钩子）、
   `build.ps1`（pkgd 编译/镜像/检查项）、`docs/claims/pkgd.md`、
@@ -156,6 +156,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\session-run.ps1 -Name 
 # === TEST PASS (299/299) ===   42.0s
 # === TEST PASS (299/299) ===   42.6s
 # === TEST PASS (299/299) ===   41.7s   （恢复/重放改动后）
+# === TEST PASS (299/299) ===   42.1s   （list 缓冲 1KiB 修正后）
 ```
 
 ### 6.2 CI（提交 `484765d` 的 clean tree）
@@ -172,6 +173,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci.ps1 -Full -StrictBo
 - 最终 HEAD `bca1e17`（claims/design 提交后）上再连续跑 2 次：**CI PASS**
   120.9s / 122.0s；两次都是静态 5 项 PASS、`-Test` **299/299 ×2**
   （54.9s / 41.7s、55.6s / 42.0s）、结束后 worktree clean。
+- 最终代码提交 `364fc44`（list 缓冲修正）上再连续跑 2 次：**CI PASS**
+  120.7s / 121.5s；静态 5 项 PASS、`-Test` **299/299 ×2**
+  （54.7s / 41.7s、55.0s / 42.2s）、worktree clean。
 - `tools\unit.ps1`：**UNIT PASS (10/10)**，520 checks。
 - `tools\check-deps.ps1`：**0 violations**（199 files / 642 includes）。
 
