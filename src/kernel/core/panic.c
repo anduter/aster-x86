@@ -7,6 +7,7 @@
  * ============================================================================= */
 #include "include/kernel.h"
 #include "include/dev.h"
+#include "include/klog.h"
 #include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
@@ -90,6 +91,10 @@ void panic(const char *fmt, ...)
     va_start(ap, fmt);
     kvsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+
+    /* P2：panic 现场同时留在内核日志环里（dmesg 的最后现场）。
+     * 用 klog_write 而不是 klog_capture：panic 路径只入环，绝不触发自检。 */
+    klog_write(KLOG_ERR, "panic", buf);
 
     /* 2. 串口：纯文本 + 栈内存转储，便于离线分析 */
     serial_puts("\r\n*** KERNEL PANIC ***\r\n");

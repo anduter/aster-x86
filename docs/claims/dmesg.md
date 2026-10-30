@@ -11,6 +11,7 @@
 | `src/kernel/core/misc_syscall.c` | `SYS_DMESG(85)` 的 `owns` + `case`（用户窗口校验 + 锁外 `copy_to_user`） |
 | `src/kernel/apps/shell.c` | 内核 shell 新增 `dmesg [-n N]`（默认 24 行，上限 100） |
 | `src/kernel/lib/kprintf.c` | **窄例外（已获父会话批准）**：`kprintf` / `kprintln` 各加一次 `klog_capture(buf,len)`，共 2 处；`kprintln` 不经过 `kprintf`，不会重复入环 |
+| `src/kernel/core/panic.c` | **窄例外（父会话要求“panic 打印也应进环”）**：panic 原因文本用 `klog_write(KLOG_ERR,"panic",buf)` 入环；只入环、不触发自检 |
 | `docs/claims/dmesg.md` | 本声明 |
 
 未改 `include/abi.h`（85 已预留）、`build.ps1`，未碰 `svc/**`、`net/**`、`fs/**`、`proc/**`。
@@ -21,7 +22,8 @@
   按字节追加、按 `\n` 计行；溢出时从最旧端**整行**丢弃（没有换行的超长单行整体丢弃），
   因此快照总是从行首开始，不会出现半行拼到别的行上。
 - **并发**：写侧只做 `spin_lock_irqsave + memcpy`，临界区上限约 640B，不打印、不分配、
-  不睡眠；可在 IRQ/panic 路径调用（panic 的最后输出也会进环）。
+  不睡眠；可在 IRQ/panic 路径调用。`panic()` 的原因文本会以 `[err] panic: ...` 形式
+  留在环里（方便事后看最后现场），且 panic 路径只入环、不触发自检。
 - **惰性初始化**：环是静态 BSS，本身零初始化即可用；`klog_init()` 只是显式入口，
   第一次写入会惰性置位，所以 `kprintf` 在 `klog_init` 之前调用是安全的。
 - **读侧快照**：`klog_read()` 在锁内把环内字节拷到调用方缓冲，锁外再 `copy_to_user`
@@ -99,10 +101,11 @@ dmesg: last 5 line(s) (...)
 ## 5. 回归与隔离
 
 - 基线工作区里 `svc/**` 正被 IPC 会话修改（`src/kernel/svc/ipc.h` 当时有未完成的注释，
-  主树无法编译）。本会话在 `D:\dmesg-wt`（`git worktree`，基线 `443dba1` + 本会话 5 个
-  代码文件）里做构建与回归，不触碰主树的其它会话改动。
+  主树无法编译）。本会话在 `D:\dmesg-wt`（`git worktree`，基线 `443dba1` + 本会话代码）
+  里做构建与回归，不触碰主树的其它会话改动。
 - 命令：`tools\session-run.ps1 -Repo D:\dmesg-wt -Name dmesg -Test`
-- 结果：`=== TEST PASS (254/254) ===`，耗时 55.7s；工作树干净（只含本会话文件）。
+- 结果：`=== TEST PASS (254/254) ===`（首次 55.7s）；随后 `ci.ps1 -Full -StrictBom`：
+  build PASS + 连续 2 次 `-Test` 254/254 + 收尾工作树干净。
 - `build.ps1` 的 checks 未改，新增自检行只打印到串口，不改检查项数（仍 254）。
 
 ## 6. 遗留 / 后续
@@ -112,3 +115,10 @@ dmesg: last 5 line(s) (...)
 - 环里不存时间戳/级别（INFO 无前缀，WARN/ERR 有 `[warn]/[err]` 前缀）；后续可加 tick 前缀。
 - `SYS_DMESG` 一次最多 64KB（与 `user_range_ok` 上限一致）；更大的读取需要分页 API。
 - `dropped` 是累计值；环在自检恢复后清零重计（避免把自检的 293 次丢弃算进运行期）。
+- `SYS_DMESG` 目前**没有 root 权限门**（与 `SYS_RESINFO` 等调试调用一致）；内核日志里
+  有 `%p` 形式的地址，若后续要 Linux `dmesg_restrict` 语义，在 `misc_user_buf()` 前加
+  `euid==0` 判断即可。
+- 环自检只在 `-Test` 构建跑（`boot_test_build()`）；生产构建只记录、不自检、不重置。
+- panic 路径与其它内核打印一样使用环锁的短自旋；同 CPU 的 NMI 若恰好在环写入临界区
+  内 panic，仍受与 `console_lock` 相同的既有约束（未做 NMI 专用 trylock，避免正常 SMP
+  并发时丢日志）。
