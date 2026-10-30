@@ -183,22 +183,37 @@ hwcap: selftest PASS
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\session-run.ps1 -Name hwcap -Test
 # === TEST PASS (305/305) ===   40.3s   （2026-10-31 01:41，clean tree）
+# === TEST PASS (305/305) ===   41.7s   （stale-cap/PTE 反查加固后）
 ```
+
+另有一次 run 出现 7 项既有用户态/并发偶发失败（`fs: fat16 smp lock FAIL`、
+`ipc: ring3 ping/reply FAIL` 等，`hwcap:` 6 行本身全 PASS）；同一提交立即重跑
+**305/305 PASS**。与 `docs/parallel-sessions.md` 记录的 SMP/用户态偶发同族，
+本会话未改这些模块。
 
 ### 6.2 静态
 
-- `tools\check-deps.ps1`：**0 violations**（`OK: no cross-module include violations`）。
+- `tools\check-deps.ps1`：**0 violations**（201 files / 650 includes）。
 - `tools\unit.ps1`：**UNIT PASS (10/10)**，520 checks。
 
-### 6.3 CI
+### 6.3 CI（提交 `621b2b9` 的 clean tree）
 
-待 `ci -Full` ×2 后补记。
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci.ps1 -Full -StrictBom
+```
+
+- 第 1 次：**CI PASS**，118.2s；静态 5 项全 PASS（worktree clean / BOM+parse
+  39 files / no artifacts 359 / check-deps 0 / unit 10 suites）；`build.ps1`
+  PASS；`-Test` **305/305 ×2**（53.8s / 40.0s）；结束后 worktree clean。
+- 第 2 次：**CI PASS**，118.1s；同样静态 5 项 PASS、`-Test` **305/305 ×2**
+  （53.5s / 40.2s）、worktree clean。
+- `305 = 299 + 6`（本会话新增 6 条 `hwcap:` 检查，未删除/修改既有 299 项）。
 
 ## 7. 串口摘录（`serial-hwcap.log`，305/305 那次）
 
 ```text
 ipc: selftest PASS
-hwcap: mmio map ok (cap=0x1a4b000 len=4096 rw=1 ro=1 nx=1)
+hwcap: mmio map ok (cap=0x<phys> len=4096 rw=1 ro=1 nx=1)
 hwcap: mmio bad cap rejected
 hwcap: irq bind/wait ok (irq=5 guard=8)
 hwcap: dma alloc/free ok (len=8192 align=4096)
