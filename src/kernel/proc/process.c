@@ -803,7 +803,7 @@ bool proc_sigframe_valid(const struct interrupt_frame *f)
     /* EFLAGS 允许位：CF(0) 保留(1) PF(2) AF(4) ZF(6) SF(7) TF(8) IF(9)
      * DF(10) OF(11) AC(18) ID(21)。IOPL(12-13)/NT(14)/RF(16)/VM(17)/
      * VIF(19)/VIP(20) 全部拒绝（VM86 是 ring0 提权面）。 */
-    const uint32_t user_eflags_mask = 0x00240FD7U;
+    const uint32_t user_eflags_mask = 0x00250FD7U;   /* 允许 RF(16)：异常/信号帧会带，入栈前清掉 */
 
     if (f == 0) return false;
     if (f->cs != 0x1BU) return false;             /* 用户代码段（RPL=3） */
@@ -837,7 +837,7 @@ int proc_sigreturn(struct interrupt_frame *f)
         return -1;
     }
 
-    frame.eflags &= 0x00240FD7U;
+    frame.eflags &= 0x00240FD7U;   /* 应用时清 RF */
     frame.eflags |= 0x2U;
     memcpy(f, &frame, sizeof(frame));
     p->sig_frame = 0U;

@@ -38,6 +38,9 @@ static bool priv_sigframe_test(void)
 
     priv_frame_init(&f);
     if (!proc_sigframe_valid(&f)) priv_sig_fail |= 0x1U;   /* 合法帧 */
+    f.eflags |= 0x10000U;   /* RF：异常/信号帧常见 */
+    if (!proc_sigframe_valid(&f)) priv_sig_fail |= 0x200U;   /* RF 不得拒绝 */
+    f.eflags &= ~0x10000U;
 
     priv_frame_init(&f);
     f.cs = 0x08U;                                          /* ring0 代码段 */
