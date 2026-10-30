@@ -6,6 +6,10 @@
  *   86 SYS_SVC_REGISTER  ebx=manifest 文本, ecx=自己的 port  -> 0 / -1
  *   87 SYS_SVC_LOOKUP    ebx=name, ecx=len（必须 NUL 结尾）  -> port / -1
  *   88 SYS_SVC_HEARTBEAT ebx=port                            -> 0 / -1
+ *   89 SYS_IRQ_WAIT      ebx=irq, ecx=timeout_ticks           -> irq / -EAGAIN / -EINTR / -1
+ *   90 SYS_MMIO_MAP      ebx=base, ecx=&va                    -> 0 / -1
+ *   91 SYS_DMA_ALLOC     ebx=len, ecx=align, edx=&va          -> cap id / -1
+ *   92 SYS_DMA_FREE      ebx=cap                              -> 0 / -1
  *   93 SYS_LOG_WRITE     ebx=tag, ecx=msg, edx=len            -> 0 / -1
  * 未实现的编号由分发器统一返回 -1，本文件不认领。
  * ============================================================================= */
@@ -157,6 +161,8 @@ bool svc_syscall_owns(uint32_t nr)
            nr == SYS_PORT_CREATE || nr == SYS_PORT_SEND ||
            nr == SYS_PORT_RECV || nr == SYS_PORT_REPLY ||
            nr == SYS_CAP_GRANT ||
+           nr == SYS_IRQ_WAIT || nr == SYS_MMIO_MAP ||
+           nr == SYS_DMA_ALLOC || nr == SYS_DMA_FREE ||
            nr == SYS_SVC_REGISTER || nr == SYS_SVC_LOOKUP ||
            nr == SYS_SVC_HEARTBEAT || nr == SYS_LOG_WRITE;
 }
@@ -312,10 +318,44 @@ int svc_syscall(interrupt_frame_t *f)
         break;
     case SYS_CAP_GRANT: {
         /* abi.h 注释只列 ebx/ecx/edx；rights 走 esi（0 = 默认 RW），
-         * 见 docs/claims/ipc.md“设计问题 #3”。 */
-        ret = ipc_cap_grant(f->ebx, f->ecx, f->edx, f->esi, proc_current());
+         * 见 docs/claims/ipc.md“设计问题 #3”。
+         * P5 扩展：CAP_MMIO 的“长度（页）”放在 esi 的高 16 位；低 4 位仍是
+         * rights。老的三参调用 rights 只有低 4 位 -> 默认 1 页，保持兼容。 */
+        uint32_t rights = f->esi & IPC_RIGHTS_ALL;
+        uint32_t len_pages = 0U;
+
+        if (f->ecx == IPC_CAP_MMIO) {
+            len_pages = (f->esi >> 16) & 0xFFFFU;
+            if (len_pages == 0U) len_pages = 1U;
+            if (len_pages > HWCAP_MMIO_MAX_PAGES) { ret = -1; break; }
+        }
+
+        ret = ipc_cap_grant_ex(f->ebx, f->ecx, f->edx, rights, len_pages,
+                               proc_current());
+        /* CAP_IRQ：grant 记录成功后立刻绑定到端口；绑定失败（线被内核
+         * handler 占用/已被别人绑定/IRQ 非法）回滚 grant 并返回 -1。 */
+        if (ret == 0 && f->ecx == IPC_CAP_IRQ) {
+            if (hwcap_irq_bind(f->ebx, f->edx, proc_current()) != 0) {
+                (void)ipc_cap_revoke(f->ebx, f->ecx, f->edx, proc_current());
+                ret = -1;
+            }
+        }
         break;
     }
+    case SYS_IRQ_WAIT:
+        ret = hwcap_irq_wait(f->ebx, f->ecx, proc_current());
+        break;
+    case SYS_MMIO_MAP:
+        ret = hwcap_mmio_map(f->ebx, f->ecx, proc_current());
+        break;
+    case SYS_DMA_ALLOC:
+        /* abi.h 只列 ebx=len, ecx=align；VA 通过 edx 指向的 u32 回填
+         * （edx==0 表示调用方不需要 VA）。 */
+        ret = hwcap_dma_alloc(f->ebx, f->ecx, f->edx, proc_current());
+        break;
+    case SYS_DMA_FREE:
+        ret = hwcap_dma_free(f->ebx, proc_current());
+        break;
     case SYS_SVC_REGISTER:
         ret = svc_register_svc(f->ebx, f->ecx);
         break;

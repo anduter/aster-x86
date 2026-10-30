@@ -15,5 +15,6 @@
 #include "dev/char/console.h"
 #include "dev/char/fb.h"
 #include "dev/net/e1000.h"
+#include "dev/hwcap.h"
 
 #endif

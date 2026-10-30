@@ -716,7 +716,16 @@ void vmm_clear_user_space(pde_t *dir)
             if (!(pte & PTE_PRESENT)) continue;
 
             uintptr_t phys = (uintptr_t)(pte & PAE_ADDR_MASK);
-            if (phys != 0U) pmm_free_pages((void *)phys, 1);
+
+            /* PTE_HWCAP：硬件 cap 映射。设备 MMIO 的物理页不归 PMM 管，
+             * 绝不能 pmm_free_pages()（会破坏位图/记账）；只有测试用的
+             * “假 MMIO”（从 PMM 分配）和 DMA 页落在管理区，才真正归还。 */
+            if (phys != 0U) {
+                if ((pte & PTE_HWCAP) == 0U ||
+                    pmm_range_managed((unsigned int)phys, 1U)) {
+                    pmm_free_pages((void *)phys, 1);
+                }
+            }
             pt[pti] = 0;
         }
 

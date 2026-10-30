@@ -15,6 +15,7 @@
 #include "ipc.h"
 #include "include/kernel.h"
 #include "include/proc.h"
+#include "include/dev.h"       /* hwcap_port_released：端口释放时解绑 IRQ */
 
 typedef struct {
     bool     used;
@@ -29,6 +30,7 @@ typedef struct {
     uint32_t type;
     uint32_t id;
     uint32_t rights;
+    uint32_t len_pages;         /* CAP_MMIO 的长度（页）；其它类型为 0 */
     uint32_t granter_uid;
 } ipc_grant_t;
 
@@ -232,6 +234,7 @@ int ipc_port_create(uint32_t flags, struct process *caller)
 void ipc_port_release(uint32_t handle, struct process *caller)
 {
     uint32_t f, slot;
+    bool released = false;
 
     if (caller == 0) return;
     f = spin_lock_irqsave(&ipc_lock);
@@ -240,9 +243,14 @@ void ipc_port_release(uint32_t handle, struct process *caller)
 
         if (proc_is_root(caller) || pt->owner_pid == caller->pid) {
             ipc_port_clear_locked(pt);
+            released = true;
         }
     }
     spin_unlock_irqrestore(&ipc_lock, f);
+
+    /* 锁外通知 hwcap：端口上绑定的 IRQ 要解绑并恢复默认屏蔽。
+     * （hwcap 的回调会再取 hwcap 锁，不能在 ipc_lock 里嵌套调用。） */
+    if (released) hwcap_port_released(handle);
 }
 
 bool ipc_port_exists(uint32_t handle)
@@ -279,8 +287,8 @@ uint32_t ipc_port_owner_uid(uint32_t handle)
 /* ---------------- 入队 / 出队 ---------------- */
 
 /* 调用方持锁；成功返回 0，队列满返回 -IPC_EAGAIN。 */
-static int ipc_enqueue_locked(ipc_port_t *pt, const void *msg, uint32_t len,
-                              const proc_t *caller)
+static int ipc_enqueue_raw_locked(ipc_port_t *pt, const void *msg, uint32_t len,
+                                  uint32_t sender_pid, uint32_t sender_uid)
 {
     ipc_slot_t *s;
 
@@ -288,11 +296,41 @@ static int ipc_enqueue_locked(ipc_port_t *pt, const void *msg, uint32_t len,
     s = &pt->q[pt->tail];
     memcpy(s->data, msg, len);
     s->len = len;
-    s->sender_pid = caller->pid;
-    s->sender_uid = proc_euid_of(caller);
+    s->sender_pid = sender_pid;
+    s->sender_uid = sender_uid;
     pt->tail = (pt->tail + 1U) % IPC_QUEUE_DEPTH;
     pt->count++;
     return 0;
+}
+
+static int ipc_enqueue_locked(ipc_port_t *pt, const void *msg, uint32_t len,
+                              const proc_t *caller)
+{
+    return ipc_enqueue_raw_locked(pt, msg, len, caller->pid,
+                                  proc_euid_of(caller));
+}
+
+/* 内核事件投递：IRQ 路径调用，不阻塞、不检查发送权限（端口是 cap 绑定的）。
+ * sender 记 0/root，接收方可用 sender_pid==0 区分内核事件。 */
+int ipc_port_post(uint32_t handle, uint32_t type, const void *payload,
+                  uint32_t len)
+{
+    /* 中断路径调用：只用小帧（IRQ 事件 12B），避免在中断栈上开 4KB。 */
+    uint8_t frame[IPC_HDR_SIZE + 64U];
+    uint32_t total, f, slot;
+    int r;
+
+    if (len > 64U) return -1;
+    total = ipc_build(frame, payload, len, type, 0U);
+
+    f = spin_lock_irqsave(&ipc_lock);
+    if (ipc_resolve_locked(handle, &slot) != 0) {
+        spin_unlock_irqrestore(&ipc_lock, f);
+        return -1;
+    }
+    r = ipc_enqueue_raw_locked(&ipc_ports[slot], frame, total, 0U, 0U);
+    spin_unlock_irqrestore(&ipc_lock, f);
+    return r;
 }
 
 int ipc_port_send(uint32_t handle, const void *msg, uint32_t len,
@@ -402,12 +440,14 @@ int ipc_port_reply(uint32_t ticket, const void *msg, uint32_t len,
 /* ---------------- capability 授予（设计 §3.3） ---------------- */
 
 static int ipc_grant_store_locked(ipc_port_t *pt, uint32_t type, uint32_t id,
-                                  uint32_t rights, const proc_t *caller)
+                                  uint32_t rights, uint32_t len_pages,
+                                  const proc_t *caller)
 {
     for (uint32_t i = 0; i < IPC_GRANT_MAX; i++) {
         if (pt->grants[i].used && pt->grants[i].type == type &&
             pt->grants[i].id == id) {
             pt->grants[i].rights = rights;
+            pt->grants[i].len_pages = len_pages;
             pt->grants[i].granter_uid = proc_euid_of(caller);
             return 0;
         }
@@ -418,6 +458,7 @@ static int ipc_grant_store_locked(ipc_port_t *pt, uint32_t type, uint32_t id,
             pt->grants[i].type = type;
             pt->grants[i].id = id;
             pt->grants[i].rights = rights;
+            pt->grants[i].len_pages = len_pages;
             pt->grants[i].granter_uid = proc_euid_of(caller);
             return 0;
         }
@@ -427,6 +468,13 @@ static int ipc_grant_store_locked(ipc_port_t *pt, uint32_t type, uint32_t id,
 
 int ipc_cap_grant(uint32_t handle, uint32_t type, uint32_t id, uint32_t rights,
                   struct process *caller)
+{
+    return ipc_cap_grant_ex(handle, type, id, rights, 0U, caller);
+}
+
+int ipc_cap_grant_ex(uint32_t handle, uint32_t type, uint32_t id,
+                     uint32_t rights, uint32_t len_pages,
+                     struct process *caller)
 {
     uint32_t f, slot;
     ipc_port_t *pt;
@@ -483,8 +531,73 @@ int ipc_cap_grant(uint32_t handle, uint32_t type, uint32_t id, uint32_t rights,
         goto out;
     }
 
-    r = ipc_grant_store_locked(pt, type, id, rights, caller);
+    if (type != IPC_CAP_MMIO) len_pages = 0U;
+    r = ipc_grant_store_locked(pt, type, id, rights, len_pages, caller);
 out:
+    spin_unlock_irqrestore(&ipc_lock, f);
+    return r;
+}
+
+/* 查某进程拥有的端口上的 grant（硬件 cap 后端用）。 */
+int ipc_cap_lookup(uint32_t owner_pid, uint32_t type, uint32_t id,
+                   uint32_t *out_id, uint32_t *out_rights,
+                   uint32_t *out_len_pages)
+{
+    uint32_t f;
+    bool found = false;
+    uint32_t best_id = 0U, best_rights = 0U, best_len = 0U;
+
+    if (owner_pid == 0U) return -1;
+
+    f = spin_lock_irqsave(&ipc_lock);
+    for (uint32_t s = 0; s < IPC_PORT_MAX; s++) {
+        ipc_port_t *pt = &ipc_ports[s];
+
+        if (!pt->used || pt->owner_pid != owner_pid) continue;
+        for (uint32_t g = 0; g < IPC_GRANT_MAX; g++) {
+            ipc_grant_t *gr = &pt->grants[g];
+
+            if (!gr->used || gr->type != type) continue;
+            if (id != 0U && gr->id != id) continue;
+            if (!found || gr->id > best_id) {
+                best_id = gr->id;
+                best_rights = gr->rights;
+                best_len = gr->len_pages;
+            }
+            found = true;
+            if (id != 0U) break;
+        }
+    }
+    spin_unlock_irqrestore(&ipc_lock, f);
+
+    if (!found) return -1;
+    if (out_id != 0) *out_id = best_id;
+    if (out_rights != 0) *out_rights = best_rights;
+    if (out_len_pages != 0) *out_len_pages = best_len;
+    return 0;
+}
+
+/* 撤销一条 grant（SYS_CAP_GRANT 的 IRQ 绑定失败回滚）。 */
+int ipc_cap_revoke(uint32_t handle, uint32_t type, uint32_t id,
+                   struct process *caller)
+{
+    uint32_t f, slot;
+    int r = -1;
+
+    if (caller == 0) return -1;
+    f = spin_lock_irqsave(&ipc_lock);
+    if (ipc_resolve_locked(handle, &slot) == 0 &&
+        ipc_can_recv(&ipc_ports[slot], caller)) {
+        for (uint32_t i = 0; i < IPC_GRANT_MAX; i++) {
+            ipc_grant_t *g = &ipc_ports[slot].grants[i];
+
+            if (g->used && g->type == type && g->id == id) {
+                memset(g, 0, sizeof(*g));
+                r = 0;
+                break;
+            }
+        }
+    }
     spin_unlock_irqrestore(&ipc_lock, f);
     return r;
 }

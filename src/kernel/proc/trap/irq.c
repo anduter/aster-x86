@@ -444,6 +444,10 @@ static void timer_handler(void *arg)
         }
     }
 
+    /* 硬件 cap 生命周期钩子：进程退出不会回调 cap 模块，这里每 10 tick
+     * （100ms）回收 owner 已消失的 IRQ 绑定/MMIO/DMA 记录，并恢复默认屏蔽。 */
+    if ((ticks % 10U) == 0U) hwcap_poll();
+
     /* 唤醒到期的睡眠者 */
     proc_wake_sleepers(ticks);
 }
@@ -630,12 +634,17 @@ void irq_dispatch(interrupt_frame_t *f)
         return;
     }
 
-    if (slots[irq].handler != 0) {
-        slots[irq].count++;
-        slots[irq].handler(slots[irq].arg);
-    } else {
-        /* 没有处理函数的 IRQ 直接屏蔽，避免反复触发把系统拖死 */
-        pic_set_mask(irq, true);
+    /* 硬件 cap（CAP_IRQ）优先：绑定到用户端口的线由 hwcap 计数/投递并做
+     * 风暴保护，跳过默认 handler 与“无 handler 就掩线”的分支。
+     * 未绑定时行为与原来完全一致。 */
+    if (!hwcap_irq_deliver(irq)) {
+        if (slots[irq].handler != 0) {
+            slots[irq].count++;
+            slots[irq].handler(slots[irq].arg);
+        } else {
+            /* 没有处理函数的 IRQ 直接屏蔽，避免反复触发把系统拖死 */
+            pic_set_mask(irq, true);
+        }
     }
 
     /* EOI：从片上的中断要两个 PIC 都通知 */

@@ -12,6 +12,7 @@
 #include "include/proc.h"
 #include "include/apps.h"
 #include "include/kernel.h"
+#include "include/dev.h"
 #include "include/pkg.h"
 
 static int sup_port = -1;
@@ -59,6 +60,8 @@ void supervisor_entry(void)
      * 只在 -Test 构建打印，避免生产启动多花 ~500ms。 */
     if (boot_test_build()) {
         ipc_selftest();
+        /* P5 硬件 cap：MMIO/IRQ/DMA 后端自检（要映射/等待/中断注入） */
+        hwcap_selftest();
         /* P3 服务注册/拓扑/心跳/重启/隔离自检（不阻塞，只在测试构建跑） */
         svc_selftest();
     }

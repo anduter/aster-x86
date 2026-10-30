@@ -71,6 +71,11 @@ unsigned int pmm_page_ref(unsigned int phys);
 void         pmm_page_share(unsigned int phys);
 int          pmm_is_used(unsigned int phys);
 
+/* 该物理范围是否完整落在 PMM 管理区（= PMM 拥有的 RAM 页）。
+ * 用于 vmm 拆除用户区时区分“PMM 页”和 MMIO 设备物理页：
+ * 后者绝不能交给 pmm_free_pages()。phys 必须页对齐。 */
+int          pmm_range_managed(unsigned int phys, unsigned int pages);
+
 /* 线性 first-fit 自检：保留区不可分配、分配不重复、free 后账目复原。 */
 int          pmm_selftest(void);
 

@@ -94,8 +94,27 @@ int  ipc_port_reply(uint32_t ticket, const void *msg, uint32_t len,
                     struct process *caller);
 int  ipc_cap_grant(uint32_t port, uint32_t type, uint32_t id, uint32_t rights,
                    struct process *caller);
+/* P5 硬件 cap 扩展：len_pages 只对 CAP_MMIO 有意义（0 -> 1 页）。
+ * SYS_CAP_GRANT 把长度放在 rights 的高 16 位（低 4 位是 rights），
+ * 老的三参调用 rights 只有低 4 位 -> 默认 1 页，兼容。 */
+int  ipc_cap_grant_ex(uint32_t port, uint32_t type, uint32_t id,
+                      uint32_t rights, uint32_t len_pages,
+                      struct process *caller);
+/* 查“某进程拥有的端口上”的 grant。id==0 表示同类型任意 id（取最大 id，
+ * 供 CAP_DMA 配额用）；id!=0 精确匹配（MMIO 基址）。成功返回 0。 */
+int  ipc_cap_lookup(uint32_t owner_pid, uint32_t type, uint32_t id,
+                    uint32_t *out_id, uint32_t *out_rights,
+                    uint32_t *out_len_pages);
+/* 撤销一条 grant（SYS_CAP_GRANT 的 IRQ 绑定失败回滚用）。 */
+int  ipc_cap_revoke(uint32_t port, uint32_t type, uint32_t id,
+                    struct process *caller);
 /* 释放端口（自检/未来的 SYS_PORT_CLOSE 用；同 uid 或 root 可释放）。 */
 void ipc_port_release(uint32_t port, struct process *caller);
+
+/* 内核事件投递（IRQ -> 端口）。sender_pid 记 0（内核），不做发送权限检查；
+ * 队列满返回 -IPC_EAGAIN（中断路径不能阻塞）。 */
+int  ipc_port_post(uint32_t port, uint32_t type, const void *payload,
+                   uint32_t len);
 
 /* 诊断/自检：端口句柄是否有效、是否已记录某个 grant。 */
 bool ipc_port_exists(uint32_t port);

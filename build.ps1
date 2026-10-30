@@ -1009,7 +1009,14 @@ if ($Test -or $Shot) {
             @{ Name = 'pkgd svcwatch 重启';        Ok = ($out.Contains('pkgd: svcwatch restart ok')) },
             @{ Name = 'pkgd ring0 回退';           Ok = ($out.Contains('pkgd: fallback ring0 ok')) },
             @{ Name = 'pkgd ring0 强制模式';       Ok = ($out.Contains('pkgd: ring0 mode verify ok')) },
-            @{ Name = 'pkgd 自检通过';             Ok = ($out.Contains('pkgd: selftest PASS')) }
+            @{ Name = 'pkgd 自检通过';             Ok = ($out.Contains('pkgd: selftest PASS')) },
+            # ---- 三层 P5：硬件 capability MMIO/IRQ/DMA（2026-10-31）----
+            @{ Name = 'hwcap MMIO 映射/读写';      Ok = ($out.Contains('hwcap: mmio map ok')) },
+            @{ Name = 'hwcap MMIO 坏 cap 拒绝';    Ok = ($out.Contains('hwcap: mmio bad cap rejected')) },
+            @{ Name = 'hwcap IRQ 绑定/等待';       Ok = ($out.Contains('hwcap: irq bind/wait ok')) },
+            @{ Name = 'hwcap DMA 分配/释放';       Ok = ($out.Contains('hwcap: dma alloc/free ok')) },
+            @{ Name = 'hwcap DMA 重复释放拒绝';    Ok = ($out.Contains('hwcap: dma double free rejected')) },
+            @{ Name = 'hwcap 自检通过';            Ok = ($out.Contains('hwcap: selftest PASS')) }
         )
 
         T 'checks begin'

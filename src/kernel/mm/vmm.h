@@ -14,6 +14,7 @@
 #define PTE_DIRTY    0x040
 #define PTE_PS       0x080
 #define PTE_COW      0x200   /* 软件位：该页是 fork COW 页，写入时允许复制 */
+#define PTE_HWCAP    0x400   /* 软件位：MMIO/DMA 硬件 cap 映射（见 dev/hwcap） */
 #define PTE_NOEXEC   0x800   /* 软件位：映射时设置 NX（用于只读 rodata） */
 
 /* mprotect 的 prot 位：数值与 include/abi.h 的 PROT_* 保持一致。

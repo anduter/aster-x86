@@ -190,6 +190,20 @@ int pmm_is_used(unsigned int phys)
     return page_is_used(idx);
 }
 
+/* 一段物理页是否完全由 PMM 管理（用于 vmm 拆除用户区时区分设备 MMIO 页）。 */
+int pmm_range_managed(unsigned int phys, unsigned int pages)
+{
+    uintptr_t base = (uintptr_t)memory_start;
+    size_t idx;
+
+    if (pages == 0U) return 0;
+    if (phys < base) return 0;
+    if (((uintptr_t)phys & (PAGE_SIZE - 1U)) != 0U) return 0;
+    idx = ((uintptr_t)phys - base) >> PAGE_SHIFT;
+    if (idx >= pmm.total_pages) return 0;
+    return (idx + pages <= pmm.total_pages) ? 1 : 0;
+}
+
 int pmm_selftest(void)
 {
     void *pages[256];
