@@ -17,7 +17,7 @@
 #define OS_ABI_MAGIC          0x4F534142u   /* "OSAB"锛堝皬绔瓧鑺傚簭 'O','S','A','B'锛?*/
 #define OS_ABI_VERSION        1u            /* 澶存枃浠?缂栧彿绌洪棿鐨?major 鐗堟湰 */
 #define OS_ABI_VERSION_MAJOR  1
-#define OS_ABI_VERSION_MINOR  4
+#define OS_ABI_VERSION_MINOR  5
 
 /* SYS_ABI_VERSION 杩斿洖鍊肩殑浣?16 浣嶏紙feature bits锛夛細鍙涓嶅噺銆? *
  * 娉ㄦ剰锛歜it2-4 鍙〃绀哄唴鏍稿唴閮ㄥ瓨鍦ㄧ増鏈竴鑷存€ф鏌ワ紙internal only锛夛紝
@@ -165,7 +165,24 @@
 #define SYS_LISTEN    78 /* ebx=port, ecx=backlog          -> 0 / -1 */
 #define SYS_ACCEPT    79 /* ebx=sock, ecx=&addr            -> 0 / -1 */
 
-#define SYS_NR_MAX 79
+/* ---- 三层架构预留（ABI 1.5，见 docs/design/three-layer.md） ---- */
+#define SYS_PORT_CREATE   80 /* ebx=flags                      -> port id / -1 */
+#define SYS_PORT_SEND     81 /* ebx=port, ecx=msg, edx=len     -> 0 / -1 */
+#define SYS_PORT_RECV     82 /* ebx=port, ecx=buf, edx=maxlen  -> len / -1 */
+#define SYS_PORT_REPLY    83 /* ebx=ticket, ecx=msg, edx=len   -> 0 / -1 */
+#define SYS_CAP_GRANT     84 /* ebx=port, ecx=type, edx=id     -> 0 / -1 */
+#define SYS_DMESG         85 /* ebx=buf, ecx=maxlen            -> len / -1 */
+#define SYS_SVC_REGISTER  86 /* ebx=manifest, ecx=port         -> 0 / -1 */
+#define SYS_SVC_LOOKUP    87 /* ebx=name, ecx=len              -> port id / -1 */
+#define SYS_SVC_HEARTBEAT 88 /* ebx=port                       -> 0 / -1 */
+#define SYS_IRQ_WAIT      89 /* ebx=irq, ecx=timeout_ticks     -> 0 / -1 */
+#define SYS_MMIO_MAP      90 /* ebx=cap, ecx=&va               -> 0 / -1 */
+#define SYS_DMA_ALLOC     91 /* ebx=len, ecx=align             -> cap id / -1 */
+#define SYS_DMA_FREE      92 /* ebx=cap                        -> 0 / -1 */
+#define SYS_LOG_WRITE     93 /* ebx=tag, ecx=msg, edx=len      -> 0 / -1 */
+#define SYS_SCHED_AFFINITY 94 /* ebx=pid, ecx=mask             -> 0 / -1 */
+
+#define SYS_NR_MAX 95
 
 /* =============================================================================
  * 3. 鐢ㄦ埛鍙鍏变韩缁撴瀯浣擄紙甯冨眬鍐荤粨锛岃鏂囦欢鏈熬鏂█锛? * ========================================================================== */
