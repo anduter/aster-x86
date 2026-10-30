@@ -372,9 +372,10 @@ int hwcap_irq_deliver(uint32_t irq)
         spin_unlock_irqrestore(&hwcap_lock, lock_flags);
         return 0;
     }
-    /* owner 已退出或端口已释放：解绑并交回默认处理（没有 handler 的线
-     * 由 irq_dispatch 的默认分支重新屏蔽）。 */
-    if (proc_find(b->owner_pid) == 0 || !ipc_port_exists(b->port)) {
+    /* owner 已退出、端口已释放或句柄已指向别人：解绑并交回默认处理
+     * （没有 handler 的线由 irq_dispatch 的默认分支重新屏蔽）。 */
+    if (proc_find(b->owner_pid) == 0 || !ipc_port_exists(b->port) ||
+        ipc_port_owner_pid(b->port) != b->owner_pid) {
         hwcap_irq_clear_locked(b);
         spin_unlock_irqrestore(&hwcap_lock, lock_flags);
         (void)irq_mask(irq);
@@ -447,7 +448,10 @@ void hwcap_poll(void)
         hwcap_irq_t *b = &hwcap_irqs[i];
 
         if (!b->used) continue;
-        if (proc_find(b->owner_pid) != 0 && ipc_port_exists(b->port)) continue;
+        if (proc_find(b->owner_pid) != 0 && ipc_port_exists(b->port) &&
+            ipc_port_owner_pid(b->port) == b->owner_pid) {
+            continue;
+        }
         mask_list[n++] = b->irq;
         (void)hwcap_irq_clear_locked(b);
     }
