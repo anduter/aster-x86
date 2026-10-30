@@ -7,6 +7,7 @@
  * ============================================================================= */
 
 #include "ulib.h"
+#include "demoapp.h"      /* P7 SDK 示例：svc-demo 命令 / -Test 自检 */
 
 /* 系统调用编号（SYS_*）、struct udp_req 与公共结构体统一来自
  * include/abi.h（经 ulib.h 引入），这里不再手写编号。 */
@@ -1774,6 +1775,7 @@ static void cmd_sectest(void)
     chroot_symlink_selftest();
     fat16_smp_selftest();
     ipc_ring3_selftest();
+    demoapp_selftest();          /* P7：程序层 SDK（sdk: ... 自检行） */
 #endif
 }
 
@@ -1980,6 +1982,7 @@ static void cmd_help_one(const char *name)
         { "pkg",     "pkg install <file> | list | remove <name> | verify <name>" },
         { "sectest", "sectest               code/guard write protection test" },
         { "ipc",     "ipc                   ring3 IPC ping/reply/EINTR/cap demo" },
+        { "svc-demo","svc-demo              program-layer SDK demo (connect/RPC)" },
         { "exec",    "exec <path> [args]    replace this shell" },
         { "reexec",  "reexec                exec /bin/shell (self-test)" },
         { "history", "history               show recent commands" },
@@ -2033,6 +2036,7 @@ static void run_line(char *cmd)
                "  pkg install|list|remove|verify <file|name>   component CLI\n"
                "  sectest                code/guard write protection test\n"
                "  ipc                    ring3 IPC ping/reply/EINTR/cap demo\n"
+               "  svc-demo               program-layer SDK demo (connect/RPC)\n"
                "  exec <path> [args]     replace this shell with a program\n"
                "  reexec                 exec /bin/shell (self-test)\n"
                "  <cmd> > <file>         redirect stdout\n"
@@ -2108,6 +2112,8 @@ static void run_line(char *cmd)
         cmd_sectest();
     } else if (scmp(args[0], "ipc") == 0) {
         ipc_ring3_selftest();
+    } else if (scmp(args[0], "svc-demo") == 0) {
+        (void)demoapp_main();
     } else if (scmp(args[0], "exec") == 0 && nargs >= 2) {
         char argbuf[64];
         int n = 0;

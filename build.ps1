@@ -206,7 +206,26 @@ Invoke-Step 'ulib.c' 'i686-elf-gcc' @(
     '-fno-stack-protector', '-fno-asynchronous-unwind-tables', '-Wall', '-Wextra', '-Werror', '-O0',
     '-c', 'src/user/ulib.c', '-o', (Join-Path $objRoot 'ulib.o')
 )
-Invoke-Step 'user_shell.elf' 'i686-elf-ld' @('-m', 'elf_i386', '-T', 'src/user/user.ld', '-o', (Join-Path $objRoot 'user_shell.elf'), (Join-Path $objRoot 'user_shell.o'), (Join-Path $objRoot 'ulib.o'))
+
+# ---- P7：程序层 SDK 示例 demoapp（一份源码两种用法）----
+#   1) demoapp.o（-DDEMOAPP_EMBEDDED）链接进 user_shell.elf → 内置 `svc-demo`；
+#   2) 独立 demoapp.elf（正常 main）：同一份代码，演示"新 app = manifest + 入口"。
+# 与 pkgd 不同，demoapp 不需要内核侧嵌入式加载器（P7 不改 kernel/user/**），
+# 所以"镜像安装"落在 shell 镜像里（demoapp.o 是 shell ELF 的一部分）。
+Invoke-Step 'demoapp.c (embedded)' 'i686-elf-gcc' @(
+    '-ffreestanding', '-fno-pic', '-fno-pie', '-m32', '-nostdlib', '-fno-builtin',
+    '-fno-stack-protector', '-fno-asynchronous-unwind-tables', '-Wall', '-Wextra', '-Werror', '-O0',
+    '-DDEMOAPP_EMBEDDED=1',
+    '-c', 'src/user/demoapp.c', '-o', (Join-Path $objRoot 'demoapp.o')
+)
+Invoke-Step 'demoapp.c (standalone)' 'i686-elf-gcc' @(
+    '-ffreestanding', '-fno-pic', '-fno-pie', '-m32', '-nostdlib', '-fno-builtin',
+    '-fno-stack-protector', '-fno-asynchronous-unwind-tables', '-Wall', '-Wextra', '-Werror', '-O0',
+    ("-DOS_TEST_BUILD={0}" -f [int]($Test -or $Shot)),
+    '-c', 'src/user/demoapp.c', '-o', (Join-Path $objRoot 'demoapp_app.o')
+)
+Invoke-Step 'user_shell.elf' 'i686-elf-ld' @('-m', 'elf_i386', '-T', 'src/user/user.ld', '-o', (Join-Path $objRoot 'user_shell.elf'), (Join-Path $objRoot 'user_shell.o'), (Join-Path $objRoot 'demoapp.o'), (Join-Path $objRoot 'ulib.o'))
+Invoke-Step 'demoapp.elf' 'i686-elf-ld' @('-m', 'elf_i386', '-T', 'src/user/user.ld', '-o', (Join-Path $objRoot 'demoapp.elf'), (Join-Path $objRoot 'demoapp_app.o'), (Join-Path $objRoot 'ulib.o'))
 Invoke-Step 'user_shell.bin' 'i686-elf-objcopy' @('-O', 'binary', (Join-Path $objRoot 'user_shell.elf'), (Join-Path $objRoot 'user_shell.bin'))
 Invoke-Step 'sign shell' 'powershell' @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'sign_image.ps1',
@@ -1016,7 +1035,14 @@ if ($Test -or $Shot) {
             @{ Name = 'hwcap IRQ 绑定/等待';       Ok = ($out.Contains('hwcap: irq bind/wait ok')) },
             @{ Name = 'hwcap DMA 分配/释放';       Ok = ($out.Contains('hwcap: dma alloc/free ok')) },
             @{ Name = 'hwcap DMA 重复释放拒绝';    Ok = ($out.Contains('hwcap: dma double free rejected')) },
-            @{ Name = 'hwcap 自检通过';            Ok = ($out.Contains('hwcap: selftest PASS')) }
+            @{ Name = 'hwcap 自检通过';            Ok = ($out.Contains('hwcap: selftest PASS')) },
+            # ---- 三层 P7：程序层 SDK + 示例 app（2026-10-31）----
+            @{ Name = 'SDK 服务连接';              Ok = ($out.Contains('sdk: svc connect ok')) },
+            @{ Name = 'SDK RPC';                   Ok = ($out.Contains('sdk: svc rpc ok')) },
+            @{ Name = 'SDK 服务不存在';            Ok = ($out.Contains('sdk: svc noent ok')) },
+            @{ Name = 'SDK 重连';                  Ok = ($out.Contains('sdk: svc reconnect ok')) },
+            @{ Name = 'SDK 示例 app';              Ok = (($out.Contains('sdk: demo ok')) -and ($out.Contains('sdk: demo app ok'))) },
+            @{ Name = 'SDK 自检通过';              Ok = ($out.Contains('sdk: selftest PASS')) }
         )
 
         T 'checks begin'
