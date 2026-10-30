@@ -1553,7 +1553,7 @@ static int pkgd_forward(uint32_t op, const char *arg, uint32_t euid,
     uint32_t deadline;
     uint8_t payload[PKGD_REQ_HDR + PKGD_ARG_MAX];
     uint8_t frame[IPC_HDR_SIZE + sizeof(payload)];
-    uint8_t rbuf[IPC_HDR_SIZE + 320U];
+    uint8_t rbuf[IPC_HDR_SIZE + PKGD_RSP_HDR + 1024U];
     int reply_port;
     int flen;
     int n;

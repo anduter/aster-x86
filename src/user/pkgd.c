@@ -58,6 +58,7 @@
 
 #define PKGD_PATH_MAX   192U
 #define PKGD_DETAIL_MAX 96U
+#define PKGD_TEXT_MAX   1024U
 #define PKGD_MAX_PKG    65536U
 
 #define PKGD_HDR_SIZE   16U
@@ -420,9 +421,9 @@ static void send_reply(int ticket, unsigned int req_id, int status,
                        unsigned int count, const char *text,
                        unsigned int textlen)
 {
-    unsigned char payload[20U + 256U];
+    static unsigned char payload[20U + PKGD_TEXT_MAX];
 
-    if (textlen > 256U) textlen = 256U;
+    if (textlen > PKGD_TEXT_MAX) textlen = PKGD_TEXT_MAX;
     wr32(payload + 0, PKGD_REPLY_MAGIC);
     wr32(payload + 4, req_id);
     wr32(payload + 8, (unsigned int)status);
@@ -442,7 +443,7 @@ static void handle_request(const unsigned char *frame, int frame_len)
     int ticket;
     char arg[PKGD_PATH_MAX + 1];
     char detail[PKGD_DETAIL_MAX];
-    char list[1024];
+    char list[PKGD_TEXT_MAX];
     unsigned int count = 0;
     int status;
 
@@ -488,7 +489,9 @@ static void handle_request(const unsigned char *frame, int frame_len)
         set_detail(detail, sizeof(detail), "usage: install|remove|list|verify");
         break;
     }
-    printf("pkgd: %s -> %s\n", arg, detail);
+    if (arg[0] != '\0') {
+        printf("pkgd: %s -> %s\n", arg, detail);
+    }
     send_reply(ticket, req_id, status, 0, detail, (unsigned int)strlen(detail));
 }
 
