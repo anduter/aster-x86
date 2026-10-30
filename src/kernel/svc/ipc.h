@@ -100,6 +100,9 @@ void ipc_port_release(uint32_t port, struct process *caller);
 /* 诊断/自检：端口句柄是否有效、是否已记录某个 grant。 */
 bool ipc_port_exists(uint32_t port);
 bool ipc_cap_granted(uint32_t port, uint32_t type, uint32_t id);
+/* 端口归属（SYS_SVC_REGISTER 校验“只能登记自己的端口”）。不存在返回 0。 */
+uint32_t ipc_port_owner_pid(uint32_t port);
+uint32_t ipc_port_owner_uid(uint32_t port);
 
 /* 内核侧自检（-Test 构建由 supervisor 线程在调度器启动后调用一次）。 */
 void ipc_selftest(void);

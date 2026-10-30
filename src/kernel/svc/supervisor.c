@@ -27,13 +27,29 @@ void supervisor_init(void)
     if (proc_spawn("supervisor") == 0) {
         kprintln("supervisor: spawn failed");
     }
-    if (proc_spawn("echosvc") == 0) {
-        kprintln("supervisor: echosvc spawn failed");
-    }
-    if (proc_spawn("svcwatch") == 0) {
-        kprintln("supervisor: svcwatch spawn failed");
-    }
 
+    /* P3：默认按内置 manifest 的 requires 拓扑序拉起 supervisor 自己负责的
+     * 服务（echosvc/svcwatch）；bootseq 负责的 fsd/pkgd/shell 在计划里占位但
+     * 不重复 spawn。services=legacy 走旧硬编码顺序（回退路径，行为与 0.74.2
+     * 一致）。 */
+    if (svc_startup_mode() == SVC_START_LEGACY) {
+        (void)svc_topology_start(SVC_START_LEGACY);      /* 只打印一行“legacy” */
+        if (proc_spawn("echosvc") == 0) {
+            kprintln("supervisor: echosvc spawn failed");
+        }
+        if (proc_spawn("svcwatch") == 0) {
+            kprintln("supervisor: svcwatch spawn failed");
+        }
+    } else if (svc_topology_start(SVC_START_MANIFEST) < 0) {
+        /* 计划失败（内置表有环/解析坏）：退回旧硬编码顺序，保证系统可起 */
+        kprintln("supervisor: topology failed -> legacy fallback");
+        if (proc_spawn("echosvc") == 0) {
+            kprintln("supervisor: echosvc spawn failed");
+        }
+        if (proc_spawn("svcwatch") == 0) {
+            kprintln("supervisor: svcwatch spawn failed");
+        }
+    }
 }
 
 void supervisor_entry(void)
@@ -43,6 +59,8 @@ void supervisor_entry(void)
      * 只在 -Test 构建打印，避免生产启动多花 ~500ms。 */
     if (boot_test_build()) {
         ipc_selftest();
+        /* P3 服务注册/拓扑/心跳/重启/隔离自检（不阻塞，只在测试构建跑） */
+        svc_selftest();
     }
 
     for (;;) {

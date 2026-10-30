@@ -99,6 +99,125 @@ int port_ticket(int port)
     return (syscall3(SYS_GETPID, 0, 0, 0) << 16) | (port & 0xFFFF);
 }
 
+/* ---- 服务注册表客户端（ABI 1.5：86..88 / 93） ---- */
+
+int svc_register(const char *manifest, int port)
+{
+    return syscall3(SYS_SVC_REGISTER, (int)(usize)manifest, port, 0);
+}
+
+int svc_lookup(const char *name)
+{
+    if (name == 0) return -1;
+    return syscall3(SYS_SVC_LOOKUP, (int)(usize)name, (int)strlen(name), 0);
+}
+
+int svc_heartbeat(int port)
+{
+    return syscall3(SYS_SVC_HEARTBEAT, port, 0, 0);
+}
+
+int svc_log_write(const char *tag, const char *msg)
+{
+    if (tag == 0 || msg == 0) return -1;
+    return syscall3(SYS_LOG_WRITE, (int)(usize)tag, (int)(usize)msg,
+                    (int)strlen(msg));
+}
+
+int svc_call(int port, unsigned int type, const void *req, int reqlen,
+             void *reply, int maxlen)
+{
+    /* 当前 ABI 没有 SYS_PORT_CLOSE，所以每进程缓存一个客户端端口。端口带上
+     * 创建者的 pid：fork 后子进程不会复用父进程的端口。 */
+    static int cli_port;
+    static int cli_pid;
+    unsigned char *frame;
+    unsigned char *rbuf;
+    struct ipc_msg_hdr *h;
+    struct ipc_msg_hdr *rh;
+    int total, sent, got, copy, pid;
+
+    if (port <= 0 || reqlen < 0 || reqlen > IPC_PAYLOAD_MAX - 4) return -1;
+    if (reqlen > 0 && req == 0) return -1;
+    if (maxlen < 0 || (maxlen > 0 && reply == 0)) return -1;
+
+    pid = syscall3(SYS_GETPID, 0, 0, 0);
+    if (cli_port <= 0 || cli_pid != pid) {
+        cli_port = port_create(0);
+        cli_pid = pid;
+        if (cli_port < 0) {
+            cli_port = 0;
+            return -1;
+        }
+    }
+
+    total = 4 + reqlen;
+    frame = (unsigned char *)malloc((usize)(IPC_HDR_SIZE + total));
+    rbuf = (unsigned char *)malloc((usize)(IPC_HDR_SIZE + (maxlen > 0 ? maxlen : 1)));
+    if (frame == 0 || rbuf == 0) {
+        free(frame);
+        free(rbuf);
+        return -1;
+    }
+
+    {
+        int ticket = port_ticket(cli_port);
+
+        memcpy(frame + IPC_HDR_SIZE, &ticket, 4);
+    }
+    if (reqlen > 0) memcpy(frame + IPC_HDR_SIZE + 4, req, (usize)reqlen);
+
+    h = (struct ipc_msg_hdr *)frame;
+    h->magic = IPC_MAGIC;
+    h->type = type;
+    h->flags = (unsigned short)IPC_F_NEED_REPLY;
+    h->ncaps = 0;
+    h->len = (unsigned int)total;
+
+    sent = port_send_raw(port, frame, IPC_HDR_SIZE + total);
+    free(frame);
+    if (sent != 0) return sent;         /* -1 / -EAGAIN / -EINTR 原样上报 */
+
+    got = port_recv(cli_port, rbuf, IPC_HDR_SIZE + (maxlen > 0 ? maxlen : 1));
+    if (got < 0) {
+        free(rbuf);
+        return got;
+    }
+    if (got < IPC_HDR_SIZE) {
+        free(rbuf);
+        return -1;
+    }
+    rh = (struct ipc_msg_hdr *)rbuf;
+    if (rh->magic != IPC_MAGIC) {
+        free(rbuf);
+        return -1;
+    }
+    copy = (int)rh->len;
+    if (copy > got - IPC_HDR_SIZE) copy = got - IPC_HDR_SIZE;   /* 截断的帧 */
+    if (copy > maxlen) copy = maxlen;
+    if (copy > 0) memcpy(reply, rbuf + IPC_HDR_SIZE, (usize)copy);
+    free(rbuf);
+    return copy;
+}
+
+int svc_call_name(const char *name, unsigned int type, const void *req,
+                  int reqlen, void *reply, int maxlen)
+{
+    int port;
+    int rc;
+
+    if (name == 0) return -1;
+    port = svc_lookup(name);
+    if (port < 0) return -1;
+    rc = svc_call(port, type, req, reqlen, reply, maxlen);
+    if (rc != -1) return rc;
+
+    /* -1 通常是“服务重启、旧端口已回收”：重新 lookup 一次再试。 */
+    port = svc_lookup(name);
+    if (port < 0) return -1;
+    return svc_call(port, type, req, reqlen, reply, maxlen);
+}
+
 static usize utoa(unsigned int v, char *buf, unsigned int base)
 {
     char tmp[16];

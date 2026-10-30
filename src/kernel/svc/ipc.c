@@ -256,6 +256,26 @@ bool ipc_port_exists(uint32_t handle)
     return ok;
 }
 
+uint32_t ipc_port_owner_pid(uint32_t handle)
+{
+    uint32_t f, slot, pid = 0;
+
+    f = spin_lock_irqsave(&ipc_lock);
+    if (ipc_resolve_locked(handle, &slot) == 0) pid = ipc_ports[slot].owner_pid;
+    spin_unlock_irqrestore(&ipc_lock, f);
+    return pid;
+}
+
+uint32_t ipc_port_owner_uid(uint32_t handle)
+{
+    uint32_t f, slot, uid = 0;
+
+    f = spin_lock_irqsave(&ipc_lock);
+    if (ipc_resolve_locked(handle, &slot) == 0) uid = ipc_ports[slot].owner_uid;
+    spin_unlock_irqrestore(&ipc_lock, f);
+    return uid;
+}
+
 /* ---------------- 入队 / 出队 ---------------- */
 
 /* 调用方持锁；成功返回 0，队列满返回 -IPC_EAGAIN。 */

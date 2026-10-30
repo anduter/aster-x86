@@ -1,18 +1,28 @@
 /* =============================================================================
- * svc/svc_syscall.c - 服务/能力相关系统调用（M6 + P1 IPC）
+ * svc/svc_syscall.c - 服务/能力相关系统调用（M6 + P1 IPC + P3 服务注册）
  *
- * svc 组：pipe / dup2 / cap_drop / cap_send / input_set，以及 ABI 1.5 预留给
- * 三层架构的 80..84（PORT_CREATE/SEND/RECV/REPLY/CAP_GRANT）。
+ * svc 组：pipe / dup2 / cap_drop / cap_send / input_set，ABI 1.5 的 80..84
+ * （PORT_CREATE/SEND/RECV/REPLY/CAP_GRANT），以及 P3 的：
+ *   86 SYS_SVC_REGISTER  ebx=manifest 文本, ecx=自己的 port  -> 0 / -1
+ *   87 SYS_SVC_LOOKUP    ebx=name, ecx=len（必须 NUL 结尾）  -> port / -1
+ *   88 SYS_SVC_HEARTBEAT ebx=port                            -> 0 / -1
+ *   93 SYS_LOG_WRITE     ebx=tag, ecx=msg, edx=len            -> 0 / -1
  * 未实现的编号由分发器统一返回 -1，本文件不认领。
  * ============================================================================= */
 #include "../include/types.h"
 #include "include/kernel.h"
 #include "include/dev.h"
 #include "include/fs.h"
+#include "include/klog.h"
 #include "include/proc.h"
 #include "svc_syscall.h"
 #include "ipc.h"
+#include "registry.h"
 #include "../proc/trap/syscall_internal.h"
+
+/* 服务日志上限：tag <= 24B（NUL 结尾），msg <= 256B（SYS_LOG_WRITE 的 len） */
+#define SVC_LOG_TAG_MAX 24U
+#define SVC_LOG_MSG_MAX 256U
 
 /* IPC 消息最多 4144B；syscall 在拷贝到内核缓冲后调用核心，核心不再碰用户指针。
  * 缓冲放在独立 helper 的栈帧里，避免 svc_syscall() 为所有调用预留 8KB。 */
@@ -62,6 +72,83 @@ static int svc_ipc_recv(uint32_t port, uint32_t uptr, uint32_t maxlen)
     return r;
 }
 
+/* 从用户态拷一个 NUL 结尾的短字符串；没有 NUL（超过 max-1）就拒绝，
+ * 不猜长度。返回字节数（不含 NUL），失败 -1。 */
+static int svc_copy_user_string(uint32_t uptr, char *dst, uint32_t max)
+{
+    uint32_t n;
+
+    if (uptr == 0U || dst == 0 || max < 2U) return -1;
+
+    /* 逐字节拷：字符串可能正好跨页，整块拷会被页边界误判。 */
+    for (n = 0; n < max - 1U; n++) {
+        char c;
+
+        if (copy_from_user(&c, (const void *)(uintptr_t)(uptr + n), 1U) != E_OK) {
+            return -1;
+        }
+        dst[n] = c;
+        if (c == '\0') return (int)n;
+    }
+    return -1;
+}
+
+static int svc_register_svc(uint32_t manifest_ptr, uint32_t port)
+{
+    char text[SVC_MANIFEST_MAX];
+    svc_manifest_t m;
+    proc_t *p = proc_current();
+    uint32_t owner;
+
+    if (p == 0 || port == 0U) return -1;
+    if (svc_copy_user_string(manifest_ptr, text, sizeof(text)) < 0) return -1;
+    if (svc_manifest_parse(text, &m) != 0) return -1;
+
+    /* 只能登记自己的端口（root 例外：supervisor 代注册/重启恢复）。 */
+    if (!ipc_port_exists(port)) return -1;
+    owner = ipc_port_owner_pid(port);
+    if (owner != p->pid && !proc_is_root(p)) return -1;
+
+    return (svc_registry_register(&m, port, p) == 0) ? 0 : -1;
+}
+
+static int svc_lookup_svc(uint32_t name_ptr, uint32_t len)
+{
+    char name[SVC_NAME_MAX];
+    uint32_t port = 0;
+    uint32_t i;
+
+    if (len == 0U || len >= SVC_NAME_MAX) return -1;
+    if (!user_range_ok(name_ptr, len + 1U)) return -1;
+    if (copy_from_user(name, (const void *)(uintptr_t)name_ptr, len + 1U) != E_OK) {
+        return -1;
+    }
+    if (name[len] != '\0') return -1;
+    for (i = 0; i < len; i++) {
+        if (name[i] == '\0') return -1;      /* 长度必须与内容一致 */
+    }
+    if (svc_registry_lookup(name, &port) != 0) return -1;
+    return (int)port;
+}
+
+static int svc_log_write(uint32_t tag_ptr, uint32_t msg_ptr, uint32_t len)
+{
+    char tag[SVC_LOG_TAG_MAX + 1U];
+    char msg[SVC_LOG_MSG_MAX + 1U];
+
+    if (len > SVC_LOG_MSG_MAX) return -1;
+    if (svc_copy_user_string(tag_ptr, tag, sizeof(tag)) < 0) return -1;
+    if (len != 0U) {
+        if (!user_range_ok(msg_ptr, len)) return -1;
+        if (copy_from_user(msg, (const void *)(uintptr_t)msg_ptr, len) != E_OK) {
+            return -1;
+        }
+    }
+    msg[len] = '\0';
+    klog_write(KLOG_INFO, tag, msg);
+    return 0;
+}
+
 bool svc_syscall_owns(uint32_t nr)
 {
     return nr == SYS_PIPE || nr == SYS_DUP2 ||
@@ -69,7 +156,9 @@ bool svc_syscall_owns(uint32_t nr)
            nr == SYS_INPUT_SET ||
            nr == SYS_PORT_CREATE || nr == SYS_PORT_SEND ||
            nr == SYS_PORT_RECV || nr == SYS_PORT_REPLY ||
-           nr == SYS_CAP_GRANT;
+           nr == SYS_CAP_GRANT ||
+           nr == SYS_SVC_REGISTER || nr == SYS_SVC_LOOKUP ||
+           nr == SYS_SVC_HEARTBEAT || nr == SYS_LOG_WRITE;
 }
 
 int svc_syscall(interrupt_frame_t *f)
@@ -227,6 +316,18 @@ int svc_syscall(interrupt_frame_t *f)
         ret = ipc_cap_grant(f->ebx, f->ecx, f->edx, f->esi, proc_current());
         break;
     }
+    case SYS_SVC_REGISTER:
+        ret = svc_register_svc(f->ebx, f->ecx);
+        break;
+    case SYS_SVC_LOOKUP:
+        ret = svc_lookup_svc(f->ebx, f->ecx);
+        break;
+    case SYS_SVC_HEARTBEAT:
+        ret = svc_registry_heartbeat(f->ebx, proc_current());
+        break;
+    case SYS_LOG_WRITE:
+        ret = svc_log_write(f->ebx, f->ecx, f->edx);
+        break;
     default:
         return -1000;
     }

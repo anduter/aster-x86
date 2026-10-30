@@ -63,6 +63,31 @@ int cap_grant(int port, int type, int id, int rights);
 /* 请求方 ticket：(本进程 pid << 16) | 端口句柄 */
 int port_ticket(int port);
 
+/* ---- 服务注册表（ABI 1.5：SYS_SVC_REGISTER/LOOKUP/HEARTBEAT = 86..88） ----
+ *
+ * manifest 文本格式见 docs/design/three-layer.md §5（name/version/type/
+ * entry/requires/capabilities/restart/restart_limit/uid，一行一个 key=value）。
+ * register 只允许 root（CAP_SYS_ADMIN 位图未落地）且只能登记自己的端口；
+ * 重名/坏 manifest 返回 -1。
+ *
+ * lookup 返回内核分配的服务端口句柄；服务重启期间/隔离后返回 -1，客户端
+ * 必须重新 lookup（旧端口已在重启时回收，旧句柄的 SEND 会直接失败）。
+ */
+int svc_register(const char *manifest, int port);
+int svc_lookup(const char *name);
+int svc_heartbeat(int port);
+/* SYS_LOG_WRITE(93)：写一条带 tag 的 klog 行（msg 长度由 strlen 决定）。 */
+int svc_log_write(const char *tag, const char *msg);
+/* 一问一答：请求 payload = 4B ticket + req；回复 payload 拷进 reply。
+ * 返回回复 payload 长度（最多 maxlen）；-1 失败；-IPC_EAGAIN 超时；
+ * -IPC_EINTR 被打断。只用 1 个缓存客户端端口（当前 ABI 没有 PORT_CLOSE，
+ * 见 docs/claims/ipc.md 设计问题 #7）。 */
+int svc_call(int port, unsigned int type, const void *req, int reqlen,
+             void *reply, int maxlen);
+/* 按名字 lookup + svc_call；失败（-1，通常是服务刚重启）时重新 lookup 再试一次。 */
+int svc_call_name(const char *name, unsigned int type, const void *req,
+                  int reqlen, void *reply, int maxlen);
+
 /* 改名/移动（同卷内）。newpath 是完整目标路径，不做 `mv` 的"移入目录"语义。
  * 成功返回 0，失败返回 -1（跨卷/目标非空目录/权限不足都算失败）。 */
 static inline int fs_rename(const char *oldpath, const char *newpath)
