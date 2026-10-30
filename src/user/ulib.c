@@ -246,6 +246,87 @@ int fd_write(int fd, const void *buf, int len)
     return syscall3(SYS_FWRITE, fd, (int)buf, len);
 }
 
+/* ---- 路径文件 API（P4 ring3 服务用） ---- */
+
+int fs_open(const char *path, int flags)
+{
+    return syscall3(SYS_OPEN, (int)(usize)path, flags, 0);
+}
+
+int fs_close(int fd)
+{
+    return syscall3(SYS_CLOSE, fd, 0, 0);
+}
+
+int fs_read(int fd, void *buf, int len)
+{
+    return syscall3(SYS_FREAD, fd, (int)(usize)buf, len);
+}
+
+int fs_write(int fd, const void *buf, int len)
+{
+    return syscall3(SYS_FWRITE, fd, (int)(usize)buf, len);
+}
+
+int fs_stat(const char *path, sys_stat_t *st)
+{
+    return syscall3(SYS_STAT, (int)(usize)path, (int)(usize)st, 0);
+}
+
+int fs_unlink(const char *path)
+{
+    return syscall3(SYS_UNLINK, (int)(usize)path, 0, 0);
+}
+
+int fs_mkdir(const char *path)
+{
+    return syscall3(SYS_MKDIR, (int)(usize)path, 0, 0);
+}
+
+/* ---- Native ABI（int 0x80）：端点/通道 ------------------------------------
+ * pkgd 通过它把 "start:/stop:<program>" 通知给 supervisor（服务层之间走
+ * native 端口，不经过内建函数）。参数约定见 proc/trap/native.h。 */
+static int native3(int nr, int a, int b, int c)
+{
+    int r;
+
+    __asm__ volatile("int $0x80"
+                     : "=a"(r)
+                     : "a"(nr), "b"(a), "c"(b), "d"(c)
+                     : "memory");
+    return r;
+}
+
+int nport_create(void)
+{
+    return native3(0x33, 0, 0, 0);              /* NATIVE_SYS_PORT_CREATE */
+}
+
+int nservice_register(const char *name, int port)
+{
+    return native3(0x38, (int)(usize)name, (int)strlen(name), port);
+}
+
+int nservice_connect(const char *name)
+{
+    return native3(0x39, (int)(usize)name, (int)strlen(name), 0);
+}
+
+int nchan_send(int ch, const void *buf, int len)
+{
+    return native3(0x31, ch, (int)(usize)buf, len);
+}
+
+int nchan_recv_block(int ch, void *buf, int max)
+{
+    return native3(0x36, ch, (int)(usize)buf, max);
+}
+
+int nhandle_close(int handle)
+{
+    return native3(0x10, handle, 0, 0);         /* NATIVE_SYS_HANDLE_CLOSE */
+}
+
 /* ---- 进程/内存（ABI v1.1，pm 会话） ---- */
 
 int waitpid(int pid, int *status, int options)
@@ -440,6 +521,13 @@ usize strlen(const char *s)
 int strcmp(const char *a, const char *b)
 {
     while (*a != '\0' && *a == *b) { a++; b++; }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+int strncmp(const char *a, const char *b, usize n)
+{
+    while (n > 0U && *a != '\0' && *a == *b) { a++; b++; n--; }
+    if (n == 0U) return 0;
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 

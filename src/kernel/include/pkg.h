@@ -198,6 +198,41 @@ int pkg_component_unregister_port(uint32_t port);
 #define PKG_OP_COMPONENT_PORT    4u
 #define PKG_OP_COMPONENT_UNREG   5u
 
+/* ---- P4：ring3 pkgd 调用的内核“验签/落盘原语”（op 6..17） ----
+ * 只允许已注册的 ring3 pkgd 进程调用（内核校验 svc 注册表 pid），
+ * 客户端身份由内核分发器在转发请求时记录（见 pkgd.c 的 pkgd_ctx）。
+ *
+ *   6  SESSION_BEGIN   a=包字节指针 或 路径串, b=字节数（0=按路径/内建包）
+ *   7  SESSION_INFO    a=out, b=max   -> "name=.. version=.. type=.. files=N ..."
+ *   8  SESSION_STAGE   a=文件下标     -> 写 staging + 复验哈希
+ *   9  SESSION_COMMIT  a=0            -> 组件 ELF + 原子 rename + DB 行
+ *   10 SESSION_START   a=0            -> exec 组件 ELF（失败自动回滚）
+ *   11 SESSION_ABORT   a=0            -> 回滚（staging 或已提交目录 + DB 行）
+ *   12 REMOVE_BEGIN    a=组件名       -> 策略/DB 校验，建卸载会话
+ *   13 REMOVE_INFO     a=out, b=max   -> "type=.. program=.. root=.."
+ *   14 REMOVE_COMMIT   a=0            -> 停组件 + 删目录 + 删 DB 行
+ *   15 REMOVE_ABORT    a=0            -> 取消卸载会话
+ *   16 DB_READ         a=out, b=max   -> DB 文本长度（列表由 ring3 解析）
+ *   17 VERIFY_RAW      a=组件名       -> 0 / PKG_E_*（已安装完整性）
+ */
+#define PKG_OP_SESSION_BEGIN     6u
+#define PKG_OP_SESSION_INFO      7u
+#define PKG_OP_SESSION_STAGE     8u
+#define PKG_OP_SESSION_COMMIT    9u
+#define PKG_OP_SESSION_START     10u
+#define PKG_OP_SESSION_ABORT     11u
+#define PKG_OP_REMOVE_BEGIN      12u
+#define PKG_OP_REMOVE_INFO       13u
+#define PKG_OP_REMOVE_COMMIT     14u
+#define PKG_OP_REMOVE_ABORT      15u
+#define PKG_OP_DB_READ           16u
+#define PKG_OP_VERIFY_RAW        17u
+
+/* 入口模式（启动参数 pkgd=ring0|ring3|auto，缺省 auto） */
+#define PKGD_MODE_AUTO           0
+#define PKGD_MODE_RING0          1
+#define PKGD_MODE_RING3          2
+
 #define PKG_CLI_REPLY_MAX        128u
 
 int pkg_syscall(uint32_t op, uint32_t a, uint32_t b);
@@ -226,12 +261,47 @@ extern const unsigned char pkg_modulus[256];
 
 const pkg_blob_t *pkg_catalog_find(const char *name);
 
-/* ---- _pkgd：ring0 内建组件服务（后续可原样迁到 ring3） ---- */
+/* ---- _pkgd：组件安装服务（ring0 内建 / ring3 守护进程，P4） ---- */
 #define PKGD_SERVICE_NAME "pkgd"
 
-/* 建 port 并注册服务（在 supervisor_init 之前调用一次） */
+/* 入口模式：ring0=内核内建实现；ring3=ring3 守护进程；auto=优先 ring3，
+ * 不可用时回退 ring0。启动参数 pkgd=... 与编译期 -DPKGD_FORCE_MODE 都认。 */
+int pkgd_mode(void);
+const char *pkgd_mode_name(int mode);
+/* 测试钩子：只在 -Test 构建的 pkgd 自检里切换模式（模拟 pkgd=ring0/ring3 启动） */
+void pkgd_test_set_mode(int mode);
+
+/* ring3 pkgd 是否在线（svc 注册表 RUNNING + 进程存活 + IPC 端口有效） */
+int pkgd_ring3_online(void);
+uint32_t pkgd_ring3_pid(void);
+
+/* 内建 ring3 pkgd 的 ELF 映像（build.ps1 生成 obj/pkgd_blob.asm incbin 进来） */
+extern uint8_t pkgd_user_blob_start[];
+extern uint8_t pkgd_user_blob_end[];
+
+/* CLI 路由（SYS_PKG 0..3 的实现）：ring3 在线则转发，auto 失败回退 ring0。 */
+int pkgd_cli_install(const char *path, uint32_t euid,
+                     char *detail, uint32_t max);
+int pkgd_cli_remove(const char *name, uint32_t euid,
+                    char *detail, uint32_t max);
+int pkgd_cli_verify(const char *name, uint32_t euid,
+                    char *detail, uint32_t max);
+uint32_t pkgd_cli_list(uint32_t euid, char *out, uint32_t max);
+
+/* 内核原语分发（op 6..17）；只接受已注册的 ring3 pkgd 调用。 */
+int pkgd_primitive(uint32_t op, uint32_t a, uint32_t b);
+
+/* ring3 服务化自检（-Test 构建，由 pkgtest 线程在 pkg 回归之后调用） */
+void pkgd_selftest(void);
+
+/* supervisor 线程在启动期自检（svc_selftest 会用"虚拟 now"驱动整张服务表）
+ * 结束后调用：ring3 pkgd 必须等它结束再注册，否则会被误判心跳超时。
+ * 生产构建里 supervisor 线程一启动就调用，等于无延迟。 */
+void pkgd_supervisor_ready(void);
+
+/* 建 port 并注册服务（ring0 模式在 supervisor_init 之前调用一次） */
 void pkgd_init(void);
-/* 服务循环：作为程序 "pkgd" 运行 */
+/* 服务入口：按模式启动 ring3 守护进程或 ring0 回退；作为程序 "pkgd" 运行 */
 void pkgd_entry(void);
 /* 客户端：发一条文本命令，收一条回复（阻塞）。返回回复长度或负错误。 */
 int pkgd_request(const char *cmd, char *reply, uint32_t max);

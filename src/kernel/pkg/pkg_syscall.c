@@ -64,6 +64,11 @@ int pkg_syscall(uint32_t op, uint32_t a, uint32_t b)
 {
     uint32_t euid = pkg_caller_euid();
 
+    /* P4：6..17 是 ring3 pkgd 专用的验签/落盘原语（只接受已注册的 pkgd）。 */
+    if (op >= PKG_OP_SESSION_BEGIN) {
+        return pkgd_primitive(op, a, b);
+    }
+
     switch (op) {
     case PKG_OP_LIST: {
         char *buf;
@@ -75,7 +80,8 @@ int pkg_syscall(uint32_t op, uint32_t a, uint32_t b)
         buf = (char *)malloc(b);
         if (buf == 0) return -1;
         memset(buf, 0, b);
-        count = pkg_list(euid, buf, b);
+        /* 路由：ring3 pkgd 在线 -> IPC；auto 失败回退 ring0 的 pkg_list。 */
+        count = pkgd_cli_list(euid, buf, b);
         ok = (copy_to_user((void *)(uintptr_t)a, buf, b) == E_OK);
         free(buf);
         return ok ? (int)count : -1;
@@ -87,7 +93,7 @@ int pkg_syscall(uint32_t op, uint32_t a, uint32_t b)
 
         if (pkg_arg_name(path, sizeof(path), a) != 0) return -1;
         detail[0] = '\0';
-        r = pkg_install_path(path, euid, detail, sizeof(detail));
+        r = pkgd_cli_install(path, euid, detail, sizeof(detail));
         return pkg_cli_reply(b, r, (detail[0] != '\0') ? detail : 0);
     }
     case PKG_OP_REMOVE: {
@@ -97,7 +103,7 @@ int pkg_syscall(uint32_t op, uint32_t a, uint32_t b)
 
         if (pkg_arg_name(name, sizeof(name), a) != 0) return -1;
         detail[0] = '\0';
-        r = pkg_remove(name, euid, detail, sizeof(detail));
+        r = pkgd_cli_remove(name, euid, detail, sizeof(detail));
         return pkg_cli_reply(b, r, (detail[0] != '\0') ? detail : 0);
     }
     case PKG_OP_VERIFY: {
@@ -107,7 +113,7 @@ int pkg_syscall(uint32_t op, uint32_t a, uint32_t b)
 
         if (pkg_arg_name(name, sizeof(name), a) != 0) return -1;
         detail[0] = '\0';
-        r = pkg_verify_installed(name, euid, detail, sizeof(detail));
+        r = pkgd_cli_verify(name, euid, detail, sizeof(detail));
         return pkg_cli_reply(b, r, (detail[0] != '\0') ? detail : 0);
     }
     case PKG_OP_COMPONENT_PORT:

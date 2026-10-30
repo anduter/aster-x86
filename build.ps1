@@ -30,7 +30,10 @@ param(
     [string]$DistDir = 'dist',
     [int]$QmpPort = 4444,
     [int]$EchoPort = 12345,
-    [string]$SerialLog = ''
+    [string]$SerialLog = '',
+    # P4：pkgd 入口模式（auto=优先 ring3、失败回退 ring0；ring0/ring3=强制）
+    [ValidateSet('auto', 'ring0', 'ring3')]
+    [string]$PkgdMode = 'auto'
 )
 
 try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
@@ -71,11 +74,15 @@ $CFLAGS = @(
 # 生产构建（不带这两个开关）不带这个 define，cmdline 为空 -> 必须登录。
 if ($Test -or $Shot) { $CFLAGS += '-DOS_TEST_BUILD=1' }
 
+# ---- P4：pkgd 入口模式（编译期缺省；运行时也会识别 boot cmdline 的 pkgd=...） ----
+if ($PkgdMode -eq 'ring0')     { $CFLAGS += '-DPKGD_FORCE_MODE=1' }
+elseif ($PkgdMode -eq 'ring3') { $CFLAGS += '-DPKGD_FORCE_MODE=2' }
+
 # ---- 增量构建：参数未变且对象比源文件新时跳过编译（头文件变化则全量重编） ----
 $swTotal = [Diagnostics.Stopwatch]::StartNew()
 New-Item -ItemType Directory -Force -Path $objRoot | Out-Null
 $flagsFile = Join-Path $objRoot '.flags'
-$flagsText = ($CFLAGS -join ' ') + '|' + $nasmInc + '|' + $FontScale
+$flagsText = ($CFLAGS -join ' ') + '|' + $nasmInc + '|' + $FontScale + '|' + $PkgdMode
 $shaFlags = [Security.Cryptography.SHA256]::Create()
 $flagsHash = [BitConverter]::ToString($shaFlags.ComputeHash([Text.Encoding]::UTF8.GetBytes($flagsText)))
 $forceAll = $true
@@ -207,12 +214,44 @@ Invoke-Step 'sign shell' 'powershell' @(
     '-Signature', (Join-Path $objRoot 'shell.sig'), '-OutC', (Join-Path $objRoot 'shell_signature.c')
 )
 
+# ---- P4：ring3 pkgd 守护进程（独立 ELF，链接到 0x40000000）----
+# 映像通过 incbin 嵌进内核（obj/pkgd_blob.asm）：内核镜像本身由 boot verifier
+# 验签，因此 pkgd 不需要第二套文件系统信任链；pkgd 启动时再由内核把它写到
+# system:/bin/pkgd 供审计/查看。
+Invoke-Step 'pkgd.c' 'i686-elf-gcc' @(
+    '-ffreestanding', '-fno-pic', '-fno-pie', '-m32', '-nostdlib', '-fno-builtin',
+    '-fno-stack-protector', '-fno-asynchronous-unwind-tables', '-Wall', '-Wextra', '-Werror', '-O0',
+    ("-DOS_TEST_BUILD={0}" -f [int]($Test -or $Shot)),
+    '-c', 'src/user/pkgd.c', '-o', (Join-Path $objRoot 'pkgd.o')
+)
+Invoke-Step 'pkgd.elf' 'i686-elf-ld' @(
+    '-m', 'elf_i386', '-T', 'src/user/user.ld', '-o', (Join-Path $objRoot 'pkgd.elf'),
+    (Join-Path $objRoot 'pkgd.o'), (Join-Path $objRoot 'ulib.o')
+)
+
 # src/kernel 下所有 .asm（含 intr/isr.asm 中断桩）都要汇编
 $objs = @()
 Write-Host '=== signature object ===' -ForegroundColor Cyan
 & i686-elf-gcc @CFLAGS -c (Join-Path $objRoot 'shell_signature.c') -o (Join-Path $objRoot 'shell_signature.o')
 if ($LASTEXITCODE -ne 0) { throw 'shell signature compile failed' }
 $objs += (Join-Path $objRoot 'shell_signature.o')
+
+# P4：pkgd ELF -> incbin 包装（每次重新生成/汇编，避免嵌入旧映像）
+$pkgdBlobAsm = Join-Path $objRoot 'pkgd_blob.asm'
+$pkgdElfAbs = ((Join-Path $objRoot 'pkgd.elf') -replace '\\', '/')
+$pkgdBlobText = @"
+[BITS 32]
+section .rodata
+global pkgd_user_blob_start
+global pkgd_user_blob_end
+pkgd_user_blob_start:
+    incbin "$pkgdElfAbs"
+pkgd_user_blob_end:
+"@
+[IO.File]::WriteAllText($pkgdBlobAsm, $pkgdBlobText, (New-Object System.Text.UTF8Encoding($false)))
+Invoke-Step 'pkgd_blob.asm' 'nasm' @('-f', 'elf32', '-o', (Join-Path $objRoot 'pkgd_blob.o'), $pkgdBlobAsm)
+$objs += (Join-Path $objRoot 'pkgd_blob.o')
+
 $asmFiles = Get-ChildItem -Path 'src/kernel' -Recurse -Filter *.asm
 foreach ($f in $asmFiles) {
     $rel = $f.FullName.Substring((Resolve-Path 'src/kernel').Path.Length + 1)
@@ -958,7 +997,19 @@ if ($Test -or $Shot) {
             @{ Name = 'svc 失败重启';              Ok = ($out.Contains('svc: restart on-failure ok')) },
             @{ Name = 'svc 超限隔离';              Ok = ($out.Contains('svc: quarantine after limit ok')) },
             @{ Name = 'svc 服务日志';              Ok = ($out.Contains('svc: log write ok')) },
-            @{ Name = 'svc 自检通过';              Ok = ($out.Contains('svc: selftest PASS')) }
+            @{ Name = 'svc 自检通过';              Ok = ($out.Contains('svc: selftest PASS')) },
+            # ---- 三层 P4：pkgd 服务化（ring3 策略 + ring0 回退，2026-10-31）----
+            @{ Name = 'pkgd ring3 上线';           Ok = ($out.Contains('pkgd: ring3 online')) },
+            @{ Name = 'pkgd ring3 列表';           Ok = ($out.Contains('pkgd: ring3 list ok')) },
+            @{ Name = 'pkgd ring3 校验';           Ok = ($out.Contains('pkgd: ring3 verify ok')) },
+            @{ Name = 'pkgd ring3 卸载';           Ok = ($out.Contains('pkgd: ring3 remove ok')) },
+            @{ Name = 'pkgd ring3 安装';           Ok = ($out.Contains('pkgd: ring3 install ok')) },
+            @{ Name = 'pkgd ring3 服务在线';       Ok = ($out.Contains('pkgd: ring3 service online ok')) },
+            @{ Name = 'pkgd 故障隔离';             Ok = ($out.Contains('pkgd: ring3 kill isolation ok')) },
+            @{ Name = 'pkgd svcwatch 重启';        Ok = ($out.Contains('pkgd: svcwatch restart ok')) },
+            @{ Name = 'pkgd ring0 回退';           Ok = ($out.Contains('pkgd: fallback ring0 ok')) },
+            @{ Name = 'pkgd ring0 强制模式';       Ok = ($out.Contains('pkgd: ring0 mode verify ok')) },
+            @{ Name = 'pkgd 自检通过';             Ok = ($out.Contains('pkgd: selftest PASS')) }
         )
 
         T 'checks begin'

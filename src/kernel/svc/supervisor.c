@@ -12,7 +12,7 @@
 #include "include/proc.h"
 #include "include/apps.h"
 #include "include/kernel.h"
-#include "include/kernel.h"
+#include "include/pkg.h"
 
 static int sup_port = -1;
 
@@ -62,6 +62,9 @@ void supervisor_entry(void)
         /* P3 服务注册/拓扑/心跳/重启/隔离自检（不阻塞，只在测试构建跑） */
         svc_selftest();
     }
+    /* P4：ring3 pkgd 的启动线程等这个标志后再注册。svc_selftest 用虚拟 now
+     * 驱动整张表；若 pkgd 已注册会被误判心跳超时/隔离，所以必须错开。 */
+    pkgd_supervisor_ready();
 
     for (;;) {
         uint32_t server = 0;

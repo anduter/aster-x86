@@ -402,6 +402,8 @@ void pkg_selftest_entry(void)
     test_nonroot_denied();
     test_user_app();
     test_running_service_cycle();
+    /* P4：ring3 pkgd 服务化（ring3 安装/卸载、kill 隔离、回退） */
+    pkgd_selftest();
 
     kprintln("pkg: selftest done");
     proc_exit(0);

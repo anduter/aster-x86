@@ -119,6 +119,29 @@ static inline int fs_lstat(const char *path, unsigned int *st)
 int fd_read(int fd, void *buf, int len);
 int fd_write(int fd, const void *buf, int len);
 
+/* ---- 路径文件 API（P4 ring3 服务用；值同 fs/fs.h 的 FS_OPEN_*） ---- */
+#define ULIB_FS_READ   0x01
+#define ULIB_FS_WRITE  0x02
+#define ULIB_FS_CREAT  0x04
+
+/* 打开/创建文件，返回 fd（>0）；失败 -1。 */
+int fs_open(const char *path, int flags);
+int fs_close(int fd);
+int fs_read(int fd, void *buf, int len);
+int fs_write(int fd, const void *buf, int len);
+int fs_stat(const char *path, sys_stat_t *st);
+int fs_unlink(const char *path);
+int fs_mkdir(const char *path);
+
+/* ---- Native ABI（int 0x80）端点：给 ring3 服务连接 supervisor 用 ----
+ * 与 legacy int 0x81 的文件/进程调用分开；编号见 proc/trap/native.h。 */
+int nport_create(void);
+int nservice_register(const char *name, int port);
+int nservice_connect(const char *name);
+int nchan_send(int ch, const void *buf, int len);
+int nchan_recv_block(int ch, void *buf, int max);
+int nhandle_close(int handle);
+
 /* ---- 进程/内存（ABI v1.1，pm 会话） ---- */
 /* 等待子进程：options=0 阻塞；WNOHANG 时无可回收子进程立即返回 0。
  * 成功回收返回子 pid；失败 -1。 */
@@ -249,6 +272,7 @@ void free(void *p);
 
 usize strlen(const char *s);
 int strcmp(const char *a, const char *b);
+int strncmp(const char *a, const char *b, usize n);
 char *strcpy(char *d, const char *s);
 void *memcpy(void *d, const void *s, usize n);
 void *memset(void *d, int c, usize n);

@@ -1316,10 +1316,11 @@ int pkg_install_path(const char *path, uint32_t euid, char *msg, uint32_t max)
 }
 
 /* -------------------------------------------------------------------------
- * _pkgd 服务
+ * _pkgd 服务：ring0 回退实现（P4 起默认 ring3，见文件末尾的入口分发）
  * ------------------------------------------------------------------------- */
-void pkgd_init(void)
+static void pkgd_ring0_start(void)
 {
+    if (pkgd_port >= 0) return;
     pkgd_port = port_create();
     if (pkgd_port < 0) {
         kprintln("pkgd: no port");
@@ -1334,24 +1335,8 @@ void pkgd_init(void)
     kprintf("pkgd: service online port=%d\n", pkgd_port);
 }
 
-int pkgd_request(const char *cmd, char *reply, uint32_t max)
-{
-    uint32_t client = 0;
-    int n;
-
-    if (cmd == 0 || reply == 0 || max == 0U) return -1;
-    if (service_connect(PKGD_SERVICE_NAME, &client) != 0) return -1;
-    if (chan_send(client, cmd, (uint32_t)strlen(cmd)) <= 0) {
-        chan_release(client);
-        return -1;
-    }
-    reply[0] = '\0';
-    n = chan_recv_block(client, reply, max);
-    chan_release(client);
-    if (n <= 0) return -1;
-    reply[(uint32_t)n < max ? (uint32_t)n : (max - 1U)] = '\0';
-    return n;
-}
+/* pkgd_request() 在文件末尾实现：P4 起统一走 pkgd_cli_* 路由（ring3 优先，
+ * auto 回退 ring0），不再直接连 legacy channel。 */
 
 /* 回复统一截断到 CHAN_MSG_LEN 以内（channel 消息上限 64 字节） */
 static void reply_fmt(char *reply, uint32_t max, int status, const char *detail)
@@ -1364,7 +1349,7 @@ static void reply_fmt(char *reply, uint32_t max, int status, const char *detail)
     reply[max - 1U] = '\0';
 }
 
-void pkgd_entry(void)
+static void pkgd_ring0_loop(void)
 {
     if (pkgd_port < 0) return;
 
@@ -1409,4 +1394,1360 @@ void pkgd_entry(void)
         (void)chan_send(server, reply, (uint32_t)strlen(reply));
         chan_release(server);
     }
+}
+
+/* =========================================================================
+ * P4：入口模式（ring0 / ring3 / auto）与 ring3 pkgd 守护进程
+ * ========================================================================= */
+
+#define PKGD_REQ_MAGIC   0x504B4732U    /* "PKG2" */
+#define PKGD_RSP_MAGIC   0x504B4733U    /* "PKG3" */
+#define PKGD_REQ_HDR     24U            /* magic/ticket/req/op/euid/arglen */
+#define PKGD_RSP_HDR     20U            /* magic/req/status/count/textlen */
+#define PKGD_ARG_MAX     192U
+#define PKGD_FWD_TIMEOUT 1000U          /* 10s：安装含组件 ELF 启动（≤3s） */
+#define PKGD_FWD_UNAVAIL (-1000)
+
+static int pkgd_mode_override = -1;
+static int pkgd_mode_cached = -1;
+
+static volatile int pkgd_fwd_busy;
+static uint32_t pkgd_req_seq;
+
+/* 内核分发器记录“当前转发请求的客户端身份”。ring3 pkgd 回调原语时，
+ * 内核只认这个记录（pkgd 是 root 系统服务，不能把客户 euid 伪造成别人）。 */
+typedef struct {
+    bool     active;
+    uint32_t euid;
+    uint32_t req_id;
+} pkgd_ctx_t;
+
+static pkgd_ctx_t pkgd_ctx;
+
+/* supervisor 线程在 svc_selftest 之后置位（见 pkgd_supervisor_ready）。 */
+static volatile int pkgd_sup_ready;
+
+void pkgd_supervisor_ready(void)
+{
+    pkgd_sup_ready = 1;
+}
+
+int pkgd_mode(void)
+{
+    if (pkgd_mode_override >= 0) return pkgd_mode_override;
+    if (pkgd_mode_cached >= 0) return pkgd_mode_cached;
+
+    {
+        int m = PKGD_MODE_AUTO;
+
+#if defined(PKGD_FORCE_MODE) && (PKGD_FORCE_MODE == 1)
+        m = PKGD_MODE_RING0;
+#elif defined(PKGD_FORCE_MODE) && (PKGD_FORCE_MODE == 2)
+        m = PKGD_MODE_RING3;
+#else
+        if (boot_cmdline_has("pkgd=ring0")) m = PKGD_MODE_RING0;
+        else if (boot_cmdline_has("pkgd=ring3")) m = PKGD_MODE_RING3;
+#endif
+        pkgd_mode_cached = m;
+        return m;
+    }
+}
+
+const char *pkgd_mode_name(int mode)
+{
+    switch (mode) {
+    case PKGD_MODE_RING0: return "ring0";
+    case PKGD_MODE_RING3: return "ring3";
+    default:              return "auto";
+    }
+}
+
+void pkgd_test_set_mode(int mode)
+{
+    pkgd_mode_override = (mode < 0) ? -1 : mode;
+}
+
+uint32_t pkgd_ring3_pid(void)
+{
+    svc_entry_t e;
+
+    if (svc_registry_get(PKGD_SERVICE_NAME, &e) != 0) return 0;
+    if (e.state != SVC_RUNNING || e.pid == 0U) return 0;
+    if (proc_find(e.pid) == 0) return 0;
+    return e.pid;
+}
+
+int pkgd_ring3_online(void)
+{
+    uint32_t port = 0;
+
+    if (pkgd_ring3_pid() == 0U) return 0;
+    if (svc_registry_lookup(PKGD_SERVICE_NAME, &port) != 0) return 0;
+    return ipc_port_exists(port) ? 1 : 0;
+}
+
+/* -------------------------------------------------------------------------
+ * IPC 帧（payload 布局与 src/user/pkgd.c 严格一致）
+ * ------------------------------------------------------------------------- */
+static uint32_t pkgd_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* 从用户态拷一个 NUL 结尾字符串（逐字节 copy_from_user，避免跨页整块拷贝
+ * 把未映射页误判成坏指针）。成功 0 / 失败 -1。 */
+static int pkgd_copy_user_string(char *dst, uint32_t max, uint32_t uptr)
+{
+    if (dst == 0 || max == 0U || uptr == 0U) return -1;
+    for (uint32_t i = 0; i < max; i++) {
+        char c;
+
+        if (copy_from_user(&c, (const void *)(uintptr_t)(uptr + i), 1U) != E_OK) {
+            return -1;
+        }
+        dst[i] = c;
+        if (c == '\0') return 0;
+    }
+    return -1;                      /* 没有 NUL 结尾 */
+}
+
+static void pkgd_wr32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFFU);
+    p[1] = (uint8_t)((v >> 8) & 0xFFU);
+    p[2] = (uint8_t)((v >> 16) & 0xFFU);
+    p[3] = (uint8_t)((v >> 24) & 0xFFU);
+}
+
+static void pkgd_wr16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v & 0xFFU);
+    p[1] = (uint8_t)((v >> 8) & 0xFFU);
+}
+
+static int pkgd_build_frame(uint8_t *out, uint32_t cap,
+                            const uint8_t *payload, uint32_t plen)
+{
+    if (out == 0 || cap < IPC_HDR_SIZE + plen) return -1;
+    pkgd_wr32(out + 0, IPC_MAGIC);
+    pkgd_wr32(out + 4, 2U);                     /* 业务 type：请求 */
+    pkgd_wr16(out + 8, (uint16_t)IPC_F_NEED_REPLY);
+    pkgd_wr16(out + 10, 0U);
+    pkgd_wr32(out + 12, plen);
+    memcpy(out + IPC_HDR_SIZE, payload, plen);
+    return (int)(IPC_HDR_SIZE + plen);
+}
+
+/* 把一条 CLI 请求转发给 ring3 pkgd。返回 0 = 已收到回复（*status_out 有效）；
+ * PKGD_FWD_UNAVAIL = 不可用（auto 模式由调用方回退 ring0）。 */
+static int pkgd_forward(uint32_t op, const char *arg, uint32_t euid,
+                        char *detail, uint32_t dmax, uint32_t *count_out,
+                        int *status_out)
+{
+    proc_t *caller = proc_current();
+    uint32_t port = 0;
+    uint32_t arglen;
+    uint32_t rid;
+    uint32_t ticket;
+    uint32_t deadline;
+    uint8_t payload[PKGD_REQ_HDR + PKGD_ARG_MAX];
+    uint8_t frame[IPC_HDR_SIZE + sizeof(payload)];
+    uint8_t rbuf[IPC_HDR_SIZE + 320U];
+    int reply_port;
+    int flen;
+    int n;
+    int r = PKGD_FWD_UNAVAIL;
+
+    if (caller == 0 || detail == 0 || dmax == 0U || status_out == 0) {
+        return PKGD_FWD_UNAVAIL;
+    }
+    if (pkgd_ring3_online() == 0) return PKGD_FWD_UNAVAIL;
+
+    /* 串行化：内核分发器同一时刻只允许一个未完成请求（context 单槽）。 */
+    deadline = timer_ticks() + 2000U;
+    while (pkgd_fwd_busy) {
+        if ((int32_t)(timer_ticks() - deadline) >= 0) return PKGD_FWD_UNAVAIL;
+        proc_sleep_ticks(1U);
+    }
+    pkgd_fwd_busy = 1;
+    pkgd_ctx.active = false;
+
+    /* 再查一次：等锁期间服务可能已经重启/隔离。 */
+    if (pkgd_ring3_online() == 0 ||
+        svc_registry_lookup(PKGD_SERVICE_NAME, &port) != 0) {
+        pkgd_fwd_busy = 0;
+        return PKGD_FWD_UNAVAIL;
+    }
+
+    reply_port = ipc_port_create(0U, caller);
+    if (reply_port <= 0) {
+        pkgd_fwd_busy = 0;
+        return PKGD_FWD_UNAVAIL;
+    }
+
+    arglen = (arg != 0) ? (uint32_t)strlen(arg) : 0U;
+    if (arglen > PKGD_ARG_MAX) arglen = PKGD_ARG_MAX;
+    rid = ++pkgd_req_seq;
+    ticket = ipc_ticket_make(caller->pid, (uint32_t)reply_port);
+
+    pkgd_wr32(payload + 0, PKGD_REQ_MAGIC);
+    pkgd_wr32(payload + 4, ticket);
+    pkgd_wr32(payload + 8, rid);
+    pkgd_wr32(payload + 12, op);
+    pkgd_wr32(payload + 16, euid);
+    pkgd_wr32(payload + 20, arglen);
+    if (arglen != 0U) memcpy(payload + PKGD_REQ_HDR, arg, arglen);
+
+    flen = pkgd_build_frame(frame, sizeof(frame), payload,
+                            PKGD_REQ_HDR + arglen);
+    if (flen < 0) {
+        ipc_port_release((uint32_t)reply_port, caller);
+        pkgd_fwd_busy = 0;
+        return PKGD_FWD_UNAVAIL;
+    }
+
+    pkgd_ctx.active = true;
+    pkgd_ctx.euid = euid;
+    pkgd_ctx.req_id = rid;
+
+    if (ipc_port_send(port, frame, (uint32_t)flen, caller) == 0) {
+        deadline = timer_ticks() + PKGD_FWD_TIMEOUT;
+        for (;;) {
+            n = ipc_port_recv((uint32_t)reply_port, rbuf, sizeof(rbuf), caller);
+            if (n >= (int)(IPC_HDR_SIZE + PKGD_RSP_HDR) &&
+                pkgd_rd32(rbuf + 0) == IPC_MAGIC &&
+                pkgd_rd32(rbuf + 16) == PKGD_RSP_MAGIC &&
+                pkgd_rd32(rbuf + 20) == rid) {
+                uint32_t plen = pkgd_rd32(rbuf + 12);
+                uint32_t tlen = pkgd_rd32(rbuf + 32);
+                const uint8_t *text = rbuf + IPC_HDR_SIZE + PKGD_RSP_HDR;
+
+                if (plen < PKGD_RSP_HDR || IPC_HDR_SIZE + plen > (uint32_t)n) {
+                    r = PKGD_FWD_UNAVAIL;
+                    break;
+                }
+                if (tlen > plen - PKGD_RSP_HDR) tlen = plen - PKGD_RSP_HDR;
+                if (tlen >= dmax) tlen = dmax - 1U;
+                memcpy(detail, text, tlen);
+                detail[tlen] = '\0';
+                *status_out = (int)(int32_t)pkgd_rd32(rbuf + 24);
+                if (count_out != 0) *count_out = pkgd_rd32(rbuf + 28);
+                r = 0;
+                break;
+            }
+            if ((int32_t)(timer_ticks() - deadline) >= 0) {
+                r = PKGD_FWD_UNAVAIL;
+                break;
+            }
+            if (n < 0) proc_sleep_ticks(1U);
+        }
+    }
+
+    pkgd_ctx.active = false;
+    pkgd_ctx.req_id = 0;
+    ipc_port_release((uint32_t)reply_port, caller);
+    pkgd_fwd_busy = 0;
+    return r;
+}
+
+static int pkgd_fwd_or(int op, const char *arg, uint32_t euid,
+                       char *detail, uint32_t dmax, uint32_t *count_out)
+{
+    int status = PKG_E_IO;
+
+    if (pkgd_forward(op, arg, euid, detail, dmax, count_out, &status) == 0) {
+        return status;
+    }
+    return PKGD_FWD_UNAVAIL;
+}
+
+/* -------------------------------------------------------------------------
+ * CLI 路由：ring3 优先；auto 失败回退 ring0；ring3 强制模式不静默回退
+ * ------------------------------------------------------------------------- */
+int pkgd_cli_install(const char *path, uint32_t euid,
+                     char *detail, uint32_t max)
+{
+    int r;
+
+    if (pkgd_mode() != PKGD_MODE_RING0) {
+        r = pkgd_fwd_or(PKG_OP_INSTALL, path, euid, detail, max, 0);
+        if (r != PKGD_FWD_UNAVAIL) return r;
+        if (pkgd_mode() == PKGD_MODE_RING3) {
+            set_msg(detail, max, "pkgd ring3 unavailable");
+            return PKG_E_IO;
+        }
+    }
+    return pkg_install_path(path, euid, detail, max);
+}
+
+int pkgd_cli_remove(const char *name, uint32_t euid,
+                    char *detail, uint32_t max)
+{
+    int r;
+
+    if (pkgd_mode() != PKGD_MODE_RING0) {
+        r = pkgd_fwd_or(PKG_OP_REMOVE, name, euid, detail, max, 0);
+        if (r != PKGD_FWD_UNAVAIL) return r;
+        if (pkgd_mode() == PKGD_MODE_RING3) {
+            set_msg(detail, max, "pkgd ring3 unavailable");
+            return PKG_E_IO;
+        }
+    }
+    return pkg_remove(name, euid, detail, max);
+}
+
+int pkgd_cli_verify(const char *name, uint32_t euid,
+                    char *detail, uint32_t max)
+{
+    int r;
+
+    if (pkgd_mode() != PKGD_MODE_RING0) {
+        r = pkgd_fwd_or(PKG_OP_VERIFY, name, euid, detail, max, 0);
+        if (r != PKGD_FWD_UNAVAIL) return r;
+        if (pkgd_mode() == PKGD_MODE_RING3) {
+            set_msg(detail, max, "pkgd ring3 unavailable");
+            return PKG_E_IO;
+        }
+    }
+    return pkg_verify_installed(name, euid, detail, max);
+}
+
+uint32_t pkgd_cli_list(uint32_t euid, char *out, uint32_t max)
+{
+    uint32_t count = 0;
+    int status = PKG_E_IO;
+
+    if (pkgd_mode() != PKGD_MODE_RING0) {
+        if (pkgd_forward(PKG_OP_LIST, 0, euid, out, max, &count,
+                         &status) == 0 && status == PKG_OK) {
+            return count;
+        }
+        if (pkgd_mode() == PKGD_MODE_RING3) {
+            if (out != 0 && max > 0U) out[0] = '\0';
+            return 0U;
+        }
+    }
+    return pkg_list(euid, out, max);
+}
+
+/* -------------------------------------------------------------------------
+ * 内核原语（只允许 ring3 pkgd 调用）
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    bool     used;
+    uint32_t euid;
+    uint32_t user_uid;
+    uint32_t user_gid;
+    pkg_manifest_t m;
+    pkg_header_t h;
+    uint8_t *pkg;
+    uint32_t len;
+    char     root[FS_PATH_MAX];
+    char     stage[FS_PATH_MAX];
+    char     parent[FS_PATH_MAX];
+    char     elf_rel[PKG_ENTRY_MAX];
+    char     program[PKG_ENTRY_MAX];
+    uint8_t  elf_sha[32];
+    bool     have_elf;
+    bool     committed;
+} pkgd_session_t;
+
+static pkgd_session_t pkgd_sess;
+
+typedef struct {
+    bool     used;
+    uint32_t euid;
+    char     name[PKG_NAME_MAX];
+    char     type[16];
+    char     program[PKG_ENTRY_MAX];
+    char     root[FS_PATH_MAX];
+} pkgd_remove_t;
+
+static pkgd_remove_t pkgd_rem;
+
+static int pkgd_daemon_ok(void)
+{
+    proc_t *p = proc_current();
+    svc_entry_t e;
+
+    if (p == 0 || !p->is_user || !proc_is_root(p)) return 0;
+    if (svc_registry_get(PKGD_SERVICE_NAME, &e) != 0) return 0;
+    return (e.state == SVC_RUNNING && e.pid == p->pid) ? 1 : 0;
+}
+
+static uint32_t pkgd_client_euid(void)
+{
+    return pkgd_ctx.active ? pkgd_ctx.euid : 0U;
+}
+
+static void pkgd_session_reset(void)
+{
+    if (pkgd_sess.pkg != 0) free(pkgd_sess.pkg);
+    memset(&pkgd_sess, 0, sizeof(pkgd_sess));
+}
+
+static void pkgd_remove_reset(void)
+{
+    memset(&pkgd_rem, 0, sizeof(pkgd_rem));
+}
+
+/* 读包文件/内建包到内核缓冲：返回 PKG_OK / 错误码。 */
+static int pkgd_load_pkg(uint32_t uptr, uint32_t len, uint8_t **out,
+                         uint32_t *out_len)
+{
+    uint8_t *buf;
+    uint32_t blen;
+    int r;
+
+    if (len != 0U) {
+        if (len < PKG_HEADER_SIZE + PKG_SIG_SIZE || len > FS_FILE_MAX) {
+            return PKG_E_FORMAT;
+        }
+        buf = (uint8_t *)malloc(len);
+        if (buf == 0) return PKG_E_IO;
+        if (copy_from_user(buf, (const void *)(uintptr_t)uptr, len) != E_OK) {
+            free(buf);
+            return PKG_E_FORMAT;
+        }
+        *out = buf;
+        *out_len = len;
+        return PKG_OK;
+    }
+
+    {
+        char path[FS_PATH_MAX];
+        const pkg_blob_t *blob;
+
+        if (pkgd_copy_user_string(path, sizeof(path), uptr) != 0) {
+            return PKG_E_FORMAT;
+        }
+        blob = pkg_catalog_find(path);
+        if (blob != 0) {
+            buf = (uint8_t *)malloc(blob->len);
+            if (buf == 0) return PKG_E_IO;
+            memcpy(buf, blob->data, blob->len);
+            *out = buf;
+            *out_len = blob->len;
+            return PKG_OK;
+        }
+        r = read_file_alloc(path, &buf, &blen);
+        if (r != PKG_OK) return r;
+        *out = buf;
+        *out_len = blen;
+        return PKG_OK;
+    }
+}
+
+static int pkgd_session_begin(uint32_t uptr, uint32_t len)
+{
+    pkg_manifest_t m;
+    pkg_header_t h;
+    acct_user_t user;
+    uint8_t *pkg = 0;
+    uint32_t plen = 0;
+    uint32_t euid = pkgd_client_euid();
+    char root[FS_PATH_MAX];
+    char stage[FS_PATH_MAX];
+    uint32_t user_uid = 0;
+    uint32_t user_gid = 0;
+    int r;
+
+    if (pkgd_sess.used) return PKG_E_BUSY;
+    memset(&m, 0, sizeof(m));
+    memset(&user, 0, sizeof(user));
+
+    r = pkgd_load_pkg(uptr, len, &pkg, &plen);
+    if (r != PKG_OK) return r;
+
+    r = pkg_verify(pkg, plen, &m);
+    if (r != PKG_OK) { free(pkg); return r; }
+    r = pkg_read_header(pkg, plen, &h);
+    if (r != PKG_OK) { free(pkg); return r; }
+
+    /* ---- 策略（与 ring0 实现一致；身份来自内核转发记录） ---- */
+    if (m.type == PKG_TYPE_SERVICE) {
+        if (!pkg_euid_is_admin(euid)) { free(pkg); return PKG_E_POLICY; }
+        if (strcmp(m.account, "root") != 0) { free(pkg); return PKG_E_POLICY; }
+        if ((m.caps & (PKG_CAP_SYS_ADMIN | PKG_CAP_PKG_ADMIN)) != 0U) {
+            free(pkg);
+            return PKG_E_POLICY;
+        }
+    } else {
+        if (acct_find_uid(euid, &user) != 0) { free(pkg); return PKG_E_POLICY; }
+        if (strcmp(user.name, m.account) != 0) { free(pkg); return PKG_E_POLICY; }
+        user_uid = user.uid;
+        user_gid = user.gid;
+    }
+
+    r = pkg_component_root(&m, euid, root, sizeof(root));
+    if (r != PKG_OK) { free(pkg); return r; }
+    if (db_find(m.name, euid, 0, 0) == 0) { free(pkg); return PKG_E_EXIST; }
+
+    ensure_dir(PKG_SYS_DIR);
+    ensure_dir(PKG_SYS_PKGS);
+    ensure_dir(PKG_SYS_STAGE);
+    if (ksnprintf(stage, sizeof(stage), "%s/%s", PKG_SYS_STAGE, m.name) <= 0) {
+        free(pkg);
+        return PKG_E_IO;
+    }
+    (void)remove_tree(stage);
+    ensure_dir(stage);
+
+    pkgd_session_reset();
+    pkgd_sess.used = true;
+    pkgd_sess.euid = euid;
+    pkgd_sess.user_uid = user_uid;
+    pkgd_sess.user_gid = user_gid;
+    pkgd_sess.m = m;
+    pkgd_sess.h = h;
+    pkgd_sess.pkg = pkg;
+    pkgd_sess.len = plen;
+    memcpy(pkgd_sess.root, root, sizeof(root));
+    memcpy(pkgd_sess.stage, stage, sizeof(stage));
+    /* 过渡期 legacy 程序名：entry 是程序名（没有 '/'）时通知 supervisor 用它。 */
+    if (m.type == PKG_TYPE_SERVICE && strchr(m.entry, '/') == 0) {
+        strncpy(pkgd_sess.program, m.entry, sizeof(pkgd_sess.program) - 1U);
+        pkgd_sess.program[sizeof(pkgd_sess.program) - 1U] = '\0';
+    }
+    return PKG_OK;
+}
+
+static int pkgd_session_info(uint32_t uptr, uint32_t max)
+{
+    char info[192];
+    int n;
+
+    if (!pkgd_sess.used) return -1;
+    n = ksnprintf(info, sizeof(info),
+                  "name=%s version=%s type=%s files=%u elf=%u program=%s",
+                  pkgd_sess.m.name, pkgd_sess.m.version,
+                  (pkgd_sess.m.type == PKG_TYPE_SERVICE) ? "service" : "app",
+                  (unsigned int)pkgd_sess.h.file_count,
+                  (pkgd_sess.m.type == PKG_TYPE_SERVICE) ? 1U : 0U,
+                  pkgd_sess.program);
+    if (n <= 0 || (uint32_t)n >= sizeof(info)) return -1;
+    if (uptr == 0U || max == 0U) return -1;
+    if ((uint32_t)n >= max) n = (int)max - 1;
+    if (copy_to_user((void *)(uintptr_t)uptr, info, (uint32_t)n + 1U) != E_OK) {
+        return -1;
+    }
+    return 0;
+}
+
+static int pkgd_session_stage(uint32_t index)
+{
+    pkg_file_ent_t e;
+    uint8_t *data;
+    uint8_t got[32];
+    char path[FS_PATH_MAX];
+    uint32_t hh;
+    int n;
+
+    if (!pkgd_sess.used) return PKG_E_IO;
+    if (index >= pkgd_sess.h.file_count) return PKG_E_FORMAT;
+
+    pkg_file_ent(pkgd_sess.pkg, &pkgd_sess.h, index, &e);
+    data = (uint8_t *)malloc(e.size + 1U);
+    if (data == 0) {
+        (void)remove_tree(pkgd_sess.stage);
+        pkgd_session_reset();
+        return PKG_E_IO;
+    }
+    memcpy(data, pkgd_sess.pkg + pkgd_sess.h.data_off + e.offset, e.size);
+
+    sha256_bytes(data, e.size, got);
+    if (memcmp(got, e.sha256, 32) != 0) {
+        free(data);
+        (void)remove_tree(pkgd_sess.stage);
+        pkgd_session_reset();
+        return PKG_E_HASH;
+    }
+    if (suffix_join(path, sizeof(path), pkgd_sess.stage, e.name) != 0) {
+        free(data);
+        (void)remove_tree(pkgd_sess.stage);
+        pkgd_session_reset();
+        return PKG_E_IO;
+    }
+    hh = fs_open(path, FS_OPEN_WRITE | FS_OPEN_CREAT);
+    if (hh == 0U) {
+        free(data);
+        (void)remove_tree(pkgd_sess.stage);
+        pkgd_session_reset();
+        return PKG_E_IO;
+    }
+    n = fs_write(hh, data, e.size);
+    fs_close(hh);
+    free(data);
+    if (n != (int)e.size) {
+        (void)remove_tree(pkgd_sess.stage);
+        pkgd_session_reset();
+        return PKG_E_IO;
+    }
+    (void)fs_chmod(path, (e.mode != 0U) ? (e.mode & FS_MODE_ALL)
+                                        : FS_MODE_FILE_DEFAULT, 0U);
+    return PKG_OK;
+}
+
+static int pkgd_session_commit(void)
+{
+    char line[PKG_DB_LINE_MAX];
+    char sha_hex[PKG_ELF_HASH_HEX + 1U];
+    int n;
+    int r;
+
+    if (!pkgd_sess.used) return PKG_E_IO;
+
+    if (pkgd_sess.m.type == PKG_TYPE_SERVICE) {
+        r = prepare_component_elf(&pkgd_sess.m, pkgd_sess.stage,
+                                  pkgd_sess.elf_rel,
+                                  sizeof(pkgd_sess.elf_rel),
+                                  pkgd_sess.elf_sha);
+        if (r != PKG_OK) {
+            (void)remove_tree(pkgd_sess.stage);
+            pkgd_session_reset();
+            return r;
+        }
+        pkgd_sess.have_elf = true;
+    }
+
+    if (component_parent(pkgd_sess.root, pkgd_sess.parent,
+                         sizeof(pkgd_sess.parent)) != 0) {
+        (void)remove_tree(pkgd_sess.stage);
+        pkgd_session_reset();
+        return PKG_E_IO;
+    }
+    if (pkgd_sess.m.type == PKG_TYPE_APP) {
+        ensure_dir_owner(pkgd_sess.parent, pkgd_sess.user_uid,
+                         pkgd_sess.user_gid);
+    } else {
+        ensure_dir(pkgd_sess.parent);
+    }
+    r = fs_rename(pkgd_sess.stage, pkgd_sess.root);
+    if (r != E_OK) {
+        (void)remove_tree(pkgd_sess.stage);
+        pkgd_session_reset();
+        return PKG_E_IO;
+    }
+    if (pkgd_sess.m.type == PKG_TYPE_APP) {
+        chown_tree(pkgd_sess.root, pkgd_sess.user_uid, pkgd_sess.user_gid);
+    }
+
+    if (pkgd_sess.have_elf) {
+        hex_encode(pkgd_sess.elf_sha, 32U, sha_hex);
+        n = ksnprintf(line, sizeof(line),
+                      "name=%s version=%s type=service entry=%s program=%s "
+                      "euid=%u root=%s files=%u elf=%s elfsha=%s",
+                      pkgd_sess.m.name, pkgd_sess.m.version,
+                      pkgd_sess.elf_rel, pkgd_sess.program,
+                      (unsigned int)pkgd_sess.euid, pkgd_sess.root,
+                      (unsigned int)pkgd_sess.h.file_count,
+                      pkgd_sess.elf_rel, sha_hex);
+    } else {
+        n = ksnprintf(line, sizeof(line),
+                      "name=%s version=%s type=%s entry=%s euid=%u root=%s files=%u",
+                      pkgd_sess.m.name, pkgd_sess.m.version,
+                      (pkgd_sess.m.type == PKG_TYPE_SERVICE) ? "service" : "app",
+                      pkgd_sess.m.entry, (unsigned int)pkgd_sess.euid,
+                      pkgd_sess.root,
+                      (unsigned int)pkgd_sess.h.file_count);
+    }
+    if (n <= 0 || (uint32_t)n >= sizeof(line) ||
+        db_append(pkgd_sess.euid, line) != 0) {
+        (void)remove_tree(pkgd_sess.root);
+        pkgd_session_reset();
+        return PKG_E_IO;
+    }
+
+    pkgd_sess.committed = true;
+    if (pkgd_sess.pkg != 0) {
+        free(pkgd_sess.pkg);
+        pkgd_sess.pkg = 0;
+    }
+    return PKG_OK;
+}
+
+static int pkgd_session_start(void)
+{
+    char detail[64];
+    int r;
+
+    if (!pkgd_sess.used) return PKG_E_IO;
+    if (!pkgd_sess.have_elf) {
+        /* app / 无 ELF 的组件：没有可执行入口，安装到此结束。 */
+        pkgd_session_reset();
+        return PKG_OK;
+    }
+
+    r = pkg_component_start(pkgd_sess.m.name, pkgd_sess.euid,
+                            detail, sizeof(detail));
+    if (r != PKG_OK) {
+        kprintf("pkgd: component start failed (%s: %s)\n",
+                pkgd_sess.m.name, pkg_status_text(r));
+        (void)pkg_component_stop(pkgd_sess.m.name);
+        (void)remove_tree(pkgd_sess.root);
+        (void)db_remove_line(pkgd_sess.m.name, pkgd_sess.euid);
+        pkgd_session_reset();
+        return r;
+    }
+    pkgd_session_reset();
+    return PKG_OK;
+}
+
+static int pkgd_session_abort(void)
+{
+    if (!pkgd_sess.used) return PKG_OK;
+
+    if (pkgd_sess.committed) {
+        if (pkgd_sess.have_elf) {
+            (void)pkg_component_stop(pkgd_sess.m.name);
+        }
+        (void)remove_tree(pkgd_sess.root);
+        (void)db_remove_line(pkgd_sess.m.name, pkgd_sess.euid);
+    } else {
+        (void)remove_tree(pkgd_sess.stage);
+    }
+    pkgd_session_reset();
+    return PKG_OK;
+}
+
+/* ---- 卸载会话 ---- */
+static int pkgd_remove_begin(uint32_t uptr)
+{
+    char name[PKG_NAME_MAX];
+    char line[PKG_DB_LINE_MAX];
+    char type[16];
+    char root[FS_PATH_MAX];
+    char program[PKG_ENTRY_MAX];
+    uint32_t euid = pkgd_client_euid();
+
+    if (pkgd_rem.used) return PKG_E_BUSY;
+    if (pkgd_copy_user_string(name, sizeof(name), uptr) != 0) {
+        return PKG_E_FORMAT;
+    }
+    if (db_find(name, euid, line, sizeof(line)) != 0) {
+        if (!pkg_euid_is_admin(euid) &&
+            db_find(name, 0U, line, sizeof(line)) == 0) {
+            return PKG_E_POLICY;
+        }
+        return PKG_E_NOENT;
+    }
+    if (db_field(line, "type", type, sizeof(type)) != 0 ||
+        db_field(line, "root", root, sizeof(root)) != 0) {
+        return PKG_E_IO;
+    }
+    if (!pkg_euid_is_admin(euid) && strcmp(type, "app") != 0) {
+        return PKG_E_POLICY;
+    }
+
+    program[0] = '\0';
+    if (db_field(line, "program", program, sizeof(program)) != 0) {
+        char entry[PKG_ENTRY_MAX];
+
+        if (db_field(line, "entry", entry, sizeof(entry)) == 0 &&
+            strchr(entry, '/') == 0) {
+            strncpy(program, entry, sizeof(program) - 1U);
+            program[sizeof(program) - 1U] = '\0';
+        }
+    }
+
+    pkgd_remove_reset();
+    pkgd_rem.used = true;
+    pkgd_rem.euid = euid;
+    strncpy(pkgd_rem.name, name, sizeof(pkgd_rem.name) - 1U);
+    strncpy(pkgd_rem.type, type, sizeof(pkgd_rem.type) - 1U);
+    strncpy(pkgd_rem.program, program, sizeof(pkgd_rem.program) - 1U);
+    strncpy(pkgd_rem.root, root, sizeof(pkgd_rem.root) - 1U);
+    return PKG_OK;
+}
+
+static int pkgd_remove_info(uint32_t uptr, uint32_t max)
+{
+    char info[256];
+    int n;
+
+    if (!pkgd_rem.used) return -1;
+    n = ksnprintf(info, sizeof(info), "type=%s program=%s root=%s",
+                  pkgd_rem.type, pkgd_rem.program, pkgd_rem.root);
+    if (n <= 0 || (uint32_t)n >= sizeof(info)) return -1;
+    if (uptr == 0U || max == 0U) return -1;
+    if ((uint32_t)n >= max) n = (int)max - 1;
+    if (copy_to_user((void *)(uintptr_t)uptr, info, (uint32_t)n + 1U) != E_OK) {
+        return -1;
+    }
+    return 0;
+}
+
+static int pkgd_remove_commit(void)
+{
+    char parent[FS_PATH_MAX];
+
+    if (!pkgd_rem.used) return PKG_E_IO;
+
+    (void)pkg_component_stop(pkgd_rem.name);
+    if (remove_tree(pkgd_rem.root) != 0) {
+        pkgd_remove_reset();
+        return PKG_E_IO;
+    }
+    if (component_parent(pkgd_rem.root, parent, sizeof(parent)) == 0) {
+        (void)fs_unlink(parent);
+    }
+    if (db_remove_line(pkgd_rem.name, pkgd_rem.euid) != 0) {
+        pkgd_remove_reset();
+        return PKG_E_IO;
+    }
+    kprintf("pkgd: removed %s\n", pkgd_rem.name);
+    pkgd_remove_reset();
+    return PKG_OK;
+}
+
+/* ---- DB 文本 / 已安装校验原语 ---- */
+static int pkgd_db_read(uint32_t uptr, uint32_t max)
+{
+    char path[FS_PATH_MAX];
+    uint8_t *text;
+    int len;
+    uint32_t euid = pkgd_client_euid();
+    int r = -1;
+
+    if (uptr == 0U || max == 0U) return -1;
+    if (max > PKG_DB_MAX) max = PKG_DB_MAX;
+    if (db_path(euid, path, sizeof(path)) != 0) return 0;   /* 没有 DB = 空 */
+    text = (uint8_t *)malloc(PKG_DB_MAX);
+    if (text == 0) return -1;
+    len = read_all(path, text, PKG_DB_MAX - 1U);
+    if (len < 0) { free(text); return -1; }
+    if (len == 0) {
+        if (max > 0U) {
+            text[0] = '\0';
+            (void)copy_to_user((void *)(uintptr_t)uptr, text, 1U);
+        }
+        free(text);
+        return 0;
+    }
+    if ((uint32_t)len >= max) len = (int)max - 1;
+    text[len] = '\0';
+    if (copy_to_user((void *)(uintptr_t)uptr, text, (uint32_t)len + 1U) == E_OK) {
+        r = len;
+    }
+    free(text);
+    return r;
+}
+
+static int pkgd_verify_raw(uint32_t uptr)
+{
+    char name[PKG_NAME_MAX];
+    char detail[48];
+
+    if (pkgd_copy_user_string(name, sizeof(name), uptr) != 0) {
+        return PKG_E_FORMAT;
+    }
+    detail[0] = '\0';
+    return pkg_verify_installed(name, pkgd_client_euid(), detail,
+                                sizeof(detail));
+}
+
+int pkgd_primitive(uint32_t op, uint32_t a, uint32_t b)
+{
+    int r;
+
+    if (!pkgd_daemon_ok()) return -1;
+
+    /* 落盘原语都在“签名更新器作用域”里执行：staging/rename/DB/删目录都是
+     * system:/System 下的写操作，SIP-lite 只对更新器放行。与 ring0 的
+     * pkg_install/pkg_remove 用同一机制，权限规则不变。 */
+    sip_updater_enter();
+    switch (op) {
+    case PKG_OP_SESSION_BEGIN:  r = pkgd_session_begin(a, b); break;
+    case PKG_OP_SESSION_INFO:   r = pkgd_session_info(a, b); break;
+    case PKG_OP_SESSION_STAGE:  r = pkgd_session_stage(a); break;
+    case PKG_OP_SESSION_COMMIT: r = pkgd_session_commit(); break;
+    case PKG_OP_SESSION_START:  r = pkgd_session_start(); break;
+    case PKG_OP_SESSION_ABORT:  r = pkgd_session_abort(); break;
+    case PKG_OP_REMOVE_BEGIN:   r = pkgd_remove_begin(a); break;
+    case PKG_OP_REMOVE_INFO:    r = pkgd_remove_info(a, b); break;
+    case PKG_OP_REMOVE_COMMIT:  r = pkgd_remove_commit(); break;
+    case PKG_OP_REMOVE_ABORT:   pkgd_remove_reset(); r = PKG_OK; break;
+    case PKG_OP_DB_READ:        r = pkgd_db_read(a, b); break;
+    case PKG_OP_VERIFY_RAW:     r = pkgd_verify_raw(a); break;
+    default:                    r = -1; break;
+    }
+    sip_updater_exit();
+    return r;
+}
+
+/* -------------------------------------------------------------------------
+ * ring3 ELF 加载（内嵌映像，内核镜像签名即信任根）
+ *
+ * 与 user_mode.c 的加载器同一套 PT_LOAD/W^X 规则，但映像来自内核镜像里的
+ * pkgd_user_blob（build.ps1 用 user.ld 链接、incbin 嵌入），不走文件系统，
+ * 也就不受 system:/bin 只接受 shell 签名映像的限制。
+ * ------------------------------------------------------------------------- */
+#define PKGD_PT_LOAD 1U
+#define PKGD_PF_X    1U
+#define PKGD_PF_W    2U
+
+static uint32_t pkgd_elf32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint16_t pkgd_elf16(const uint8_t *p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static int pkgd_elf_load(const uint8_t *img, uint32_t size, uint32_t *entry)
+{
+    uint32_t e_entry;
+    uint32_t e_phoff;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    int saw_text = 0;
+
+    if (img == 0 || size < 52U || entry == 0) return -1;
+    if (img[0] != 0x7FU || img[1] != 'E' || img[2] != 'L' || img[3] != 'F') {
+        return -1;
+    }
+    if (img[4] != 1U || img[5] != 1U) return -1;
+
+    e_entry = pkgd_elf32(img + 24);
+    e_phoff = pkgd_elf32(img + 28);
+    e_phentsize = pkgd_elf16(img + 42);
+    e_phnum = pkgd_elf16(img + 44);
+
+    if (e_phnum == 0U || e_phnum > 16U || e_phentsize < 32U) return -1;
+    if (e_phoff > size) return -1;
+    if (e_phnum > (size - e_phoff) / e_phentsize) return -1;
+
+    for (uint32_t i = 0; i < e_phnum; i++) {
+        const uint8_t *ph = img + e_phoff + i * e_phentsize;
+        uint32_t type = pkgd_elf32(ph + 0);
+        uint32_t off = pkgd_elf32(ph + 4);
+        uint32_t vaddr = pkgd_elf32(ph + 8);
+        uint32_t filesz = pkgd_elf32(ph + 16);
+        uint32_t memsz = pkgd_elf32(ph + 20);
+        uint32_t flags = pkgd_elf32(ph + 24);
+        uint32_t first;
+        uint32_t pages;
+        uint32_t map_flags;
+
+        if (type != PKGD_PT_LOAD || memsz == 0U) continue;
+        if (memsz < filesz) return -1;
+        if (vaddr < USER_LAYOUT_CODE_BASE || vaddr >= USER_LAYOUT_CODE_END) {
+            return -1;
+        }
+        if (memsz > USER_LAYOUT_CODE_END - vaddr) return -1;
+        if (off > size || filesz > size - off) return -1;
+        if ((flags & (PKGD_PF_W | PKGD_PF_X)) == (PKGD_PF_W | PKGD_PF_X)) {
+            return -1;
+        }
+        if ((flags & PKGD_PF_X) != 0U) saw_text = 1;
+
+        map_flags = PTE_PRESENT | PTE_USER;
+        if ((flags & PKGD_PF_W) != 0U) map_flags |= PTE_WRITE;
+        if ((flags & PKGD_PF_X) == 0U) map_flags |= PTE_NOEXEC;
+
+        first = vaddr & 0xFFFU;
+        pages = (first + memsz + 0xFFFU) >> 12;
+
+        for (uint32_t pi = 0; pi < pages; pi++) {
+            uint32_t va = (vaddr & 0xFFFFF000U) + (pi << 12);
+            uint32_t copy_off = (pi == 0U) ? first : 0U;
+            uint32_t seg_off = (va + copy_off) - vaddr;
+            void *phys = pmm_alloc_page();
+
+            if (phys == 0) return -1;
+            memset(phys, 0, 4096U);
+            if (seg_off < filesz) {
+                uint32_t n = 4096U - copy_off;
+
+                if (n > filesz - seg_off) n = filesz - seg_off;
+                memcpy((uint8_t *)phys + copy_off, img + off + seg_off, n);
+            }
+            if (vmm_map_user_page(va, (uint32_t)(uintptr_t)phys,
+                                  map_flags) != 0) {
+                return -1;
+            }
+        }
+    }
+
+    if (e_entry < USER_LAYOUT_CODE_BASE || e_entry >= USER_LAYOUT_CODE_END) {
+        return -1;
+    }
+    if (!saw_text) return -1;
+    *entry = e_entry;
+    return 0;
+}
+
+static uint32_t pkgd_build_stack(uint8_t *page)
+{
+    uint32_t sp = 4096U;
+
+    memset(page, 0, 4096U);
+    sp -= 4U; *(uint32_t *)(page + sp) = 0U;       /* argv NULL */
+    sp -= 4U; *(uint32_t *)(page + sp) = 0U;       /* argc = 0 */
+    sp -= 4U; *(uint32_t *)(page + sp) = 0U;       /* 假返回地址 */
+    return sp;
+}
+
+static int pkgd_map_trampoline(uint32_t va)
+{
+    static const uint8_t code[] = { 0xB8, 0x1F, 0x00, 0x00, 0x00, 0xCD, 0x81 };
+    void *page = pmm_alloc_page();
+    uint32_t i;
+    int r;
+
+    if (page == 0) return -1;
+    memset(page, 0, 4096U);
+    for (i = 0; i < sizeof(code); i++) ((uint8_t *)page)[i] = code[i];
+    r = vmm_map_user_page(va, (uint32_t)(uintptr_t)page,
+                          PTE_PRESENT | PTE_USER);
+    if (r != 0) pmm_free_pages(page, 1);
+    return r;
+}
+
+static void pkgd_ring3_install_image(void)
+{
+    uint32_t size = (uint32_t)(uintptr_t)(pkgd_user_blob_end -
+                                          pkgd_user_blob_start);
+    fs_stat_t st;
+
+    if (size < 52U) {
+        kprintln("pkgd: ring3 image missing");
+        return;
+    }
+    /* 同一次启动里重启（svcwatch）时文件已经是本次内核映像里的同一份，
+     * 不重写：既省 IO，也避开 SIP 单一 updater scope 与其他线程并发时的
+     * 作用域竞争（SIP 的限制，不在本会话改 fs 目录）。 */
+    if (fs_stat("system:/bin/pkgd", &st) == E_OK &&
+        st.type == FS_TYPE_FILE && st.size == size) {
+        kprintln("pkgd: ring3 image present (system:/bin/pkgd)");
+        return;
+    }
+
+    for (uint32_t i = 0; i < 4U; i++) {
+        sip_updater_enter();
+        ensure_dir("system:/System");
+        ensure_dir("system:/bin");
+        if (write_replace("system:/bin/pkgd", pkgd_user_blob_start, size) == 0) {
+            sip_updater_exit();
+            kprintf("pkgd: ring3 image installed (system:/bin/pkgd %u bytes)\n",
+                    (unsigned int)size);
+            return;
+        }
+        sip_updater_exit();
+        proc_sleep_ticks(2U);
+    }
+    kprintln("pkgd: ring3 image write failed (launch from kernel blob)");
+}
+
+/* 成功时进入 ring3、不返回；失败返回 -1。 */
+static int pkgd_ring3_launch(void)
+{
+    proc_t *p = proc_current();
+    uint32_t size = (uint32_t)(uintptr_t)(pkgd_user_blob_end -
+                                          pkgd_user_blob_start);
+    uint32_t entry = 0;
+    uint32_t stack_va;
+    uint32_t sp;
+    void *stack_phys;
+
+    if (p == 0) return -1;
+    if (pkgd_elf_load(pkgd_user_blob_start, size, &entry) != 0) {
+        kprintln("pkgd: ring3 ELF load failed");
+        return -1;
+    }
+    stack_phys = pmm_alloc_page();
+    if (stack_phys == 0) return -1;
+    stack_va = (p->user_stack_va != 0U) ? p->user_stack_va
+                                        : USER_LAYOUT_STACK_INIT;
+    sp = pkgd_build_stack((uint8_t *)stack_phys);
+    if (vmm_map_user_page(stack_va, (uint32_t)(uintptr_t)stack_phys,
+                          PTE_PRESENT | PTE_WRITE | PTE_USER) != 0) {
+        return -1;
+    }
+    (void)pkgd_map_trampoline((p->user_trampoline != 0U)
+                                  ? p->user_trampoline
+                                  : USER_LAYOUT_TRAMPOLINE);
+
+    p->is_user = true;
+    tss_set_esp0((uint32_t)(uintptr_t)p->stack_top);
+    kprintf("pkgd: entering ring3 (pkgd elf=%u bytes entry=%p pid=%u)\n",
+            (unsigned int)size, (void *)(uintptr_t)entry, p->pid);
+    user_enter(entry, stack_va + sp);
+    return -1;
+}
+
+/* -------------------------------------------------------------------------
+ * 公开入口
+ * ------------------------------------------------------------------------- */
+void pkgd_init(void)
+{
+    int mode = pkgd_mode();
+
+    kprintf("pkgd: mode=%s\n", pkgd_mode_name(mode));
+    if (mode == PKGD_MODE_RING0) {
+        pkgd_ring0_start();
+    } else {
+        kprintln("pkgd: ring3 daemon launch deferred to pkgd thread");
+    }
+}
+
+void pkgd_entry(void)
+{
+    int mode = pkgd_mode();
+
+    if (mode != PKGD_MODE_RING0) {
+        /* 等 supervisor 线程跑完启动期自检（svc_selftest 会用虚拟 now 驱动
+         * 整张表；已注册的服务会被误判心跳超时）。生产构建里 supervisor
+         * 线程一启动就置位，这里几乎不等待。 */
+        for (uint32_t i = 0; i < 1000U && !pkgd_sup_ready; i++) {
+            proc_sleep_ticks(1U);
+        }
+        pkgd_ring3_install_image();
+        kprintln("pkgd: launching ring3 daemon");
+        if (pkgd_ring3_launch() != 0) {
+            kprintf("pkgd: ring3 launch failed (mode=%s)\n",
+                    pkgd_mode_name(mode));
+            if (mode == PKGD_MODE_RING3) {
+                kprintln("pkgd: ring3 forced, no ring0 fallback");
+                return;
+            }
+            kprintln("pkgd: ring3 unavailable -> ring0 fallback");
+        } else {
+            return;                         /* 已进入 ring3，不返回 */
+        }
+    }
+    pkgd_ring0_start();
+    pkgd_ring0_loop();
+}
+
+/* 文本协议（pkgd_request）：内部走和 SYS_PKG 相同的路由。 */
+int pkgd_request(const char *cmd, char *reply, uint32_t max)
+{
+    char detail[64];
+    int r;
+    int n;
+
+    if (cmd == 0 || reply == 0 || max == 0U) return -1;
+    detail[0] = '\0';
+
+    if (strncmp(cmd, "install ", 8) == 0) {
+        r = pkgd_cli_install(cmd + 8, 0U, detail, sizeof(detail));
+    } else if (strncmp(cmd, "remove ", 7) == 0) {
+        r = pkgd_cli_remove(cmd + 7, 0U, detail, sizeof(detail));
+    } else if (strncmp(cmd, "verify ", 7) == 0) {
+        r = pkgd_cli_verify(cmd + 7, 0U, detail, sizeof(detail));
+    } else if (strcmp(cmd, "list") == 0) {
+        r = pkgd_cli_list(0U, detail, sizeof(detail)) > 0U ? PKG_OK
+                                                           : PKG_E_NOENT;
+        if (r == PKG_OK) {
+            detail[sizeof(detail) - 1U] = '\0';
+        }
+    } else {
+        r = PKG_E_FORMAT;
+        set_msg(detail, sizeof(detail), "usage: install|remove|list|verify");
+    }
+
+    if (r == PKG_OK) {
+        n = ksnprintf(reply, max, "ok %s", detail);
+    } else {
+        n = ksnprintf(reply, max, "err %d %s", r, detail);
+    }
+    if (n < 0) n = 0;
+    if ((uint32_t)n >= max) n = (int)max - 1;
+    reply[n] = '\0';
+    return n;
+}
+
+/* =========================================================================
+ * P4：ring3 pkgd 自检（-Test 构建，pkgtest 线程在 pkg 回归之后调用）
+ * ========================================================================= */
+static int pkgd_text_contains(const char *hay, const char *needle)
+{
+    uint32_t n = (uint32_t)strlen(needle);
+
+    if (hay == 0 || needle == 0) return 0;
+    while (*hay != '\0') {
+        if (strncmp(hay, needle, n) == 0) return 1;
+        hay++;
+    }
+    return 0;
+}
+
+static uint32_t pkgd_find_user_proc(const char *name)
+{
+    for (uint32_t i = 0; i < proc_count(); i++) {
+        const proc_t *p = proc_at(i);
+
+        if (p == 0 || p->name == 0) continue;
+        if (strcmp(p->name, name) != 0) continue;
+        if (!p->is_user) continue;
+        if (p->state == PROC_FREE || p->state == PROC_ZOMBIE) continue;
+        return p->pid;
+    }
+    return 0;
+}
+
+static int pkgd_wait_service(const char *name, int want, uint32_t ticks)
+{
+    for (uint32_t i = 0; i < ticks; i++) {
+        if (service_exists(name) == want) return 0;
+        proc_sleep_ticks(1U);
+    }
+    return (service_exists(name) == want) ? 0 : -1;
+}
+
+void pkgd_selftest(void)
+{
+    const pkg_blob_t *blob = pkg_catalog_find("echosvc-1.0.0.pkg");
+    char detail[96];
+    char list[256];
+    char tmp_path[] = "system:/tmp/pkgd-echosvc.pkg";
+    uint32_t count;
+    uint32_t old_pid = 0;
+    uint32_t new_pid = 0;
+    uint32_t shell_pid;
+    uint32_t ticks0;
+    uint32_t port = 0;
+    int r;
+    int online = 0;
+
+    if (!boot_test_build()) return;
+
+    kprintf("pkgd: mode=%s\n", pkgd_mode_name(pkgd_mode()));
+
+    /* 1) 等 ring3 守护进程上线（svc 注册表 + 进程存活 + IPC 端口有效） */
+    for (uint32_t i = 0; i < 500U; i++) {
+        if (pkgd_ring3_online()) { online = 1; break; }
+        proc_sleep_ticks(1U);
+    }
+    if (!online) {
+        kprintln("pkgd: ring3 online FAILED");
+        return;
+    }
+    (void)svc_registry_lookup(PKGD_SERVICE_NAME, &port);
+    kprintf("pkgd: ring3 online (pid=%u port=%u)\n",
+            (unsigned int)pkgd_ring3_pid(), (unsigned int)port);
+
+    /* 2) list 走 ring3：内核只给 DB 文本，解析/过滤在守护进程里 */
+    count = pkgd_cli_list(0U, list, sizeof(list));
+    if (count > 0U && pkgd_text_contains(list, "echosvc 1.0.0 service")) {
+        kprintln("pkgd: ring3 list ok");
+    } else {
+        kprintf("pkgd: ring3 list FAILED (%s)\n", list);
+    }
+
+    /* 3) verify 走 ring3 */
+    detail[0] = '\0';
+    r = pkgd_cli_verify("echosvc", 0U, detail, sizeof(detail));
+    if (r == PKG_OK) {
+        kprintln("pkgd: ring3 verify ok");
+    } else {
+        kprintf("pkgd: ring3 verify FAILED (%s)\n", detail);
+    }
+
+    /* 4) 真实 .pkg 文件放进 /tmp：确认 ring3 守护进程自己读包 */
+    if (blob != 0) {
+        (void)fs_unlink(tmp_path);
+        if (write_replace(tmp_path, blob->data, blob->len) != 0) {
+            kprintln("pkgd: ring3 pkg file stage FAILED");
+        }
+    }
+
+    /* 5) ring3 卸载 -> ring3 安装（安装路径用文件，覆盖“ring3 读包文件”） */
+    detail[0] = '\0';
+    r = pkgd_cli_remove("echosvc", 0U, detail, sizeof(detail));
+    if (r == PKG_OK) {
+        (void)pkgd_wait_service("echosvc", 0, 300U);
+        kprintln("pkgd: ring3 remove ok");
+        /* ring3 卸载会 stop 掉 legacy echo；等 svcwatch 的 echo 看护重启它，
+         * 既确认旧 watchdog 仍工作，也让既有回归断言有稳定来源。 */
+        for (uint32_t i = 0; i < 150U; i++) {
+            if (service_exists("echo")) break;
+            proc_sleep_ticks(1U);
+        }
+        if (blob != 0) {
+            detail[0] = '\0';
+            r = pkgd_cli_install(tmp_path, 0U, detail, sizeof(detail));
+            if (r == PKG_OK) {
+                (void)pkgd_wait_service("echosvc", 1, 600U);
+                kprintln("pkgd: ring3 install ok (echosvc)");
+                if (service_exists("echosvc")) {
+                    kprintln("pkgd: ring3 service online ok");
+                } else {
+                    kprintln("pkgd: ring3 service online FAILED");
+                }
+            } else {
+                kprintf("pkgd: ring3 install FAILED (%s)\n", detail);
+            }
+        }
+    } else {
+        kprintf("pkgd: ring3 remove FAILED (%s)\n", detail);
+    }
+    (void)fs_unlink(tmp_path);
+
+    /* 6) 故障隔离：杀掉 pkgd，内核与 shell 必须活着 */
+    old_pid = pkgd_ring3_pid();
+    shell_pid = pkgd_find_user_proc("shell");
+    if (old_pid != 0U) {
+        proc_t *p = proc_find(old_pid);
+
+        if (p != 0) proc_send_signal(p, SIGKILL);
+        ticks0 = timer_ticks();
+        for (uint32_t i = 0; i < 300U; i++) {
+            if (pkgd_ring3_online() == 0) break;
+            proc_sleep_ticks(1U);
+        }
+        shell_pid = pkgd_find_user_proc("shell");
+        if (shell_pid != 0U && timer_ticks() != ticks0) {
+            kprintf("pkgd: ring3 kill isolation ok (shell pid=%u alive, +%u ticks)\n",
+                    (unsigned int)shell_pid,
+                    (unsigned int)(timer_ticks() - ticks0));
+        } else {
+            kprintf("pkgd: ring3 kill isolation FAILED (shell pid=%u)\n",
+                    (unsigned int)shell_pid);
+        }
+
+        /* 7) ring3 不可用 -> auto 回退 ring0（不依赖 svcwatch 重启时序） */
+        detail[0] = '\0';
+        r = pkgd_cli_verify("echosvc", 0U, detail, sizeof(detail));
+        if (r == PKG_OK) {
+            kprintln("pkgd: fallback ring0 ok");
+        } else {
+            kprintf("pkgd: fallback ring0 FAILED (%s)\n", detail);
+        }
+    } else {
+        kprintln("pkgd: ring3 kill isolation FAILED (no pid)");
+    }
+
+    /* 8) svcwatch 按 restart=always 重启，客户端重新 lookup 拿到新 port */
+    for (uint32_t i = 0; i < 800U; i++) {
+        if (pkgd_ring3_online()) {
+            new_pid = pkgd_ring3_pid();
+            if (new_pid != 0U && new_pid != old_pid) break;
+        }
+        proc_sleep_ticks(1U);
+    }
+    if (new_pid != 0U && new_pid != old_pid) {
+        kprintf("pkgd: svcwatch restart ok (pid=%u -> %u)\n",
+                (unsigned int)old_pid, (unsigned int)new_pid);
+    } else {
+        kprintln("pkgd: svcwatch restart FAILED");
+    }
+
+    /* 9) 强制 ring0 入口：pkgd=ring0 的语义（不经过 ring3 守护进程） */
+    pkgd_test_set_mode(PKGD_MODE_RING0);
+    detail[0] = '\0';
+    r = pkgd_cli_verify("echosvc", 0U, detail, sizeof(detail));
+    if (r == PKG_OK) {
+        kprintln("pkgd: ring0 mode verify ok");
+    } else {
+        kprintf("pkgd: ring0 mode verify FAILED (%s)\n", detail);
+    }
+    pkgd_test_set_mode(-1);
+
+    kprintln("pkgd: selftest PASS");
 }
