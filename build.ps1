@@ -946,7 +946,19 @@ if ($Test -or $Shot) {
             @{ Name = 'klog 环 64KB';              Ok = ($out.Contains('klog: ring 64KB ok')) },
             @{ Name = 'klog 截断';                 Ok = ($out.Contains('klog: truncate ok')) },
             @{ Name = 'dmesg syscall';             Ok = ($out.Contains('dmesg: syscall ok')) },
-            @{ Name = 'dmesg 自检通过';            Ok = ($out.Contains('dmesg: selftest PASS')) }
+            @{ Name = 'dmesg 自检通过';            Ok = ($out.Contains('dmesg: selftest PASS')) },
+            # ---- 三层 P3：服务注册/生命周期（2026-10-31）----
+            @{ Name = 'svc 注册';                  Ok = ($out.Contains('svc: register ok')) },
+            @{ Name = 'svc 查找';                  Ok = ($out.Contains('svc: lookup ok')) },
+            @{ Name = 'svc 重名拒绝';              Ok = ($out.Contains('svc: duplicate rejected')) },
+            @{ Name = 'svc 非 root 注册拒绝';      Ok = ($out.Contains('svc: non-root register denied')) },
+            @{ Name = 'svc 依赖拓扑';              Ok = ($out.Contains('svc: dependency order ok')) },
+            @{ Name = 'svc 循环拒绝';              Ok = ($out.Contains('svc: cycle rejected')) },
+            @{ Name = 'svc 心跳超时';              Ok = ($out.Contains('svc: heartbeat timeout -> unhealthy')) },
+            @{ Name = 'svc 失败重启';              Ok = ($out.Contains('svc: restart on-failure ok')) },
+            @{ Name = 'svc 超限隔离';              Ok = ($out.Contains('svc: quarantine after limit ok')) },
+            @{ Name = 'svc 服务日志';              Ok = ($out.Contains('svc: log write ok')) },
+            @{ Name = 'svc 自检通过';              Ok = ($out.Contains('svc: selftest PASS')) }
         )
 
         T 'checks begin'
