@@ -69,6 +69,33 @@ payload 紧随头部；capability 数组紧随 payload（每项 8 字节：`u32 
 `SYS_CAP_GRANT(port, cap_type, id, rights)`：把已有 cap 授予某端口（内核校验来源）。
 规则：cap 只能由持有者授予；`CAP_MMIO/DMA/IRQ` 仅 root 或 `CAP_SYS_ADMIN`。
 
+### 3.4 pkgd 的请求/回复帧（P4 契约补充）
+
+`pkgd` 的客户端命令仍走 `SYS_PKG(77)`（`ebx=op, ecx=a, edx=b`）。内核分发器
+按启动模式选择 ring3 或 ring0，并在 ring3 路径上把请求封成 16B IPC 头之后的
+payload（小端）：
+
+| 请求 | 布局 |
+|---|---|
+| `magic` | `0x504B4732`（"PKG2"） |
+| `ticket` | 内核为调用者建的回复端口 ticket（`(pid<<16)|port`） |
+| `req_id` | 分发器单调递增，用于校验迟到/错配回复 |
+| `op` | 0 LIST / 1 INSTALL / 2 REMOVE / 3 VERIFY |
+| `euid` | 内核记录的调用者 euid（ring3 pkgd 不得自行声明） |
+| `arg_len` / `arg` | 组件名或包路径（≤192B） |
+
+| 回复 | 布局 |
+|---|---|
+| `magic` | `0x504B4733`（"PKG3"） |
+| `req_id` | 回显请求 id |
+| `status` | 0 / `PKG_E_*`（负） |
+| `count` | LIST 的组件条数 |
+| `text_len` / `text` | `ok ...` / `err ...` 或列表文本 |
+
+内核分发器同一时刻只允许一个未完成请求；ring3 不可用时 auto 模式回退 ring0
+（见 §9）。ring3 pkgd 回调内核的“验签/落盘原语”复用 `SYS_PKG` 的 6..17 号
+op（`include/pkg.h`），**不新增系统调用号**。
+
 ## 4. syscall 预留（ABI 1.5）
 
 | 号 | 名称 | 用途 |
@@ -92,6 +119,11 @@ payload 紧随头部；capability 数组紧随 payload（每项 8 字节：`u32 
 
 未实现编号必须返回 `-1`，不得 panic。
 
+**P4 补充**：`SYS_PKG(77)` 的 op 空间在 v1.4 的 0..5 之后追加 6..17，作为
+ring3 pkgd 的验签/落盘原语（SESSION_*/REMOVE_*/DB_READ/VERIFY_RAW，见
+`docs/claims/pkgd.md` §2）。这是模块 op 契约扩展，不是新 syscall；`abi.h`
+不变。原语只接受已注册的 ring3 pkgd（pid 匹配 + root + ring3）。
+
 ## 5. 服务清单（manifest）
 
 ```ini
@@ -108,6 +140,13 @@ uid=0
 
 `supervisor` 按 `requires` 拓扑启动；`svcwatch` 按 `restart` 策略重启（指数退避 1s/2s/4s，上限 3 次，之后 quarantine）。
 
+P4 起 `pkgd` 的 manifest 由 ring3 守护进程自己用 `SYS_SVC_REGISTER` 登记
+（`name=pkgd, entry=pkgd, restart=always, restart_limit=3`）。svcwatch 重启时
+`proc_spawn("pkgd")` 拉起的是程序表里的启动线程，该线程把内嵌 ELF 映射进
+ring3 后**同一个 pid** 继续运行，因此注册表里的 pid 在重启前后都指向真正的
+ring3 实例。`supervisor_entry()` 在启动期自检（`svc_selftest` 用虚拟时钟驱动
+整张表）结束后调用 `pkgd_supervisor_ready()`，ring3 pkgd 等这个标志再注册。
+
 ## 6. 驱动模型
 
 - 内核 `dev_ops` 契约保留，两种实现：`ring0`（现状，回退）与 `ring3`（服务）。
@@ -121,6 +160,7 @@ uid=0
 | 故障 | 行为 |
 |---|---|
 | 服务崩溃 | 内核回收端口/fd/cap；supervisor 按策略重启 |
+| pkgd 崩溃（P4） | 内核/shell 不受影响；svcwatch 按 `restart=always` 重启；分发器 `svc_lookup` 失败期间 auto 回退 ring0；客户端重新 lookup 拿新 port |
 | 客户端调用超时 | 返回 `-ETIMEDOUT`；可重连 |
 | 驱动设备无响应 | 超时 → 设备 reset → 3 次失败 → quarantine，返回 `E_IO` |
 | 内核 panic | 仅机制损坏；设备/服务错误不得 panic |
@@ -134,7 +174,7 @@ uid=0
 | P1 | IPC + capability + ulib | 两个服务互发/回复；cap 传递；254+ 全绿 |
 | P2 | dmesg + logd（可选合并） | `dmesg` 可读最近 N 行；服务日志 |
 | P3 | 服务注册 + supervisor 拓扑 + 重启 | 依赖启动、杀服务自动重启、客户端重连 |
-| P4 | pkgd 迁 ring3 | 安装/卸载全走 ring3；回退 ring0 |
+| P4 | pkgd 迁 ring3 | **已交付**：安装/卸载全走 ring3；`pkgd=auto/ring0/ring3`；杀 pkgd 内核/shell 不死 + svcwatch 重启 + auto 回退；299/299 ×2 |
 | P5 | blkd / inputd ring3 | 杀驱动内核不死；8h 浸泡 |
 | P6 | netd ring3 + vIOMMU | 吞吐 ≥ ring0 70%；故障隔离；8h 浸泡 |
 | P7 | 程序层 SDK + 示例 app | 新服务/app 只需 manifest + 入口 |
