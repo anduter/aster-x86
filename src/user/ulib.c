@@ -23,6 +23,82 @@ int abi_version(void)
     return syscall3(SYS_ABI_VERSION, 0, 0, 0);
 }
 
+/* ---- IPC（ABI 1.5 预留 80..84） ---- */
+
+static void ipc_hdr_put(unsigned char *f, unsigned int type,
+                        unsigned int flags, unsigned int plen)
+{
+    struct ipc_msg_hdr *h = (struct ipc_msg_hdr *)f;
+
+    h->magic = IPC_MAGIC;
+    h->type = type;
+    h->flags = (unsigned short)flags;
+    h->ncaps = 0;
+    h->len = plen;
+}
+
+int port_create(int flags)
+{
+    return syscall3(SYS_PORT_CREATE, flags, 0, 0);
+}
+
+int port_send_raw(int port, const void *msg, int len)
+{
+    return syscall3(SYS_PORT_SEND, port, (int)msg, len);
+}
+
+int port_send(int port, unsigned int type, unsigned int flags,
+              const void *payload, int len)
+{
+    unsigned char frame[IPC_HDR_SIZE + IPC_PAYLOAD_MAX];
+
+    if (len < 0 || len > IPC_PAYLOAD_MAX) return -1;
+    if (len > 0 && payload == 0) return -1;
+    ipc_hdr_put(frame, type, flags, (unsigned int)len);
+    memcpy(frame + IPC_HDR_SIZE, payload, (usize)len);
+    return port_send_raw(port, frame, IPC_HDR_SIZE + len);
+}
+
+int port_recv(int port, void *buf, int maxlen)
+{
+    return syscall3(SYS_PORT_RECV, port, (int)buf, maxlen);
+}
+
+int port_reply_raw(int ticket, const void *msg, int len)
+{
+    return syscall3(SYS_PORT_REPLY, ticket, (int)msg, len);
+}
+
+int port_reply(int ticket, unsigned int type, const void *payload, int len)
+{
+    unsigned char frame[IPC_HDR_SIZE + IPC_PAYLOAD_MAX];
+
+    if (len < 0 || len > IPC_PAYLOAD_MAX) return -1;
+    if (len > 0 && payload == 0) return -1;
+    ipc_hdr_put(frame, type, 0, (unsigned int)len);
+    memcpy(frame + IPC_HDR_SIZE, payload, (usize)len);
+    return port_reply_raw(ticket, frame, IPC_HDR_SIZE + len);
+}
+
+int cap_grant(int port, int type, int id, int rights)
+{
+    int r;
+
+    /* abi.h 注释只列 ebx/ecx/edx；rights 走 esi（0 = 默认 RW）。
+     * 内核中断现场保存了 esi，见 svc/svc_syscall.c 的 SYS_CAP_GRANT。 */
+    __asm__ volatile ("int $0x81"
+                      : "=a"(r)
+                      : "a"(SYS_CAP_GRANT), "b"(port), "c"(type), "d"(id),
+                        "S"(rights)
+                      : "memory");
+    return r;
+}
+
+int port_ticket(int port)
+{
+    return (syscall3(SYS_GETPID, 0, 0, 0) << 16) | (port & 0xFFFF);
+}
+
 static usize utoa(unsigned int v, char *buf, unsigned int base)
 {
     char tmp[16];
@@ -268,4 +344,17 @@ void *memset(void *d, int c, usize n)
     unsigned char *dp = (unsigned char *)d;
     while (n-- > 0U) *dp++ = (unsigned char)c;
     return d;
+}
+
+int memcmp(const void *a, const void *b, usize n)
+{
+    const unsigned char *ap = (const unsigned char *)a;
+    const unsigned char *bp = (const unsigned char *)b;
+
+    while (n-- > 0U) {
+        if (*ap != *bp) return (int)*ap - (int)*bp;
+        ap++;
+        bp++;
+    }
+    return 0;
 }

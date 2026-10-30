@@ -13,6 +13,56 @@ int syscall3(int n, int a, int b, int c);
 /* SYS_ABI_VERSION 的标量封装：高 16 位 ABI major，低 16 位 feature bits */
 int abi_version(void);
 
+/* ---- IPC（ABI 1.5 预留：SYS_PORT_CREATE/SEND/RECV/REPLY/CAP_GRANT = 80..84）
+ *
+ * 消息帧 = 16B 头（magic/type/flags/ncaps/len）+ payload + cap 数组
+ * （每项 8B：type/id）。port_send/port_reply 负责组头，payload ≤ 4096。
+ * 端口 id 是内核返回的不透明句柄（带 generation）；ticket = (pid<<16)|port，
+ * 由 port_ticket() 给出，请求方把它放进业务 payload 交给服务。
+ * 失败返回 -1；超时返回 -IPC_EAGAIN；被信号打断返回 -IPC_EINTR。 */
+#define IPC_MAGIC        0x49504331U
+#define IPC_HDR_SIZE     16
+#define IPC_PAYLOAD_MAX  4096
+#define IPC_NCAPS_MAX    4
+
+#define IPC_F_NEED_REPLY 0x1
+#define IPC_F_NO_REPLY   0x2
+
+#define IPC_CAP_PORT     1
+#define IPC_CAP_MMIO     2
+#define IPC_CAP_IRQ      3
+#define IPC_CAP_DMA      4
+#define IPC_CAP_FILE     5
+#define IPC_CAP_SOCKET   6
+
+#define IPC_RIGHT_READ   0x1
+#define IPC_RIGHT_WRITE  0x2
+#define IPC_RIGHTS_DEFAULT (IPC_RIGHT_READ | IPC_RIGHT_WRITE)
+
+#define IPC_EINTR        4
+#define IPC_EAGAIN       11
+
+struct ipc_msg_hdr {
+    unsigned int   magic;
+    unsigned int   type;
+    unsigned short flags;
+    unsigned short ncaps;
+    unsigned int   len;
+} __attribute__((packed));
+
+int port_create(int flags);
+/* 直接发送已组好的整帧（含 16B 头）；len 是整帧长度。 */
+int port_send_raw(int port, const void *msg, int len);
+int port_send(int port, unsigned int type, unsigned int flags,
+              const void *payload, int len);
+int port_recv(int port, void *buf, int maxlen);
+int port_reply_raw(int ticket, const void *msg, int len);
+int port_reply(int ticket, unsigned int type, const void *payload, int len);
+/* rights 走第 4 个寄存器（esi），0 = 默认 RW；见 docs/claims/ipc.md。 */
+int cap_grant(int port, int type, int id, int rights);
+/* 请求方 ticket：(本进程 pid << 16) | 端口句柄 */
+int port_ticket(int port);
+
 /* 改名/移动（同卷内）。newpath 是完整目标路径，不做 `mv` 的"移入目录"语义。
  * 成功返回 0，失败返回 -1（跨卷/目标非空目录/权限不足都算失败）。 */
 static inline int fs_rename(const char *oldpath, const char *newpath)
@@ -177,5 +227,6 @@ int strcmp(const char *a, const char *b);
 char *strcpy(char *d, const char *s);
 void *memcpy(void *d, const void *s, usize n);
 void *memset(void *d, int c, usize n);
+int memcmp(const void *a, const void *b, usize n);
 
 #endif

@@ -1232,6 +1232,179 @@ static void chroot_symlink_selftest(void)
 }
 #endif
 
+/* ---------------- IPC（ABI 1.5，SYS_PORT_* 80..84） ----------------
+ *
+ * ring3 样例：driver 进程建两个端口，fork 一个 server：driver 发请求（payload
+ * 里带自己的 ticket），server recv 后 reply，driver 收 "pong"。再验证：
+ *   - 阻塞 RECV 被 SIGINT 打断返回 -EINTR；
+ *   - root 可授 MMIO cap，普通用户（降权后）授自己的端口也被拒。
+ * 整个 demo 在 fork 出来的 driver 里跑：driver 退出后它创建的端口由内核
+ * 在下次 create 时按“owner 已消失”回收，所以 sectest 反复跑不会耗尽端口表。 */
+static volatile int ipc_ring_sig_seen;
+
+static void ipc_ring_sig_handler(int sig)
+{
+    (void)sig;
+    ipc_ring_sig_seen = 1;
+}
+
+static int ipc_ring_server(int srv)
+{
+    unsigned char buf[128];
+    struct ipc_msg_hdr *h = (struct ipc_msg_hdr *)buf;
+    int n;
+    int ticket;
+
+    n = port_recv(srv, buf, (int)sizeof(buf));
+    if (n < IPC_HDR_SIZE || h->magic != IPC_MAGIC || h->len < 4) return 1;
+    memcpy(&ticket, buf + IPC_HDR_SIZE, 4);
+    if (port_reply(ticket, 2, "pong", 4) != 0) return 1;
+    putstr("ipc: ring3 server reply ok\n");
+    return 0;
+}
+
+static int ipc_ring_driver(void)
+{
+    unsigned char buf[128];
+    struct ipc_msg_hdr *h = (struct ipc_msg_hdr *)buf;
+    int srv, cli;
+    int pid, st, n;
+    int ticket;
+    int ok = 1;
+
+    srv = port_create(0);
+    cli = port_create(0);
+    if (srv <= 0 || cli <= 0) return 1;
+    ticket = port_ticket(cli);
+
+    /* 1) ping -> reply */
+    if (port_send(srv, 1, IPC_F_NEED_REPLY, &ticket, 4) != 0) ok = 0;
+    pid = sc(SYS_FORK, 0, 0, 0);
+    if (pid == 0) {
+        sc(SYS_EXIT, ipc_ring_server(srv), 0, 0);
+    }
+    if (pid < 0) ok = 0;
+    if (ok) {
+        n = port_recv(cli, buf, (int)sizeof(buf));
+        if (n != IPC_HDR_SIZE + 4 || h->magic != IPC_MAGIC || h->type != 2 ||
+            memcmp(buf + IPC_HDR_SIZE, "pong", 4) != 0) {
+            ok = 0;
+        }
+    }
+    if (pid > 0) {
+        st = -1;
+        sc(SYS_WAIT, pid, (int)&st, 0);
+        if (st != 0) ok = 0;
+    }
+    if (ok) {
+        putstr("ipc: ring3 port ping ok\n");
+        putstr("ipc: ring3 reply ok\n");
+    } else {
+        putstr("ipc: ring3 ping/reply FAIL\n");
+    }
+
+    /* 2) 阻塞 RECV 被 SIGINT 打断 -> -EINTR（handler 已装，进程不退出） */
+    {
+        int eport = port_create(0);
+        int sync[2];
+
+        if (eport > 0 && sc(SYS_PIPE, (int)sync, 0, 0) == 0) {
+            pid = sc(SYS_FORK, 0, 0, 0);
+            if (pid == 0) {
+                char go = 'x';
+                int r;
+
+                sc(SYS_CLOSE, sync[0], 0, 0);
+                ipc_ring_sig_seen = 0;
+                sc(SYS_SIGACTION, 2, (int)ipc_ring_sig_handler, 0);
+                sc(SYS_FWRITE, sync[1], (int)&go, 1);
+                sc(SYS_CLOSE, sync[1], 0, 0);
+                r = port_recv(eport, buf, (int)sizeof(buf));
+                if (r == -IPC_EINTR && ipc_ring_sig_seen != 0) {
+                    putstr("ipc: ring3 recv EINTR ok\n");
+                    sc(SYS_EXIT, 0, 0, 0);
+                }
+                printf("ipc: ring3 recv EINTR FAIL (r=%d sig=%d)\n",
+                       r, (int)ipc_ring_sig_seen);
+                sc(SYS_EXIT, 1, 0, 0);
+            }
+            if (pid > 0) {
+                char go = 0;
+
+                sc(SYS_CLOSE, sync[1], 0, 0);
+                /* 等子进程写出“马上要睡在 recv 上”再发信号 */
+                sc(SYS_FREAD, sync[0], (int)&go, 1);
+                sc(SYS_CLOSE, sync[0], 0, 0);
+                sc(SYS_SLEEP, 100, 0, 0);
+                sc(SYS_KILL, pid, 2, 0);
+                st = -1;
+                sc(SYS_WAIT, pid, (int)&st, 0);
+                if (st != 0) ok = 0;
+            } else {
+                sc(SYS_CLOSE, sync[0], 0, 0);
+                sc(SYS_CLOSE, sync[1], 0, 0);
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+    }
+
+    /* 3) cap 授予权限矩阵：root 可授硬件 cap；降权进程连自己的端口也授不了 */
+    {
+        int r = cap_grant(srv, IPC_CAP_MMIO, 0xFEBC0000, IPC_RIGHTS_DEFAULT);
+
+        if (sc(SYS_GETEUID, 0, 0, 0) != 0) {
+            putstr("ipc: ring3 cap grant SKIP (non-root)\n");
+        } else if (r == 0) {
+            putstr("ipc: ring3 cap grant root ok\n");
+            pid = sc(SYS_FORK, 0, 0, 0);
+            if (pid == 0) {
+                int own;
+                int rr;
+
+                sc(SYS_SETUID, 1000, 1000, 0);      /* root 降权到 alice */
+                own = port_create(0);
+                rr = (own > 0) ? cap_grant(own, IPC_CAP_MMIO, 0xFEBC0000, 0) : -2;
+                sc(SYS_EXIT, (rr == -1) ? 0 : 1, 0, 0);
+            }
+            if (pid > 0) {
+                st = -1;
+                sc(SYS_WAIT, pid, (int)&st, 0);
+                if (st == 0) {
+                    putstr("ipc: ring3 cap grant user denied ok\n");
+                } else {
+                    ok = 0;
+                }
+            } else {
+                ok = 0;
+            }
+        } else {
+            putstr("ipc: ring3 cap grant root FAIL\n");
+            ok = 0;
+        }
+    }
+
+    return ok ? 0 : 1;
+}
+
+static void ipc_ring3_selftest(void)
+{
+    int pid = sc(SYS_FORK, 0, 0, 0);
+    int st = -1;
+
+    if (pid == 0) {
+        sc(SYS_EXIT, ipc_ring_driver(), 0, 0);
+    }
+    if (pid < 0) {
+        putstr("ipc: ring3 selftest FAIL (fork)\n");
+        return;
+    }
+    sc(SYS_WAIT, pid, (int)&st, 0);
+    if (st == 0) putstr("ipc: ring3 selftest PASS\n");
+    else putstr("ipc: ring3 selftest FAIL\n");
+}
+
 /* 安全回归：子进程分别尝试写代码页、写栈 guard、执行栈、执行 rodata。 */
 static void cmd_sectest(void)
 {
@@ -1600,6 +1773,7 @@ static void cmd_sectest(void)
     einr_selftest();
     chroot_symlink_selftest();
     fat16_smp_selftest();
+    ipc_ring3_selftest();
 #endif
 }
 
@@ -1805,6 +1979,7 @@ static void cmd_help_one(const char *name)
         { "fork",    "fork                  fork and wait for the child" },
         { "pkg",     "pkg install <file> | list | remove <name> | verify <name>" },
         { "sectest", "sectest               code/guard write protection test" },
+        { "ipc",     "ipc                   ring3 IPC ping/reply/EINTR/cap demo" },
         { "exec",    "exec <path> [args]    replace this shell" },
         { "reexec",  "reexec                exec /bin/shell (self-test)" },
         { "history", "history               show recent commands" },
@@ -1857,6 +2032,7 @@ static void run_line(char *cmd)
                "  fork                   create a child process, wait for it\n"
                "  pkg install|list|remove|verify <file|name>   component CLI\n"
                "  sectest                code/guard write protection test\n"
+               "  ipc                    ring3 IPC ping/reply/EINTR/cap demo\n"
                "  exec <path> [args]     replace this shell with a program\n"
                "  reexec                 exec /bin/shell (self-test)\n"
                "  <cmd> > <file>         redirect stdout\n"
@@ -1930,6 +2106,8 @@ static void run_line(char *cmd)
         cmd_pkg((nargs >= 2) ? args[1] : 0, (nargs >= 3) ? args[2] : 0);
     } else if (scmp(args[0], "sectest") == 0) {
         cmd_sectest();
+    } else if (scmp(args[0], "ipc") == 0) {
+        ipc_ring3_selftest();
     } else if (scmp(args[0], "exec") == 0 && nargs >= 2) {
         char argbuf[64];
         int n = 0;
