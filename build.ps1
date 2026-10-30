@@ -920,7 +920,33 @@ if ($Test -or $Shot) {
             @{ Name = 'smp 审计：vmalloc 并发';    Ok = ($out -match 'audit: mm vmalloc concurrent PASS') },
             @{ Name = 'smp 审计自检通过';          Ok = ($out.Contains('audit: smp selftest PASS')) },
             @{ Name = 'smp 审计自检结束';          Ok = ($out.Contains('audit: smp selftest done')) },
-            @{ Name = 'PIT 频率 1:1（非 2x）';    Ok = ($out -match 'irq: pit rate ok \(1200 ticks / \d+ s\)') }
+            @{ Name = 'PIT 频率 1:1（非 2x）';    Ok = ($out -match 'irq: pit rate ok \(1200 ticks / \d+ s\)') },
+            # ---- 三层 P1：IPC / capability（2026-10-31）----
+            @{ Name = 'IPC 端口收发';              Ok = ($out.Contains('ipc: port send/recv ok')) },
+            @{ Name = 'IPC reply';                 Ok = ($out.Contains('ipc: reply ok')) },
+            @{ Name = 'IPC 队列满';                Ok = ($out.Contains('ipc: queue full ok')) },
+            @{ Name = 'IPC 超时';                  Ok = ($out.Contains('ipc: timeout ok')) },
+            @{ Name = 'IPC 坏消息拒绝';            Ok = ($out.Contains('ipc: bad msg rejected')) },
+            @{ Name = 'IPC recv EINTR';            Ok = ($out.Contains('ipc: recv EINTR ok')) },
+            @{ Name = 'IPC send EINTR';            Ok = ($out.Contains('ipc: send EINTR ok')) },
+            @{ Name = 'IPC cap 授予';              Ok = ($out.Contains('ipc: cap grant ok')) },
+            @{ Name = 'IPC cap 普通用户拒绝';      Ok = ($out.Contains('ipc: cap grant denied uid=1000')) },
+            @{ Name = 'IPC cap 类型拒绝';          Ok = ($out.Contains('ipc: cap type unsupported rejected')) },
+            @{ Name = 'IPC 句柄 generation';       Ok = ($out.Contains('ipc: handle generation ok')) },
+            @{ Name = 'IPC 自检通过';              Ok = ($out.Contains('ipc: selftest PASS')) },
+            @{ Name = 'IPC ring3 服务回复';        Ok = ($out.Contains('ipc: ring3 server reply ok')) },
+            @{ Name = 'IPC ring3 ping';            Ok = ($out.Contains('ipc: ring3 port ping ok')) },
+            @{ Name = 'IPC ring3 reply';           Ok = ($out.Contains('ipc: ring3 reply ok')) },
+            @{ Name = 'IPC ring3 EINTR';           Ok = ($out.Contains('ipc: ring3 recv EINTR ok')) },
+            @{ Name = 'IPC ring3 cap root';        Ok = ($out.Contains('ipc: ring3 cap grant root ok')) },
+            @{ Name = 'IPC ring3 cap 用户拒绝';    Ok = ($out.Contains('ipc: ring3 cap grant user denied ok')) },
+            @{ Name = 'IPC ring3 自检通过';        Ok = ($out.Contains('ipc: ring3 selftest PASS')) },
+
+            # ---- 三层 P2：dmesg / 内核日志环（2026-10-31）----
+            @{ Name = 'klog 环 64KB';              Ok = ($out.Contains('klog: ring 64KB ok')) },
+            @{ Name = 'klog 截断';                 Ok = ($out.Contains('klog: truncate ok')) },
+            @{ Name = 'dmesg syscall';             Ok = ($out.Contains('dmesg: syscall ok')) },
+            @{ Name = 'dmesg 自检通过';            Ok = ($out.Contains('dmesg: selftest PASS')) }
         )
 
         T 'checks begin'
