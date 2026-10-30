@@ -238,8 +238,7 @@ void ipc_port_release(uint32_t handle, struct process *caller)
     if (ipc_resolve_locked(handle, &slot) == 0) {
         ipc_port_t *pt = &ipc_ports[slot];
 
-        if (proc_is_root(caller) || pt->owner_pid == caller->pid ||
-            pt->owner_uid == proc_euid_of(caller)) {
+        if (proc_is_root(caller) || pt->owner_pid == caller->pid) {
             ipc_port_clear_locked(pt);
         }
     }

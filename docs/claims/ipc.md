@@ -178,16 +178,17 @@ root `cap_grant(srv, CAP_MMIO, ...)` 成功，子进程 `setuid(1000)` 后对
 
 ## 6. 回归结果
 
-- `tools\session-run.ps1 -Name ipc -Test`：**254/254 PASS**
-  （`=== TEST PASS (254/254) ===`，2026-10-31 00:14，`.obj-ipc`/`.dist-ipc`，
-  `serial-ipc.log`）。基线 254 项全绿；新增自检行随 `-Test` 串口输出，
-  未改 `build.ps1` 检查项。
+- `tools\session-run.ps1 -Name ipc -Test`：**254/254 PASS**，连续两次
+  （2026-10-31 00:16:36 50.7s、00:17:30 38.7s，clean tree HEAD `62614c0`，
+  `.obj-ipc`/`.dist-ipc`，`serial-ipc.log`；`=== TEST PASS (254/254) ===`）。
+  基线 254 项全绿；新增自检行随 `-Test` 串口输出，未改 `build.ps1` 检查项。
 - 第 1 次跑（00:09）出现 **18 项失败**，串口显示 shell 在
   `sectest_sigchld_cow()` 处 `sigreturn rejected (flags=10246)` 后跳到蹦床
   `eip=0x40307007` 被 #PF 杀掉，导致后续 `sectest`/`reexec` 检查全灭。
   同一晚基线文档（`docs/parallel-sessions.md`“已知偶发问题”）记录的正是
   用户态偶发 #PF（不同地址、同属信号帧/COW 竞态），与本会话改动无直接
-  关联；第 2 次跑 254/254 全绿。该 flake 需 proc/信号会话单独定位，见 §8。
+  关联；随后 3 次跑均 254/254 全绿。该 flake 需 proc/信号会话单独定位，
+  见 §8。
 - `ci.ps1 -Full -StrictBom` 由父会话在 P2（dmesg）与本会话都提交后统一
   执行（共享树里 P2 未提交文件会让 ci 的 clean 检查必红；本会话按父会话
   指示只跑 `session-run -Test`，不单独跑 `ci -Full`）。
@@ -202,8 +203,9 @@ root `cap_grant(srv, CAP_MMIO, ...)` 成功，子进程 `setuid(1000)` 后对
    设计 §3.2 说“ticket 来自请求消息”但消息头也没有 ticket。P1 约定
    `ticket=(pid<<16)|port_handle`，由请求方放进业务 payload；内核校验
    句柄 generation + `owner_pid`。限制：服务可伪造任意 `(pid,handle)`
-   向该端口 reply；ticket 无一次性/过期语义，可重复 reply。建议 ABI 1.6
-   给消息头加 ticket 字段或让 RECV 输出 ticket。
+   向该端口 reply；ticket 无一次性/过期语义，可重复 reply；REPLY 复用
+   SEND 的权限规则（私有端口仅同 uid），所以跨 uid 服务只能回公共
+   客户端端口。建议 ABI 1.6 给消息头加 ticket 字段或让 RECV 输出 ticket。
 3. **CAP_GRANT 的 rights 无参数位**：设计 §3.3 有 `rights`，`abi.h` 注释
    只有 3 参。P1 用 `esi` 传（0=默认 RW，掩到 0xF）；纯 3 参调用方的
    `esi` 是任意值时 rights 可能非预期。建议 ABI 1.6 明确第 4 参。
@@ -232,6 +234,9 @@ root `cap_grant(srv, CAP_MMIO, ...)` 成功，子进程 `setuid(1000)` 后对
     `ipc_port_recv` 出队后 `copy_to_user` 仍可能因坏页失败并返回 `-1`，
     该条消息已经从队列移除。调用方传坏缓冲会丢一条消息（P1 接受，
     后续可先 lock 用户页或加“未消费”回滚）。
+13. **SEND 返回码与 abi.h 注释不一致**：`abi.h` 注释写 `0 / -1`，但设计
+    §3.2 明确“超时 `-EAGAIN`、可被 `-EINTR` 打断”。P1 按设计返回
+    `-11`/`-4`；需要集成时更新 `abi.h` 注释（本会话不改 abi.h）。
 
 ## 8. 遗留
 
