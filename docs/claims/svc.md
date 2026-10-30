@@ -206,7 +206,11 @@ svc: selftest PASS
   **277/277 PASS**；`svc: selftest PASS`、`svcwatch: restart echo -> pid 54`
   均出现（旧看护行为未变）。
 - 基线 277 项全绿；新增自检行随 `-Test` 串口输出，**未改 `build.ps1`**。
-- `ci.ps1 -Full -StrictBom`：见 §5.2（需 clean tree，提交后单独跑）。
+- `ci.ps1 -Full -StrictBom`（提交 `446f734` 的 clean tree，114.3s）：
+  **CI PASS** —— 静态 5 项全 PASS（worktree clean / BOM+parse / 无构建产物 /
+  check-deps 0 违规 / host unit 10 suites）、`build.ps1` PASS、
+  `-Test` 2 次 **277/277 ×2**（51.7s / 38.5s，两次 `svc: selftest PASS`）、
+  结束后 worktree 仍 clean；产物 `.obj-ci`/`.dist-ci`/`serial-ci.log` 已清理。
 
 ## 6. 串口摘录（`serial-svc.log`，277/277 那次）
 
