@@ -1,8 +1,9 @@
 /* =============================================================================
- * svc/svc_syscall.c - 服务/能力相关系统调用（M6）
+ * svc/svc_syscall.c - 服务/能力相关系统调用（M6 + P1 IPC）
  *
- * 从 proc/trap/syscall.c 拆出的 svc 组：pipe / dup2 / cap_drop / cap_send /
- * input_set。只搬代码不改逻辑。
+ * svc 组：pipe / dup2 / cap_drop / cap_send / input_set，以及 ABI 1.5 预留给
+ * 三层架构的 80..84（PORT_CREATE/SEND/RECV/REPLY/CAP_GRANT）。
+ * 未实现的编号由分发器统一返回 -1，本文件不认领。
  * ============================================================================= */
 #include "../include/types.h"
 #include "include/kernel.h"
@@ -10,13 +11,65 @@
 #include "include/fs.h"
 #include "include/proc.h"
 #include "svc_syscall.h"
+#include "ipc.h"
 #include "../proc/trap/syscall_internal.h"
+
+/* IPC 消息最多 4144B；syscall 在拷贝到内核缓冲后调用核心，核心不再碰用户指针。
+ * 缓冲放在独立 helper 的栈帧里，避免 svc_syscall() 为所有调用预留 8KB。 */
+static int svc_ipc_send(uint32_t port, uint32_t uptr, uint32_t len)
+{
+    uint8_t msg[IPC_MSG_MAX];
+    proc_t *p = proc_current();
+
+    if (p == 0) return -1;
+    if (len < IPC_HDR_SIZE || len > IPC_MSG_MAX) return -1;
+    if (copy_from_user(msg, (const void *)(uintptr_t)uptr, len) != E_OK) {
+        return -1;
+    }
+    return ipc_port_send(port, msg, len, p);
+}
+
+static int svc_ipc_reply(uint32_t ticket, uint32_t uptr, uint32_t len)
+{
+    uint8_t msg[IPC_MSG_MAX];
+    proc_t *p = proc_current();
+
+    if (p == 0) return -1;
+    if (len < IPC_HDR_SIZE || len > IPC_MSG_MAX) return -1;
+    if (copy_from_user(msg, (const void *)(uintptr_t)uptr, len) != E_OK) {
+        return -1;
+    }
+    return ipc_port_reply(ticket, msg, len, p);
+}
+
+static int svc_ipc_recv(uint32_t port, uint32_t uptr, uint32_t maxlen)
+{
+    uint8_t buf[IPC_MSG_MAX];
+    proc_t *p = proc_current();
+    uint32_t n;
+    int r;
+
+    if (p == 0) return -1;
+    if (maxlen == 0U || maxlen > IPC_MSG_MAX) return -1;
+    if (!user_range_ok(uptr, maxlen)) return -1;     /* 睡前先验缓冲 */
+    r = ipc_port_recv(port, buf, maxlen, p);
+    if (r < 0) return r;
+
+    /* r 是消息真实长度；用户缓冲小时只回填 maxlen，仍返回真实长度。 */
+    n = (uint32_t)r;
+    if (n > maxlen) n = maxlen;
+    if (copy_to_user((void *)(uintptr_t)uptr, buf, n) != E_OK) return -1;
+    return r;
+}
 
 bool svc_syscall_owns(uint32_t nr)
 {
     return nr == SYS_PIPE || nr == SYS_DUP2 ||
            nr == SYS_CAP_DROP || nr == SYS_CAP_SEND ||
-           nr == SYS_INPUT_SET;
+           nr == SYS_INPUT_SET ||
+           nr == SYS_PORT_CREATE || nr == SYS_PORT_SEND ||
+           nr == SYS_PORT_RECV || nr == SYS_PORT_REPLY ||
+           nr == SYS_CAP_GRANT;
 }
 
 int svc_syscall(interrupt_frame_t *f)
@@ -151,6 +204,27 @@ int svc_syscall(interrupt_frame_t *f)
         }
         target->fds[tfd].fs_be = src->fs_be;
         ret = tfd;
+        break;
+    }
+    case SYS_PORT_CREATE: {
+        /* flags 只有 bit0（私有）；保留位传上来直接拒绝。 */
+        if ((f->ebx & ~(uint32_t)IPC_FLAG_PRIVATE) != 0U) { ret = -1; break; }
+        ret = ipc_port_create(f->ebx, proc_current());
+        break;
+    }
+    case SYS_PORT_SEND:
+        ret = svc_ipc_send(f->ebx, f->ecx, f->edx);
+        break;
+    case SYS_PORT_RECV:
+        ret = svc_ipc_recv(f->ebx, f->ecx, f->edx);
+        break;
+    case SYS_PORT_REPLY:
+        ret = svc_ipc_reply(f->ebx, f->ecx, f->edx);
+        break;
+    case SYS_CAP_GRANT: {
+        /* abi.h 注释只列 ebx/ecx/edx；rights 走 esi（0 = 默认 RW），
+         * 见 docs/claims/ipc.md“设计问题 #3”。 */
+        ret = ipc_cap_grant(f->ebx, f->ecx, f->edx, f->esi, proc_current());
         break;
     }
     default:

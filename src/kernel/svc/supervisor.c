@@ -38,6 +38,13 @@ void supervisor_init(void)
 
 void supervisor_entry(void)
 {
+    /* P1 IPC 自检：必须在调度器启动后的进程上下文里跑（要阻塞/超时/被信号
+     * 打断）；service_lifecycle_selftest 在 sched_start 之前，做不到这些。
+     * 只在 -Test 构建打印，避免生产启动多花 ~500ms。 */
+    if (boot_test_build()) {
+        ipc_selftest();
+    }
+
     for (;;) {
         uint32_t server = 0;
         char name[32];

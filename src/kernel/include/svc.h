@@ -7,6 +7,7 @@
 #include "svc/supervisor.h"
 #include "svc/channel.h"
 #include "svc/port.h"
+#include "svc/ipc.h"
 
 /* selftests */
 void service_lifecycle_selftest(void);
