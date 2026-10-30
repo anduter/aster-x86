@@ -169,6 +169,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci.ps1 -Full -StrictBo
   PASS；`-Test` **299/299 ×2**（56.7s / 41.7s）；结束后 worktree 仍 clean。
 - 第 2 次：**CI PASS**，122.5s；同样 5 项静态 PASS、`-Test` **299/299 ×2**
   （56.5s / 41.9s）、worktree clean。
+- 最终 HEAD `bca1e17`（claims/design 提交后）上再连续跑 2 次：**CI PASS**
+  120.9s / 122.0s；两次都是静态 5 项 PASS、`-Test` **299/299 ×2**
+  （54.9s / 41.7s、55.6s / 42.0s）、结束后 worktree clean。
 - `tools\unit.ps1`：**UNIT PASS (10/10)**，520 checks。
 - `tools\check-deps.ps1`：**0 violations**（199 files / 642 includes）。
 
