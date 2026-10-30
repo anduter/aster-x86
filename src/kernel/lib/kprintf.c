@@ -7,6 +7,7 @@
 #include "kprintf.h"
 #include "string.h"
 #include "include/dev.h"
+#include "include/klog.h"      /* P2：kprintf 同步写入内核日志环（dmesg） */
 
 #define KPRINTF_BUF_SIZE 512
 
@@ -175,6 +176,9 @@ int kprintf(const char *fmt, ...)
     len = kvsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
 
+    /* 先入环再输出：即使 console/串口卡住或随后 panic，最后一行也已可 dmesg 读到。
+     * klog_capture 只做短自旋 + memcpy，不打印/不分配，IRQ 上下文安全。 */
+    klog_capture(buf, (uint32_t)len);
     console_write_atomic(buf);
     return len;
 }
@@ -194,6 +198,7 @@ int kprintln(const char *fmt, ...)
         buf[len++] = '\n';
         buf[len] = '\0';
     }
+    klog_capture(buf, (uint32_t)len);   /* kprintln 不经过 kprintf，这里单独入环 */
     console_write_atomic(buf);
     return len;
 }

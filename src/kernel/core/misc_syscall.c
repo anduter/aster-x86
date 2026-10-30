@@ -14,6 +14,7 @@
 #include "include/net.h"
 #include "include/proc.h"
 #include "include/pkg.h"
+#include "include/klog.h"
 #include "misc_syscall.h"
 #include "../proc/trap/syscall_internal.h"
 
@@ -46,6 +47,10 @@ static bool misc_system_privileged(void)
 
     return (p == 0) || (p->euid == 0U);
 }
+
+/* SYS_DMESG 的只读快照缓冲：64KB 不能放内核栈（syscall 可能从任意线程栈
+ * 进入），锁外再 copy_to_user；用户缓冲缺页不会影响内核日志环。 */
+static char misc_dmesg_snap[KLOG_RING_SIZE];
 
 /* 分块把用户缓冲区拷进内核栈，再输出。
  * 用户指针未映射时 copy_from_user 会走 #PF 恢复路径返回错误，
@@ -89,6 +94,7 @@ bool misc_syscall_owns(uint32_t nr)
     case SYS_CONSOLE_CURSOR: /* v1.2：输入框下划线光标（只画 framebuffer） */
     case SYS_ABI_VERSION:   /* ABI v1 只追加的标量版本查询（59） */
     case SYS_PKG:           /* v1.4：组件 CLI（P0，op 编码见 include/pkg.h） */
+    case SYS_DMESG:         /* v1.5：读内核日志环（P2，85） */
         return true;
     default:
         return false;
@@ -239,6 +245,19 @@ int misc_syscall(interrupt_frame_t *f)
         /* v1.4：ebx=op, ecx=a, edx=b；组件 CLI（实现在 pkg/pkg_syscall.c） */
         ret = pkg_syscall(f->ebx, f->ecx, f->edx);
         break;
+    case SYS_DMESG: {
+        /* v1.5（85）：ebx=用户缓冲, ecx=maxlen -> 写入字节数 / -1。
+         * 校验用户窗口（含 <=64KB 上限），锁内只拷进内核快照，锁外 copy_to_user；
+         * 环不会因为用户缓冲缺页/坏指针受影响。 */
+        uint32_t maxlen = f->ecx;
+        uint32_t n;
+
+        if (maxlen == 0U || !misc_user_buf(f->ebx, maxlen)) { ret = -1; break; }
+        n = klog_read(misc_dmesg_snap, maxlen);
+        ret = (copy_to_user((void *)(uintptr_t)f->ebx, misc_dmesg_snap, n) == E_OK)
+                  ? (int)n : -1;
+        break;
+    }
     default:
         return -1000;
     }

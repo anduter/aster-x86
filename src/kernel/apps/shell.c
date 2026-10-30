@@ -21,6 +21,7 @@
 #include "include/fs.h"
 #include "include/proc.h"
 #include "include/proc.h"
+#include "include/klog.h"
 #include "arch/x86/io.h"
 #include "include/kernel.h"
 #include "include/kernel.h"
@@ -88,6 +89,7 @@ static void cmd_help(void)
     kprintln("  demo                   run the object-model self test");
     kprintln("  uptime                 show ticks since boot");
     kprintln("  irq                    show interrupt counts");
+    kprintln("  dmesg [-n N]           show last N kernel log lines (default 24)");
     kprintln("  sys                    call int 0x81 and show the results");
     kprintln("  clear                  clear the screen");
 }
@@ -274,6 +276,37 @@ static void cmd_irq(void)
     }
 }
 
+/* ---------------------------- 内核日志 ---------------------------- */
+
+/* dmesg [-n N]：打印内核日志环最近 N 行（默认 24，上限 100）。
+ * 输出由 klog_print_tail 直接走 console/串口，不再经 kprintf 入环，
+ * 避免 dmesg 把自己也记进下一次输出。 */
+static void cmd_dmesg(int argc, char **argv)
+{
+    uint32_t lines = 24U;
+
+    if (argc >= 2) {
+        if (strcmp(argv[1], "-n") == 0 && argc >= 3) {
+            const char *p = argv[2];
+            uint32_t v = 0;
+
+            while (*p >= '0' && *p <= '9') {
+                v = v * 10U + (uint32_t)(*p - '0');
+                p++;
+            }
+            if (*p != '\0' || v == 0U) {
+                kprintln("usage: dmesg [-n N] (N=1..100)");
+                return;
+            }
+            lines = (v > 100U) ? 100U : v;
+        } else {
+            kprintln("usage: dmesg [-n N]");
+            return;
+        }
+    }
+    (void)klog_print_tail(lines);
+}
+
 /* ---------------------------- 命令分发 ---------------------------- */
 
 static void run_line(const char *text)
@@ -299,6 +332,8 @@ static void run_line(const char *text)
                 timer_ticks() / timer_hz(), (uint32_t)timer_ticks());
     } else if (strcmp(argv[0], "irq") == 0) {
         cmd_irq();
+    } else if (strcmp(argv[0], "dmesg") == 0) {
+        cmd_dmesg(argc, argv);
     } else if (strcmp(argv[0], "sys") == 0) {
         cmd_sys();
     } else if (strcmp(argv[0], "obj") == 0 && argc >= 2 && strcmp(argv[1], "stat") == 0) {
