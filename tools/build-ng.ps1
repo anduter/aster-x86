@@ -57,7 +57,7 @@
 #
 # usage: powershell -File tools/build-ng.ps1 [-Repo <root>] [-DistDir dist-ng]
 #                                             [-ObjDir obj-ng] [-PanicTest]
-#                                             [-Smoke]
+#                                             [-Smoke] [-SdkDemo]
 # 退出码：0 = PASS；1 = FAIL。
 # =============================================================================
 param(
@@ -65,7 +65,8 @@ param(
     [string]$DistDir = 'dist-ng',
     [string]$ObjDir = 'obj-ng',
     [switch]$PanicTest,
-    [switch]$Smoke
+    [switch]$Smoke,
+    [switch]$SdkDemo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,6 +105,7 @@ Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
 if ($Smoke) { Write-Host 'mode:  smoke build (-DNG_SMOKE_MODE=1: 跳过 WP2-6 shell，只跑 ring3 hello)' }
+if ($SdkDemo) { Write-Host 'mode:  sdk-demo build (sdk/examples/hello_gui -> /bin/demo，WP3-4)' }
 
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
@@ -137,6 +139,7 @@ $userCFlags = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
     '-ffunction-sections', '-fdata-sections',
     '-I', $srcDir,
     '-I', (Join-Path $Repo 'src/desktop/include'),
+    '-I', (Join-Path $Repo 'sdk/include'),
     '-c')
 
 # ---- WP1-7：用户程序 hello.S -> hello.elf（0x40000000）-> .incbin 嵌内核 ----
@@ -528,17 +531,28 @@ foreach ($name in $dsUserSources) {
 # 每个程序只链自己用到的 L2 模块（内核 .rodata 里嵌入 6 个用户 ELF，
 # 2 MiB 映像窗口很紧：displayd 不需要 ds_draw/ds_font8x8/ds_wm，
 # demo/wm 不需要 ds_surface/ds_composite）。
+#
+# WP3-4 `-SdkDemo`：用 sdk/examples/hello_gui/main.c 替换 /bin/demo 的源文件
+# （blob 符号 ng_demo_elf 不变，proc.c/WM/sessiond 的启动路径完全不变；示例
+# 只依赖 sdk/include，链接时不需要 ds_* 模块）。默认构建仍是 src/apps/demo。
+if ($SdkDemo) {
+    $demoSrc = Join-Path $Repo 'sdk/examples/hello_gui/main.c'
+    $demoLibs = @()
+} else {
+    $demoSrc = Join-Path $Repo 'src/apps/demo/demo.c'
+    $demoLibs = @('ds_protocol', 'session_protocol', 'ds_blend', 'ds_font8x8',
+        'ds_draw')
+}
 $desktopPrograms = @(
     @{ Name = 'displayd'; Src = (Join-Path $Repo 'src/desktop/display/displayd.c');
        Obj = (Join-Path $objDir 'user_displayd.o'); Elf = (Join-Path $objDir 'displayd.elf');
        Sym = 'ng_displayd_elf'; Label = 'displayd';
        Libs = @('ds_protocol', 'ds_surface', 'ds_composite', 'ds_blend',
                 'session_protocol') },
-    @{ Name = 'demo'; Src = (Join-Path $Repo 'src/apps/demo/demo.c');
+    @{ Name = 'demo'; Src = $demoSrc;
        Obj = (Join-Path $objDir 'user_demo.o'); Elf = (Join-Path $objDir 'demo.elf');
        Sym = 'ng_demo_elf'; Label = 'demo';
-       Libs = @('ds_protocol', 'session_protocol', 'ds_blend', 'ds_font8x8',
-                'ds_draw') },
+       Libs = $demoLibs },
     @{ Name = 'wm'; Src = (Join-Path $Repo 'src/desktop/shell/wm.c');
        Obj = (Join-Path $objDir 'user_wm.o'); Elf = (Join-Path $objDir 'wm.elf');
        Sym = 'ng_wm_elf'; Label = 'wm';

@@ -1,5 +1,5 @@
 /*
- * Aster SDK alpha —— display 协议 v2 封装（ABI 1.0 未冻结）
+ * Aster SDK alpha —— display 协议 v3 封装（ABI 1.0 未冻结）
  *
  * 对应 ring3 display server（/bin/displayd）的控制面协议：
  *   控制面：IPC 16 字节头 + 20 字节协议头 + 固定长度 body（≤ 512 字节）
@@ -7,21 +7,23 @@
  *
  * 一次窗口的生命周期（顺序不能乱）：
  *   connect()  : 读 /run/display.port 拿 displayd ticket + 建自己的回复端口
- *   CREATE     : 请求 {w,h,flags,x,y,owner_pid,title} -> CREATE_REPLY
+ *   CREATE     : 请求 {w,h,flags,x,y,owner_pid,title,token} -> CREATE_REPLY
  *                {surface_id, shm_handle, pages, x,y,w,h}
  *   MAP        : 客户端先 SYS_SHM_MAP(shm_handle) 拿到像素 VA，再发 MAP
  *   COMMIT     : 把 surface 局部矩形合成到屏幕（可重复）
- *   FOCUS      : 置焦点，之后按键以 INPUT 推给本客户端
- *   LIST       : 要一份 surface 快照（WM/任务列表用）
+ *   FOCUS      : 置焦点（v3 带 role_token），之后按键以 INPUT 推给本客户端
+ *   LIST       : 要一份 surface 快照（WM/任务列表用；v3 每条带 token）
  *   DESTROY    : 销毁 surface
  *
  * 协议版本策略（alpha）：
- *   - 本 SDK **发送 version 2**（CREATE 40 字节、FOCUS.reserved=0、LIST_REPLY
- *     按 v2 44 字节 entry）；
- *   - 解码器接受 version 1..3：v3 的 displayd 会用 version 3 编码回复，
- *     LIST_REPLY 的 entry 变成 48 字节（多了 token）。SDK 按消息自带的
- *     version 选择 stride，所以 v2 客户端能直接跑在 v3 displayd 上；v3 的
- *     token 字段被解码进 aster_display_entry.token（v2 回复里为 0）。
+ *   - 本 SDK **发送 version 3**：CREATE body 44（末尾 token）、FOCUS 的第二个
+ *     u32 是 token、LIST_REPLY 按 v3 48 字节 entry 编码；
+ *   - 解码器接受 version 1..3：v1 CREATE 16 字节、v2 CREATE 40 字节（token=0），
+ *     v2 LIST_REPLY 仍按 44 字节 entry 解析（token=0）。SDK 按消息自带的
+ *     version 选 body/stride，所以 v3 displayd 的回复能直接解析。
+ *   - token 来自 session manager（见 <aster/session.h>）：应用把 sessiond 经
+ *     argv 发来的 role_token 填进 CREATE/FOCUS；没有会话通道时传 0（v1/v2
+ *     的旧行为，displayd 不做归属校验）。
  *   - 协议版本/结构以 src/desktop/include/ds_protocol.h 为准；WP4-1 冻结 ABI
  *     前不要依赖跨版本二进制兼容。
  *
@@ -41,7 +43,7 @@
 
 /* ---- 协议版本 ------------------------------------------------------------ */
 #define ASTER_DISPLAY_MAGIC 0x4453314Du /* "DS1M" */
-#define ASTER_DISPLAY_VERSION_SEND 2u   /* 本 SDK 发出的版本 */
+#define ASTER_DISPLAY_VERSION_SEND 3u   /* 本 SDK 发出的版本（v3: token） */
 #define ASTER_DISPLAY_VERSION_MIN 1u    /* 解码器接受的最小版本 */
 #define ASTER_DISPLAY_VERSION_MAX 3u    /* 解码器接受的最大版本（v3 只多 token） */
 
@@ -78,6 +80,7 @@
 #define ASTER_DISPLAY_MSG_LIST_REPLY 10u
 #define ASTER_DISPLAY_MSG_REGISTER_HOTKEY 11u
 #define ASTER_DISPLAY_MSG_WM_STATUS 12u
+#define ASTER_DISPLAY_MSG_SESSION_STATUS 13u /* v3: sessiond -> displayd 汇总 */
 
 /* ---- INPUT --------------------------------------------------------------- */
 #define ASTER_INPUT_KEY_DOWN 1u
@@ -189,6 +192,31 @@ struct aster_display_wm_status_body {
     u32 lastpid;
 };
 
+/*
+ * v3（只读汇总）：sessiond 把会话计数交给 displayd，displayd 追加进已有的
+ * /run/display.status 的 `s*` 字段（不新建 ramfs 节点）。普通应用不需要发它；
+ * SDK 暴露结构/编码是为了让模拟器/测试能构造 v3 全消息。
+ */
+struct aster_display_session_status_body {
+    u32 pid;
+    u32 dpid;
+    u32 procs;
+    u32 apps;
+    u32 windows;
+    u32 tokens;
+    u32 launches;
+    u32 kills;
+    u32 exits;
+    u32 reaps;
+    u32 restarts;
+    u32 wmpid;
+    u32 wmstate;
+    u32 apppid;
+    u32 tokenfail;
+    u32 registry;
+    u32 reserved;
+};
+
 /* v2 的 LIST_REPLY body 360 字节（entry 44）；v3 392（entry 48）。 */
 #define ASTER_DISPLAY_CREATE_BODY_V1 16u
 #define ASTER_DISPLAY_CREATE_BODY_V2 40u
@@ -211,6 +239,8 @@ _Static_assert(sizeof(struct aster_display_list_reply_body) == 392,
                "list_reply body v3 layout must be 392 bytes");
 _Static_assert(sizeof(struct aster_display_wm_status_body) == 28,
                "wm_status body must be 28 bytes");
+_Static_assert(sizeof(struct aster_display_session_status_body) == 68,
+               "session_status body must be 68 bytes");
 
 /* ---- 解码后的完整消息（与 ds_msg 同布局；大小 = 512） -------------------- */
 struct aster_display_msg {
@@ -233,6 +263,7 @@ struct aster_display_msg {
         struct aster_display_list_reply_body list_reply;
         struct aster_display_register_hotkey_body register_hotkey;
         struct aster_display_wm_status_body wm_status;
+        struct aster_display_session_status_body session_status;
         u32 words[ASTER_DISPLAY_MSG_WORDS_MAX];
     } u;
 };
@@ -292,6 +323,7 @@ struct aster_display_create_req {
     i32 y;
     const char *title; /* NULL = 空标题 */
     u32 owner_pid;     /* 0 = 用 aster_getpid() */
+    u32 token;         /* v3：session manager 签发的 role_token（0 = 无会话） */
 };
 
 struct aster_display_wm_status_info {
@@ -365,6 +397,11 @@ static inline u32 aster_display__body_size(u32 type, u16 version)
         return (version == 1u)
                    ? 0u
                    : (u32)sizeof(struct aster_display_wm_status_body);
+    case ASTER_DISPLAY_MSG_SESSION_STATUS:
+        /* v3 新消息：v1/v2 没有。 */
+        return (version < 3u)
+                   ? 0u
+                   : (u32)sizeof(struct aster_display_session_status_body);
     default:
         return 0;
     }
@@ -395,7 +432,7 @@ static inline void aster_display_title_get(const u32 in[ASTER_DISPLAY_TITLE_WORD
 {
     u32 i;
 
-    if (out == NULL || cap == 0) {
+    if (out == NULL || cap == 0 || in == NULL) {
         return;
     }
     for (i = 0; i + 1u < cap && i + 1u < (u32)ASTER_DISPLAY_TITLE_MAX; i++) {
@@ -455,7 +492,8 @@ static inline i32 aster_display_encode(const struct aster_display_msg *m,
         for (i = 0; i < ASTER_DISPLAY_TITLE_WORDS; i++) {
             aster_display__put32(b + 24 + i * 4u, m->u.create.title[i]);
         }
-        /* v2：不写 token（第 40..43 字节不存在）。 */
+        /* v3：body 44，末尾是 session manager 签发的 role_token（0 = 无会话）。 */
+        aster_display__put32(b + 40, m->u.create.token);
         break;
     case ASTER_DISPLAY_MSG_CREATE_REPLY:
         aster_display__put32(b + 0, m->u.create_reply.surface_id);
@@ -483,8 +521,8 @@ static inline i32 aster_display_encode(const struct aster_display_msg *m,
         break;
     case ASTER_DISPLAY_MSG_FOCUS:
         aster_display__put32(b + 0, m->u.focus.surface_id);
-        /* v2 的第二个 u32 是 reserved，必须 0（v3 才是 token）。 */
-        aster_display__put32(b + 4, 0);
+        /* v3：第二个 u32 是请求者 role_token（0 = 旧的无校验行为）。 */
+        aster_display__put32(b + 4, m->u.focus.token);
         break;
     case ASTER_DISPLAY_MSG_INPUT:
         aster_display__put32(b + 0, m->u.input.surface_id);
@@ -501,13 +539,14 @@ static inline i32 aster_display_encode(const struct aster_display_msg *m,
         aster_display__put32(b + 0, 0);
         break;
     case ASTER_DISPLAY_MSG_LIST_REPLY:
-        /* 客户端一般不主动发 LIST_REPLY；保留编码能力给测试/模拟器。 */
+        /* 客户端一般不主动发 LIST_REPLY；保留编码能力给测试/模拟器。
+         * v3 编码：entry 48 字节，token 在 +28，title 在 +32。 */
         aster_display__put32(b + 0, m->u.list_reply.count);
         aster_display__put32(b + 4, 0);
         for (i = 0; i < ASTER_DISPLAY_LIST_MAX; i++) {
             const struct aster_display_list_entry *e =
                 &m->u.list_reply.entries[i];
-            u32 off = 8u + i * ASTER_DISPLAY_LIST_ENTRY_V2;
+            u32 off = 8u + i * ASTER_DISPLAY_LIST_ENTRY_V3;
 
             aster_display__put32(b + off + 0, e->id);
             aster_display__put32(b + off + 4, e->owner_pid);
@@ -516,10 +555,11 @@ static inline i32 aster_display_encode(const struct aster_display_msg *m,
             aster_display__put32(b + off + 16, e->w);
             aster_display__put32(b + off + 20, e->h);
             aster_display__put32(b + off + 24, e->focused);
-            aster_display__put32(b + off + 28, e->title[0]);
-            aster_display__put32(b + off + 32, e->title[1]);
-            aster_display__put32(b + off + 36, e->title[2]);
-            aster_display__put32(b + off + 40, e->title[3]);
+            aster_display__put32(b + off + 28, e->token);
+            aster_display__put32(b + off + 32, e->title[0]);
+            aster_display__put32(b + off + 36, e->title[1]);
+            aster_display__put32(b + off + 40, e->title[2]);
+            aster_display__put32(b + off + 44, e->title[3]);
         }
         break;
     case ASTER_DISPLAY_MSG_REGISTER_HOTKEY:
@@ -536,6 +576,25 @@ static inline i32 aster_display_encode(const struct aster_display_msg *m,
         aster_display__put32(b + 16, m->u.wm_status.lastswitch);
         aster_display__put32(b + 20, m->u.wm_status.launches);
         aster_display__put32(b + 24, m->u.wm_status.lastpid);
+        break;
+    case ASTER_DISPLAY_MSG_SESSION_STATUS:
+        aster_display__put32(b + 0, m->u.session_status.pid);
+        aster_display__put32(b + 4, m->u.session_status.dpid);
+        aster_display__put32(b + 8, m->u.session_status.procs);
+        aster_display__put32(b + 12, m->u.session_status.apps);
+        aster_display__put32(b + 16, m->u.session_status.windows);
+        aster_display__put32(b + 20, m->u.session_status.tokens);
+        aster_display__put32(b + 24, m->u.session_status.launches);
+        aster_display__put32(b + 28, m->u.session_status.kills);
+        aster_display__put32(b + 32, m->u.session_status.exits);
+        aster_display__put32(b + 36, m->u.session_status.reaps);
+        aster_display__put32(b + 40, m->u.session_status.restarts);
+        aster_display__put32(b + 44, m->u.session_status.wmpid);
+        aster_display__put32(b + 48, m->u.session_status.wmstate);
+        aster_display__put32(b + 52, m->u.session_status.apppid);
+        aster_display__put32(b + 56, m->u.session_status.tokenfail);
+        aster_display__put32(b + 60, m->u.session_status.registry);
+        aster_display__put32(b + 64, m->u.session_status.reserved);
         break;
     default:
         return ASTER_EINVAL;
@@ -772,6 +831,7 @@ static inline i32 aster_display_create(struct aster_display *d,
     }
     m.u.create.owner_pid =
         (req->owner_pid != 0u) ? req->owner_pid : aster_getpid();
+    m.u.create.token = req->token;
     aster_display_title_set(m.u.create.title, req->title);
 
     rc = aster_display__send(d, &m);
@@ -901,7 +961,12 @@ static inline i32 aster_surface_commit_all(struct aster_display *d,
     return aster_display_commit(d, s, 0, 0, s->width, s->height);
 }
 
-static inline i32 aster_display_focus(struct aster_display *d, u32 surface_id)
+/*
+ * v3 FOCUS：token 是本进程的 role_token（0 = 旧的无校验行为）。
+ * displayd 只接受「surface 自己的令牌」或「WM 令牌」，其余计入 focus reject。
+ */
+static inline i32 aster_display_focus_ex(struct aster_display *d,
+                                         u32 surface_id, u32 token)
 {
     struct aster_display_msg m;
 
@@ -912,8 +977,14 @@ static inline i32 aster_display_focus(struct aster_display *d, u32 surface_id)
     m.type = ASTER_DISPLAY_MSG_FOCUS;
     m.seq = ++d->seq;
     m.u.focus.surface_id = surface_id;
-    m.u.focus.token = 0; /* v2 兼容：reserved 必须 0 */
+    m.u.focus.token = token;
     return aster_display__send(d, &m);
+}
+
+/* 无令牌兼容形式（等价于 focus_ex(..., 0)）。 */
+static inline i32 aster_display_focus(struct aster_display *d, u32 surface_id)
+{
+    return aster_display_focus_ex(d, surface_id, 0);
 }
 
 /*

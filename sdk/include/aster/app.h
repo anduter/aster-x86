@@ -47,11 +47,13 @@ struct aster_app_config {
     u32 flags;         /* ASTER_DISPLAY_CREATE_F_POS 或 0 */
     i32 x;             /* flags & POS 时有效 */
     i32 y;
+    u32 token; /* v3：session manager 签发的 role_token（0 = 无会话） */
 };
 
 struct aster_app {
     struct aster_display display;
     struct aster_surface surface;
+    u32 token;   /* 与 CREATE/FOCUS 一起用的 role_token */
     u32 running; /* 0 = 退出循环 */
 };
 
@@ -87,6 +89,7 @@ static inline i32 aster_app_open(struct aster_app *app,
     req.y = cfg->y;
     req.title = cfg->title;
     req.owner_pid = 0; /* 让 SDK 用 getpid() */
+    req.token = cfg->token;
 
     rc = aster_display_connect(&app->display);
     if (rc < 0) {
@@ -97,8 +100,18 @@ static inline i32 aster_app_open(struct aster_app *app,
         aster_display_close(&app->display);
         return rc;
     }
+    app->token = cfg->token;
     app->running = 1;
     return 0;
+}
+
+/* 把焦点给自己（v3 用本进程的 role_token；0 = 旧的无校验行为）。 */
+static inline i32 aster_app_focus(struct aster_app *app)
+{
+    if (app == NULL || app->surface.id == 0u) {
+        return ASTER_EINVAL;
+    }
+    return aster_display_focus_ex(&app->display, app->surface.id, app->token);
 }
 
 /* 提交整个窗口。 */

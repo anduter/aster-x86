@@ -3,8 +3,10 @@
 > 状态：已实现（2026-10-31，`docs/claims/ng-WP3-3.md`）。
 > 范围：L2c —— 应用生命周期、窗口注册表、角色令牌；display 协议升到 **v3**
 > （CREATE/LIST/FOCUS 带 token）；L2b WM 的启动器改成向 sessiond 发 LAUNCH。
-> 不在这里：S1 故障注入矩阵（WP3-5）、SDK alpha（WP3-4）、display server
+> 不在这里：S1 故障注入矩阵（WP3-5）、display server
 > 重连（S2）、surface 的 cap/撤销。
+> **WP3-4 补充（2026-10-31）**：公开 SDK 的会话客户端（`sdk/include/aster/
+> session.h`）现在镜像本文第 4 节的协议；本文第 11 节记录 SDK 侧的边界。
 > 上位约束：`docs/design/architecture.md` 第 3 节失败矩阵（L2c 是 session
 > 级、L3 保活）、第 4 节规则 3（**shell 不拥有应用；应用生命周期归 session
 > manager**）、第 5 节不变量 2/3/7（不共享地址空间、L3 默认无根/设备/网络、
@@ -235,3 +237,40 @@ WP3-3 新增 `sessiond` 24 KB 后，`.incbin` 放在 `.rodata` 会让
 7. **单线程协作**：sessiond 用 20ms `PORT_RECV` 超时轮询；没有并发压力测试。
 8. **WM 直连兼容路径**：没有会话通道时（WP3-2 的内核自检）启动器仍会本地
    `spawn`；真实启动（init→sessiond→wm）永远走 LAUNCH。
+
+## 11. SDK 会话通道（WP3-4 补充）
+
+公开 SDK 在 `sdk/include/aster/session.h` 里逐字节镜像第 4 节的会话协议，
+并把“应用怎么拿到会话”收口成一个入口：
+
+```text
+aster_session_connect(&sess, argc, argv)
+  -> 解析 argv 里的 session=<dec> / token=<0xhex|dec>
+  -> 没有 session= 返回 -ENOENT（shell 直连 spawn 的正常路径）
+  -> 有：为会话单独 port_create() 一个回复端口（与 display 客户端端口分开，
+     避免 INPUT 与 ENTRY/LIST_REPLY 在同一个端口上互相干扰）
+```
+
+之后应用依次用 `aster_session_register()` / `aster_session_heartbeat()` /
+`aster_session_exit()`；WM 侧用 `aster_session_launch()` /
+`aster_session_kill()`；查询注册表用 `aster_session_lookup()` /
+`aster_session_list()`。令牌由 sessiond 签发、经 argv 交给应用，SDK 只做
+“原样使用 + 校验角色位”，**不提供伪造 WM 令牌的捷径**（`token_make` 主要
+给模拟器/host 测试）。
+
+对应地，display v3 的 `CREATE`/`FOCUS` 在 SDK 里增加 `token` 字段
+（`aster_app_config.token`、`aster_app_focus()`），`LIST_REPLY` 解码带
+token；没有会话时 token=0，displayd 回落到 v1/v2 的无校验语义。
+
+证据路径：`tools/sdk-demo.ps1` 用 `build-ng.ps1 -SdkDemo` 把
+`sdk/examples/hello_gui` 编成 `/bin/demo` 的 blob（符号 `ng_demo_elf`
+不变），于是 **init → sessiond → WM 的 LAUNCH → sessiond spawn** 这条真实
+产品链会拉起 SDK 应用；脚本断言
+`ng: sdk session ok` / `ng: sdk token ok` /
+`ng: session window ok (... title=Aster SDK)` /
+`ng: wm task ok (... title=Aster SDK)` 与 QMP 截图像素。细节与已知限制见
+`docs/claims/ng-WP3-4.md`。
+
+这条 SDK 通道**不改变** sessiond 的所有权模型：sessiond 仍是应用生命周期
+的唯一入口；SDK 只是客户端。sessiond 自己崩溃后的接管、cap/撤销、displayd
+重连仍是本文第 10 节的遗留。

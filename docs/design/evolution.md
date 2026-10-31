@@ -263,6 +263,44 @@ LIST_REPLY entry 加 `token`（48 B）、FOCUS 的 reserved 变成 `token`
 下一步：WP3-4 SDK alpha + demo app（外部可编译 GUI app）、WP3-5 S1 故障
 注入（杀 shell/输入、应用存活、面板回来）。
 
+**WP3-4 完成**（SDK v3 + 会话通道 + GUI demo，2026-10-31）。`sdk/` 从
+alpha 骨架升到 **display 协议 v3 + session 通道**：
+
+- `sdk/include/aster/display.h`：发送 version 3（CREATE body 44 带
+  `token`、FOCUS 第二字=token、LIST_REPLY entry 48）；解码器接受 v1/v2/v3
+  （v1 CREATE 16、v2 CREATE 40/LIST_REPLY 360，token=0）；`CREATE_REPLY`
+  之外的 v3 `SESSION_STATUS`（68 B）也进 SDK；`aster_display_focus_ex()`；
+- `sdk/include/aster/session.h`（新）：镜像会话协议 v1（REGISTER/
+  HEARTBEAT/LAUNCH/EXIT/KILL/LOOKUP/ENTRY/LIST/LIST_REPLY/STATUS），
+  `aster_session_connect(&s, argc, argv)` 解析 `session=<ticket>` /
+  `token=0x..`（无会话返回 `-ENOENT`），**单独建会话回复端口**；
+  `session_register/heartbeat/exit/launch/kill/lookup/list`、role_token
+  助手、严格溢出检查的 argv 解析；
+- `sdk/include/aster/app.h`：`cfg.token` / `app.token`、`aster_app_focus()`
+  （v3 令牌 FOCUS）；
+- `sdk/examples/hello_gui`：v3 CREATE/FOCUS + 会话 REGISTER/HEARTBEAT/EXIT、
+  用 display `LIST` 回读 token（闭合 sessiond→argv→displayd 链路），打印
+  `ng: sdk session ok` / `ng: sdk window ok` / `ng: sdk token ok` /
+  `ng: sdk demo ok`；保留 `window`（常驻）与 `hold`（无 surface）两个
+  demo harness 角色，配合内核自检；
+- `tools/build-ng.ps1 -SdkDemo`：用 SDK 示例替换 `/bin/demo` 的源文件
+  （符号 `ng_demo_elf` 不变，不新增 `/bin` 节点、不动 proc.c），默认构建
+  完全不变；`tools/sdk-demo.ps1` 一条命令构建 + QEMU + QMP 注入，由
+  **init→sessiond→WM LAUNCH→sessiond spawn** 真正拉起 SDK 应用，断言会话/
+  窗口/令牌行与 `title=Aster SDK` 的 WM 任务行，并 QMP `stop` 后
+  screendump 断言面板 `(4,4)=#202838` + 窗口 `(x+40,y+80)=#3070c0`；
+- `tools/sdk-check.ps1`：语法门禁之外，用宿主 clang 编译运行
+  `tests/unit-ng/test_sdk.c`（237 checks：v3/v1/v2 编解码、token、会话协议、
+  argv 解析、拒绝路径），要求 ≥30 checks；
+- 证据：`sdk-demo` PASS（4.4s，session=1048576 token=0x……，窗口 (192,152)，
+  像素 #3070c0）、`sdk-check` PASS（9 files + 237 checks）、host 单测
+  5034/0、parity 100/100（host 95/95）、run-ng 159+75、旧 32 位 305/305。
+  证据与遗留见 `docs/claims/ng-WP3-4.md`，文档见
+  `docs/sdk/getting-started.md`；SDK 会话客户端边界补在
+  `docs/design/session-ng.md` 第 11 节。
+
+下一步：WP3-5 S1 故障注入（杀 shell/输入、应用存活、面板回来）。
+
 ### E4
 
 | ID | 内容 | 主要路径 | 出口 |
