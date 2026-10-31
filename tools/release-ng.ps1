@@ -208,6 +208,12 @@ foreach ($h in $sdkHeaders) {
     Copy-Into $h.FullName ('sdk/include/aster/' + $h.Name)
 }
 
+# WP4-2 的外部开发者示例（只读复制；不改 sdk/**）。
+Copy-Into (Join-Path $root 'sdk/examples/hello_d0/main.c') 'sdk/examples/hello_d0/main.c'
+Copy-Into (Join-Path $root 'sdk/examples/hello_d0/README.md') 'sdk/examples/hello_d0/README.md'
+Copy-Into (Join-Path $root 'sdk/examples/hello_d0/screen.png') 'sdk/examples/hello_d0/screen.png'
+Copy-Into (Join-Path $root 'sdk/examples/hello_gui/main.c') 'sdk/examples/hello_gui/main.c'
+
 # ---- 4. RELEASE-NOTES.md ----------------------------------------------------
 Step '4. RELEASE-NOTES.md'
 $notesTemplate = @'
@@ -230,6 +236,8 @@ $notesTemplate = @'
 | `abi/abi-1.0.h` | ABI 1.0 机器可读冻结头 |
 | `abi/abi-1.0.md` | ABI 1.0 冻结规范（调用约定/四类命名空间/错误码/上限/版本策略） |
 | `sdk/include/aster/*.h` | SDK 头（8 个；ABI 1.0 消费端） |
+| `sdk/examples/hello_d0/*` | 外部开发者 GUI 示例（main.c / README / 截图） |
+| `sdk/examples/hello_gui/main.c` | SDK v3 + 会话通道示例源码 |
 | `sdk/README.md` | SDK 概览 |
 | `docs/d0.md` | D0 范围/出口/已知限制/安装运行/校验 |
 | `docs/architecture.md`、`docs/evolution.md`、`docs/design-readme.md` | 设计基线快照 |

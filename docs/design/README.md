@@ -22,12 +22,16 @@
     调用号/错误码/四类命名空间/上限/版本策略冻结，15 项冻结前待决项给出
     “保留/延后/已解决”结论；`tools/abi-check.ps1` 对 ABI 头、SDK 头、
     `src/ng/syscall.h` 及内核常量做三方比对。
+  - **WP4-2 完成**：外部开发者测试（另一会话提交 `3328b8e`）——
+    `sdk/examples/hello_d0`（480×300 GUI、计数/交互/8s 空闲退出）+
+    `tools/d0-demo.ps1` QEMU/QMP 证据；受限口径：不改仓库能写/能跑，
+    但**没有产品部署路径**（sessiond/LAUNCH 拉起）仍需安装器/包启动。
   - **WP4-3 完成**：D0 本地发布包 —— `tools/release-ng.ps1` 一条命令跑
     `abi-check` + `build-ng`，生成 `dist-ng/release/d0/`（ELF、disk.img、
-    SDK 头、ABI 1.0、文档、`RELEASE-NOTES.md`、`SHA256SUMS`）并逐文件校验；
-    只本地，不 push、不签名、不打 tag。说明见 `../release/d0.md`。
-  - **E4 未整体关闭**：WP4-2（外部开发者测试）与 WP4-4（1 小时 smoke）不在
-    WP4-1/WP4-3 内，尚无证据；D0 总出口以 `architecture.md` §10 为准。
+    SDK 头、示例、ABI 1.0、文档、`RELEASE-NOTES.md`、`SHA256SUMS`）并逐文件
+    校验；只本地，不 push、不签名、不打 tag。说明见 `../release/d0.md`。
+  - **E4 未整体关闭**：WP4-4（1 小时 smoke）尚无证据；D0 总出口以
+    `architecture.md` §10 为准。
 - E1/E2/E3 出口（已完成）：
   - E1：64 位 long mode、页表、trap/syscall、PMM/heap、调度、IPC/句柄、
     ELF64 + ring3 hello；host 单测；`tools/ci-ng.ps1` 一条命令门禁。
@@ -43,8 +47,7 @@
     64 constants / 4 struct sizes）。
   - `tools/sdk-check.ps1`：SDK 头/示例语法 + 237 host checks。
   - `tools/release-ng.ps1`：D0 发布包 + SHA256 自检。
-- 下一步：**WP4-2 外部开发者测试**（按 `docs/sdk/getting-started.md` 一天内
-  写出 GUI app）、**WP4-4 1h smoke**（无 panic/停滞），然后 E4 出口评审；
+- 下一步：**WP4-4 1h smoke**（无 panic/停滞），然后 E4 出口评审；
   D1 见 `evolution.md`。
 - ABI 规范：冻结版 `../abi/abi-1.0.md`；机器头 `../abi/abi-1.0.h`；
   历史草案 `../abi/abi-1.0-draft.md`（已被取代，仅供追溯）。

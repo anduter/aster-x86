@@ -6,10 +6,11 @@
 **ABI 门禁 + 构建 + D0 发布目录 + SHA-256 自检**，产物在
 `dist-ng/release/d0/`（只本地；不 push、不签名、不打 tag）。
 
-- **发布目录 20 个文件**：`aster-ng.elf`、`disk.img`、8 个 SDK 头、
+- **发布目录 24 个文件**：`aster-ng.elf`、`disk.img`、8 个 SDK 头、
+  4 个 SDK 示例文件（`hello_d0` 的 main/README/截图 + `hello_gui` 源码）、
   ABI 1.0 头/规范、D0/架构/演进/设计索引/SDK 上手文档、`LICENSE`、
   `RELEASE-NOTES.md`、`SHA256SUMS`、`.gitignore`。
-- **SHA-256**：对 20 个载荷文件逐一计算并回读校验，`[ok] 20 files verified`。
+- **SHA-256**：对 24 个载荷文件逐一计算并回读校验，`[ok] 24 files verified`。
 - **ABI**：发布前强制跑 `tools/abi-check.ps1`，PASS（29 syscalls / 28 errors /
   64 constants / 4 struct sizes）；ABI 1.0 冻结版随包。
 - **构建**：`build-ng` PASS，ELF **2,082,328** 字节；`disk.img` **8,388,608**
@@ -35,7 +36,7 @@
 | `docs/release/d0.md` | **新**：D0 发布说明（范围/出口/内容/安装运行/校验/已知限制/复现/边界） |
 | `docs/claims/ng-WP4-3.md` | **新**：本文件 |
 | `docs/design/README.md` | **改**：E4 状态、ABI 1.0 冻结、D0 发布、门禁与下一步 |
-| `docs/design/evolution.md` | **改**：E4 进度（WP4-1/WP4-3 完成；WP4-2/WP4-4 未完成，E4 未整体关闭） |
+| `docs/design/evolution.md` | **改**：E4 进度（WP4-1/4-2/4-3 完成；仅 WP4-4 待做，E4 未整体关闭） |
 | `dist-ng/release/d0/**` | **产物**（gitignore，不提交）：见上 |
 
 未修改 `src/**`、`sdk/include/**`、`build.ps1`、`tools/ci.ps1`、
@@ -50,6 +51,8 @@ dist-ng/release/d0/
   abi/abi-1.0.h
   abi/abi-1.0.md
   sdk/include/aster/*.h        app/display/draw/fs/ipc/session/syscall/types
+  sdk/examples/hello_d0/       main.c / README.md / screen.png（WP4-2）
+  sdk/examples/hello_gui/      main.c
   sdk/README.md
   docs/d0.md
   docs/architecture.md
@@ -58,7 +61,7 @@ dist-ng/release/d0/
   docs/sdk-getting-started.md
   LICENSE
   RELEASE-NOTES.md
-  SHA256SUMS                   20 行
+  SHA256SUMS                   24 行
   .gitignore                   *
 ```
 
@@ -97,13 +100,13 @@ build-ng: PASS -> D:\OS_Project\dist-ng\aster-ng.elf
 --- 4. RELEASE-NOTES.md ---
   write: RELEASE-NOTES.md
 --- 5. SHA256SUMS ---
-  write: SHA256SUMS (20 files)
+  write: SHA256SUMS (24 files)
 --- 6. verify SHA256SUMS ---
-[ok] 20 files verified
+[ok] 24 files verified
 --- 7. summary ---
   ...
 release-ng: PASS -> D:\OS_Project\dist-ng\release\d0
-release-ng: 20 files, SHA256SUMS verified; local only, nothing pushed
+release-ng: 24 files, SHA256SUMS verified; local only, nothing pushed
 ```
 
 > `-AllowDirty` 只用于提交前预跑；最终在 WP4-3 提交的干净工作区上重跑，
@@ -126,16 +129,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/sdk-check.ps1
 sdk-check: PASS (10 files + 237 SDK host checks)
 ```
 
-> 当前工作区另有并行会话的 `sdk/examples/hello_d0/main.c`（未提交、不属本
-> WP），所以 sdk-check 显示 10 个文件；本 WP 未改 `sdk/**`，发布包只复制
-> `sdk/include/aster/*.h`（8 个）与 `sdk/README.md`。
+> `sdk-check` 的 10 个文件包含 WP4-2 的 `sdk/examples/hello_d0/main.c`；本 WP
+> 未改 `sdk/**`，发布包复制 SDK 头（8 个）、`sdk/README.md` 与 WP4-2 示例源码。
 
 ## D0 发布边界
 
 - **是**：本地开发包/交付物；ABI 1.0 冻结；SDK 头；QEMU 可运行镜像；
   SHA256；D0 文档。
-- **不是**：签名正式发行；D0 总出口的“外部开发者测试”（WP4-2）与
-  “1 小时 smoke”（WP4-4）证据；D1 的 POSIX/网络/真机/更新。
+- **不是**：签名正式发行；D0 总出口的“1 小时 smoke”（WP4-4）证据；
+  D1 的 POSIX/网络/真机/更新。（WP4-2 外部开发者测试已由另一会话完成，
+  本包只分发其示例源码，不替代其 QEMU 证据。）
 - **不 push**：脚本不调用 `git push`，不创建远端 release，不打 tag。
 - **产物 gitignore**：`dist-ng/release/d0/.gitignore` 内容 `*`；根 `.gitignore`
   不修改。
@@ -144,7 +147,7 @@ sdk-check: PASS (10 files + 237 SDK host checks)
 
 1. **无签名/无版本清单签名**：D0 只做 SHA256；签名更新/回滚属 B 域 D1。
 2. **无安装器**：运行方式是 QEMU `-kernel`/`-drive`；真实硬件/安装器属 D1。
-3. **外部开发者测试/1h smoke 未做**：WP4-2/WP4-4，E4 未整体关闭。
+3. **1h smoke 未做**：WP4-4，E4 未整体关闭；WP4-2 已完成（`3328b8e`）。
 4. **D0 已知限制**：WM 死循环、用户 fault panic、sessiond 无接管、root-only、
    bearer ticket、无包启动、静态 ELF/无 POSIX、QEMU 矩阵有限；详见
    `docs/release/d0.md` §6。
@@ -155,7 +158,7 @@ sdk-check: PASS (10 files + 237 SDK host checks)
 
 ```text
 powershell -File tools/abi-check.ps1          # PASS
-powershell -File tools/release-ng.ps1         # PASS，20 files + SHA256 verified
+powershell -File tools/release-ng.ps1         # PASS，24 files + SHA256 verified
 powershell -File tools/sdk-check.ps1          # PASS，237 checks
 # 产物：dist-ng/release/d0/（本地，不提交）
 ```

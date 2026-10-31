@@ -310,7 +310,7 @@ alpha 骨架升到 **display 协议 v3 + session 通道**：
 | WP4-3 | D0 文档 + 发布 | docs/、dist/ | D0 可交付 |
 | WP4-4 | 1h smoke（D1 再 8h） | tools/ | 无 panic/停滞 |
 
-E4 进度（2026-10-31）：**WP4-1 与 WP4-3 完成；E4 未整体关闭**。
+E4 进度（2026-10-31）：**WP4-1、WP4-2、WP4-3 完成；E4 剩 WP4-4**。
 
 - **WP4-1 完成（ABI 1.0 冻结，v1.0.0）**：`docs/abi/abi-1.0.h` 机器可读头
   （29 个调用号、28 个错误码、64 个关键常量、4 个结构体大小）+
@@ -318,14 +318,19 @@ E4 进度（2026-10-31）：**WP4-1 与 WP4-3 完成；E4 未整体关闭**。
   策略）；草案 §10 的 13 项加冻结审计 2 项全部给出“保留/延后/已解决”结论。
   `tools/abi-check.ps1` 对 ABI 头、`sdk/include/aster/syscall.h`、
   `src/ng/syscall.h` 逐号比对，并核对错误码/内核常量/结构体布局；PASS。
+- **WP4-2 完成（外部开发者测试，受限口径）**：`sdk/examples/hello_d0`
+  （480×300、计数/交互/8s 空闲退出）+ `tools/d0-demo.ps1` 在 QEMU 里真跑，
+  从零到 GUI 约 13 分钟（agent 速度）；**不改仓库能写/能跑，但没有产品部署
+  路径**（sessiond/LAUNCH 拉起外部应用仍需安装器/包启动）。证据见
+  `docs/claims/ng-WP4-2.md`，提交 `3328b8e`。
 - **WP4-3 完成（D0 本地发布包）**：`tools/release-ng.ps1` 一条命令跑
   `abi-check` + `build-ng`，生成 `dist-ng/release/d0/`（`aster-ng.elf`、
-  `disk.img`、8 个 SDK 头、ABI 1.0、文档、`RELEASE-NOTES.md`、
-  `SHA256SUMS`）并逐文件 SHA-256 自检；只本地，不 push/签名/打 tag。
-  说明见 `docs/release/d0.md`，证据见 `docs/claims/ng-WP4-3.md`。
-- **未完成**：WP4-2（外部开发者测试，一天内写出 GUI app）与 WP4-4（1 小时
-  smoke，无 panic/停滞）不在 WP4-1/WP4-3 范围，尚无证据；D0 总出口按
-  `architecture.md` §10 仍待这两项收口。E4 状态：**进行中（2/4 WP 完成）**。
+  `disk.img`、8 个 SDK 头、`hello_d0`/`hello_gui` 示例、ABI 1.0、文档、
+  `RELEASE-NOTES.md`、`SHA256SUMS`）并逐文件 SHA-256 自检；只本地，
+  不 push/签名/打 tag。说明见 `docs/release/d0.md`，证据见
+  `docs/claims/ng-WP4-3.md`。
+- **未完成**：WP4-4（1 小时 smoke，无 panic/停滞）尚无证据；D0 总出口按
+  `architecture.md` §10 仍待这一项收口。E4 状态：**进行中（3/4 WP 完成）**。
 - 冻结后仍保留的已知缺口（不阻塞 D0，D1 前处理）：未分配号 `ENOSYS`、
   IPC 时间单位、cap/revoke、每进程 uid/fd、用户态 fault 隔离、运行时 ABI
   版本查询、`SHM_FREE`、结构体对齐校验；详见 `docs/abi/abi-1.0.md` §10。
