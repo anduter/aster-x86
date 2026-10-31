@@ -1,4 +1,4 @@
-# ng display/session 协议审计（第二轮）
+﻿# ng display/session 协议审计（第二轮）
 
 分支 `ng`，起点 `60ea988`（上一轮 partial 加固）。本轮只做 **显示/会话协议 + 状态机**，
 不碰 `src/ng/**`（syscall 审计会话的范围）、`sdk/**`、`build.ps1`、`tools/ci*.ps1`。
@@ -227,7 +227,7 @@ title 区，于是 `session_by_token()` 查不到、`token_fail++`，把内核 w
 | `70f2f96` | `src/desktop/session/sessiond.c`、`src/desktop/src/session_table.c`、`src/apps/demo/demo.c`、`tests/unit-ng/test_session.c` | 幂等 REGISTER、只认 v3 LIST_REPLY、title/path 净化、demo FOCUS 带令牌 + 6 checks |
 | `651360a` | `src/desktop/display/displayd.c` | 去掉 REGISTER_HOTKEY ack（队列投毒） |
 | `6b7fa04` | `tests/audit-ng/ui/audit_ui.c`、`tools/audit-ng-ui.ps1` | 探针第二轮用例 + 宿主驱动 |
-| 本次 HEAD | `tests/audit-ng/ui/audit_ui.c`、`tools/audit-ng-ui.ps1`、`docs/claims/ng-audit-ui.md` | v2 投毒用例 + 驱动断言 + claims |
+| `6ac066d` | `tests/audit-ng/ui/audit_ui.c`、`tools/audit-ng-ui.ps1`、`docs/claims/ng-audit-ui.md` | v2 投毒用例 + 驱动断言 + claims |
 
 ## 门禁（最终树，全部在 QEMU 空闲时跑）
 
