@@ -30,7 +30,9 @@ struct blk_env {
 - 内核：`fat_ramdisk.c` 把嵌入镜像复制到 360 个 PMM 页（1.44MB），
   read/write 按“扇区 -> 页号/页内偏移”寻址；
 - host 单测：`test_fat16.c` 的 fake disk 直接读写静态字节数组；
-- WP2-4 的 ATA/virtio-blk 只要实现同样四个字段即可复用 FAT16。
+- WP2-4 的 ATA PIO 驱动只要实现同样四个字段即可复用 FAT16：现在由
+  `src/ng/ata_blk.c` 提供 `ata_blk_env()`，真实磁盘挂到 `/mnt/disk`
+  （见 `docs/design/block-ng.md`）。
 
 ## 2. 镜像几何（1.44MB）
 
@@ -183,4 +185,5 @@ host 单测 `tests/unit-ng/test_fat16.c`（+386 checks）覆盖：坏 BPB 21 例
 - **FAT12/FAT16 簇数边界**：见 §2，1.44MB 镜像按 16 位表项几何生成。
 - **无 page cache / 预读**：每次读写直接走扇区（FAT 表有单扇区缓存）。
 - **镜像段占 2 MiB 物理段**：1.44MB `.fat16` PT_LOAD 必须由 PMM 保留；
-  后续若把镜像换成块设备（WP2-4），删除该段即可。
+  WP2-4 已把“真实块设备上的 FAT16”接上（`/mnt/disk`，见 block-ng.md），
+  但 WP2-2 的 1.44MB RAM 盘镜像与 `/mnt/fat` 保留为回归路径，不删除该段。

@@ -1,8 +1,9 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP2-3: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
+# build-ng.ps1 - ng WP2-4: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
 #               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello
 #               + VFS/ramfs（L1 服务域）+ FAT16（L1，RAM 盘镜像）+
-#               PCI/VBE/帧缓冲控制台 + PS/2 键盘（L1D 设备域））
+#               PCI/VBE/帧缓冲控制台 + PS/2 键盘（L1D 设备域）+
+#               ATA PIO 块设备 + 真实磁盘镜像上的 FAT16（L1D/L0，WP2-4））
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
@@ -18,6 +19,8 @@
 #       src/ng/fs_syscall.c（20..27 的用户指针胶水）+ src/ng/fs_selftest.c
 #       （WP2-1）、src/ng/fat16_selftest.c + src/ng/fat_ramdisk.c（WP2-2）、
 #       src/ng/wp23_selftest.c（WP2-3：PCI/VBE/fb/PS2 接线 + 自检）、
+#       src/ng/ata_blk.c + src/ng/wp24_selftest.c（WP2-4：ATA -> blk_env 适配
+#         + PCI PIIX3/真盘挂载自检）、src/drivers/block/ata.c（L1D：ATA PIO）、
 #       src/services/fs/vfs.c + ramfs.c + fat16.c（L1：VFS/ramfs/FAT16）、
 #       src/drivers/pci/pci.c + video/vbe.c + video/fb.c + video/font8x16.c
 #         + video/vga_text.c + input/ps2.c（L1D：PCI/VBE/帧缓冲/PS2）、
@@ -28,6 +31,9 @@
 # FAT16 镜像：tools/mkfat-ng.ps1 生成 obj-ng/fat16.img（1.44MB），同样用
 #           .incbin 嵌进 .rodata（ng_fat16_img_start..end），启动时由
 #           src/ng/fat_ramdisk.c 复制到 PMM RAM 盘再挂到 /mnt/fat。
+# WP2-4 磁盘：tools/mkfat-ng.ps1 -SizeMB 8 生成 dist-ng/disk.img（8MB FAT16），
+#           不嵌入内核；run-ng.ps1 用 QEMU `-drive file=...,if=ide` 挂成
+#           PIIX3 IDE 主盘，内核 ATA PIO 直接读写，FAT16 挂到 /mnt/disk。
 # 输出：dist-ng/aster-ng.elf，对象文件在 obj-ng/。
 #
 # 工具链（WP0-4 已验证）：
@@ -209,7 +215,7 @@ try { $psHost = (Get-Process -Id $PID).Path } catch { }
 if (-not $psHost) { $psHost = 'powershell' }
 $mkArgs = @('-NoProfile')
 if ($env:OS -eq 'Windows_NT') { $mkArgs += @('-ExecutionPolicy', 'Bypass') }
-$mkArgs += @('-File', $mkfat, '-Repo', $Repo, '-Out', $fatImg)
+$mkArgs += @('-File', $mkfat, '-Repo', $Repo, '-Out', $fatImg, '-SizeMB', '0')
 & $psHost @mkArgs
 if ($LASTEXITCODE -ne 0) { Fail 'mkfat-ng.ps1 failed' }
 if (-not (Test-Path -LiteralPath $fatImg)) { Fail 'fat16 image not produced' }
@@ -250,6 +256,42 @@ if ($LASTEXITCODE -ne 0) { Fail 'FAT16 image embed compile failed' }
 Write-Host ("fat16 image: PASS ({0} bytes, {1} sectors, {2} clusters)" -f $fatBytes.Length, 2880, 2841)
 Write-Host ''
 
+# ---- WP2-4：真实磁盘镜像 dist-ng/disk.img（8MB FAT16）----------------------
+Write-Host '=== disk image (WP2-4) ==='
+$diskImg = Join-Path $distDir 'disk.img'
+$mkDiskArgs = @('-NoProfile')
+if ($env:OS -eq 'Windows_NT') { $mkDiskArgs += @('-ExecutionPolicy', 'Bypass') }
+$mkDiskArgs += @('-File', $mkfat, '-Repo', $Repo, '-Out', $diskImg, '-SizeMB', '8')
+& $psHost @mkDiskArgs
+if ($LASTEXITCODE -ne 0) { Fail 'mkfat-ng.ps1 -SizeMB 8 failed' }
+if (-not (Test-Path -LiteralPath $diskImg)) { Fail 'disk.img not produced' }
+$diskBytes = [IO.File]::ReadAllBytes($diskImg)
+$diskProblems = New-Object System.Collections.Generic.List[string]
+if ($diskBytes.Length -ne 8388608) {
+    $diskProblems.Add(("disk image size {0} != 8388608" -f $diskBytes.Length))
+}
+if ($diskBytes.Length -ge 512) {
+    if ($diskBytes[510] -ne 0x55 -or $diskBytes[511] -ne 0xAA) { $diskProblems.Add('disk boot signature missing') }
+    if ([BitConverter]::ToUInt16($diskBytes, 11) -ne 512) { $diskProblems.Add('disk BPB bytes/sector != 512') }
+    if ($diskBytes[13] -ne 2) { $diskProblems.Add(('disk BPB sectors/cluster != 2 (got {0})' -f $diskBytes[13])) }
+    if ([BitConverter]::ToUInt16($diskBytes, 17) -ne 512) { $diskProblems.Add('disk BPB root entries != 512') }
+    if ([BitConverter]::ToUInt16($diskBytes, 19) -ne 16384) { $diskProblems.Add('disk BPB total sectors != 16384') }
+    if ($diskBytes[38] -ne 0x29) { $diskProblems.Add('disk BPB extended signature missing') }
+    $diskHello = [Text.Encoding]::ASCII.GetString($diskBytes, 97 * 512, 18)
+    if ($diskHello -ne "hello from fat16`r`n") { $diskProblems.Add('disk HELLO.TXT content mismatch') }
+}
+if ($diskProblems.Count -gt 0) {
+    foreach ($p in $diskProblems) { Write-Host ("  ! {0}" -f $p) }
+    Fail 'disk image verification failed'
+}
+$diskFatSec = [BitConverter]::ToUInt16($diskBytes, 22)
+$diskRootSec = 32
+$diskDataStart = 1 + 2 * $diskFatSec + $diskRootSec
+$diskClusters = [int][Math]::Floor((16384 - $diskDataStart) / 2)
+Write-Host ("disk image: PASS ({0} bytes, 16384 sectors, fats={1}x{2}, data.start={3}, clusters={4})" -f `
+    $diskBytes.Length, 2, $diskFatSec, $diskDataStart, $diskClusters)
+Write-Host ''
+
 # WP1-5 additions: switch.S, sched_arch.c, sched.c, sched_selftest.c.
 # WP1-6 additions: handle.c, ipc_core.c, ipc.c, ipc_selftest.c.
 # WP1-7 additions: mem.c（freestanding memcpy/memset）、elf.c、useras.c、
@@ -263,13 +305,14 @@ Write-Host ''
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'main.c')
 # L1 服务域源码（相对仓库根；-I src/ng 与 -I src/services/fs/include 已加）。
 $serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c', 'src/services/fs/fat16.c')
 # L1D 设备域源码（相对仓库根；-I src/drivers/include 已加）。
 $driverSources = @('src/drivers/pci/pci.c', 'src/drivers/video/vbe.c',
     'src/drivers/video/fb.c', 'src/drivers/video/font8x16.c',
-    'src/drivers/video/vga_text.c', 'src/drivers/input/ps2.c')
+    'src/drivers/video/vga_text.c', 'src/drivers/input/ps2.c',
+    'src/drivers/block/ata.c')
 $steps = $asmSources.Count + $cSources.Count + $serviceSources.Count + $driverSources.Count + 1
 $step = 0
 $asmObjs = New-Object System.Collections.Generic.List[string]

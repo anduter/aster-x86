@@ -1,9 +1,15 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP2-3: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP2-4: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
 # 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
 #                      -display none -no-reboot -m 256 -cpu max -vga std
+#
+# WP2-4 追加：
+#   - `-drive file=dist-ng/disk.img,format=raw,if=ide`：8MB FAT16 磁盘镜像挂到
+#     QEMU PIIX3 IDE 主盘（legacy 0x1F0/0x3F6）；内核 ATA PIO 读它并挂 /mnt/disk。
+#     镜像由 tools/build-ng.ps1 -> tools/mkfat-ng.ps1 -SizeMB 8 生成；ELF 或镜像
+#     缺失时本脚本先跑一次 build-ng.ps1。
 #
 # WP2-3 追加：
 #   - `-vga std`（PCI 1234:1111 + Bochs VBE 1280x800x32）；
@@ -57,9 +63,15 @@
 #   ng: fat16 write ok / ng: fat16 chain edge ok (n=...) /
 #   ng: fat16 bad bpb rejected (n=...) / ng: WP2-2 selftest PASS
 #   <用户态> ng: fs fat read ok / write ok / stat ok / unlink ok
+# WP2-4 追加（ATA PIO + 真实磁盘 FAT16 + ring3 disk demo）：
+#   ng: ata identify ok (model=..., sectors=...) / ng: ata read ok /
+#   ng: ata write ok / ng: ata timeout rejected (n=...) /
+#   ng: disk fat16 mount ok (clusters=...) / ng: disk file rw ok /
+#   ng: WP2-4 selftest PASS
+#   <用户态> ng: fs disk read ok / write ok / stat ok
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
 # ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数、
-# FAT16 簇数/链边界/坏 BPB 计数。
+# FAT16 簇数/链边界/坏 BPB 计数、ATA 型号/扇区数、磁盘 FAT16 簇数。
 # WP2-3 追加（std 模式）：
 #   ng: pci vga found / ng: vbe mode 1280x800x32 ok /
 #   ng: fb draw ok (readback) / ng: kbd init ok / ng: input event ok /
@@ -74,6 +86,7 @@
 # 若 ELF 不存在会先调用 tools/build-ng.ps1（干净检出也能一条命令 PASS）。
 #
 # usage: powershell -File tools/run-ng.ps1 [-Repo <root>] [-ElfPath <elf>]
+#                                           [-DiskImg <disk.img>]
 #                                           [-TimeoutSec 20] [-SerialLog <path>]
 #                                           [-Cpu max] [-Panic] [-Fallback]
 #                                           [-NoQmp] [-Vga std]
@@ -82,6 +95,7 @@
 param(
     [string]$Repo = '',
     [string]$ElfPath = '',
+    [string]$DiskImg = '',
     [int]$TimeoutSec = 20,
     [string]$SerialLog = '',
     [string]$Cpu = 'max',
@@ -175,7 +189,17 @@ if ($Panic) {
         'ng: fat16 write ok',
         'ng: fat16 chain edge ok',
         'ng: fat16 bad bpb rejected',
-        'ng: WP2-2 selftest PASS'
+        'ng: WP2-2 selftest PASS',
+        'ng: ata identify ok',
+        'ng: ata read ok',
+        'ng: ata write ok',
+        'ng: ata timeout rejected',
+        'ng: disk fat16 mount ok',
+        'ng: disk file rw ok',
+        'ng: fs disk read ok',
+        'ng: fs disk write ok',
+        'ng: fs disk stat ok',
+        'ng: WP2-4 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -197,7 +221,14 @@ if ($Panic) {
         'ng: fs listdir ok \(n=1\)',
         'ng: fat16 mount ok \(clusters=[0-9]+\)',
         'ng: fat16 chain edge ok \(n=[0-9]+\)',
-        'ng: fat16 bad bpb rejected \(n=[0-9]+\)'
+        'ng: fat16 bad bpb rejected \(n=[0-9]+\)',
+        'ng: ata identify ok \(model=[^)]*sectors=[0-9]+ lba28=1 lba48=[01]\)',
+        'ng: ata read ok \(lba=0 sig=0x[0-9a-f]+\)',
+        'ng: ata write ok \(lba=[0-9]+ verify=1 restored=1\)',
+        'ng: ata timeout rejected \(n=[0-9]+\)',
+        'ng: disk fat16 mount ok \(clusters=[0-9]+\)',
+        'ng: disk file rw ok \(bytes=600\)',
+        'ng: ata stat reads=[0-9]+ writes=[0-9]+ timeouts=[0-9]+ errors=[0-9]+'
     )
 
     # WP2-3：显示/输入证据行。stdvga 与 -vga none 降级路径各取一套。
@@ -257,6 +288,9 @@ if ($Panic) {
         'ng: WP2-1 selftest FAIL',
         'ng: fat16 .* FAIL',
         'ng: WP2-2 selftest FAIL',
+        'ng: ata .* FAIL',
+        'ng: disk .* FAIL',
+        'ng: WP2-4 selftest FAIL',
         'ng: WP2-3 selftest FAIL',
         'ng: pci vga .* FAIL',
         'ng: vbe .* FAIL',
@@ -284,7 +318,7 @@ function Fail([string]$msg) {
     exit 1
 }
 
-# ---- 内核 ELF --------------------------------------------------------------
+# ---- 内核 ELF + WP2-4 磁盘镜像 ---------------------------------------------
 if ($ElfPath) {
     if (-not (Test-Path -LiteralPath $ElfPath)) { Fail ("ELF not found: {0}" -f $ElfPath) }
     $elf = (Resolve-Path -LiteralPath $ElfPath).Path
@@ -292,8 +326,15 @@ if ($ElfPath) {
     $elf = Join-Path (Join-Path $Repo 'dist-ng') 'aster-ng.elf'
 }
 
-if (-not (Test-Path -LiteralPath $elf)) {
-    Write-Host 'run-ng: kernel not built yet, running build-ng.ps1 first'
+if ($DiskImg) {
+    if (-not (Test-Path -LiteralPath $DiskImg)) { Fail ("disk image not found: {0}" -f $DiskImg) }
+    $disk = (Resolve-Path -LiteralPath $DiskImg).Path
+} else {
+    $disk = Join-Path (Join-Path $Repo 'dist-ng') 'disk.img'
+}
+
+if (-not (Test-Path -LiteralPath $elf) -or -not (Test-Path -LiteralPath $disk)) {
+    Write-Host 'run-ng: kernel/disk image not built yet, running build-ng.ps1 first'
     $build = Join-Path $PSScriptRoot 'build-ng.ps1'
     $psHost = $null
     try { $psHost = (Get-Process -Id $PID).Path } catch { }
@@ -304,6 +345,7 @@ if (-not (Test-Path -LiteralPath $elf)) {
     & $psHost @buildArgs
     if ($LASTEXITCODE -ne 0) { Fail 'build-ng.ps1 failed' }
     if (-not (Test-Path -LiteralPath $elf)) { Fail 'build-ng.ps1 did not produce the ELF' }
+    if (-not (Test-Path -LiteralPath $disk)) { Fail 'build-ng.ps1 did not produce dist-ng/disk.img' }
 }
 
 # ---- QEMU ------------------------------------------------------------------
@@ -329,8 +371,9 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP2-3) ==='
+Write-Host '=== run-ng (WP2-4) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
+Write-Host ("disk: {0} ({1} bytes, ide)" -f $disk, (Get-Item -LiteralPath $disk).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }
 
@@ -400,10 +443,12 @@ function Send-QmpKey($Qmp, [string]$Key) {
     return $false
 }
 
-# -kernel 之后是 ELF；-serial file: 让脚本可轮询；headless、不自动重启、256 MiB
+# -kernel 之后是 ELF；-serial file: 让脚本可轮询；headless、不自动重启、256 MiB；
+# -drive if=ide 把 8MB FAT16 镜像挂到 PIIX3 IDE 主盘（legacy 0x1F0/0x3F6）。
 $qemuArgs = @(
     '-kernel', ('"' + $elf + '"'),
     '-serial', ('"file:' + $SerialLog + '"'),
+    '-drive', ('"file=' + $disk + ',format=raw,if=ide"'),
     '-display', 'none',
     '-no-reboot',
     '-m', '256',
@@ -413,7 +458,7 @@ $qemuArgs = @(
 if ($qmpPort -gt 0) {
     $qemuArgs += @('-qmp', ("tcp:127.0.0.1:{0},server=on,wait=off" -f $qmpPort))
 }
-Write-Host ("args: -kernel <elf> -serial file:<log> -display none -no-reboot -m 256 -cpu {0} -vga {1} (timeout {2}s, qmp {3})" -f $Cpu, $useVga, $TimeoutSec, $(if ($qmpPort) { $qmpPort } else { 'off' }))
+Write-Host ("args: -kernel <elf> -serial file:<log> -drive file=<disk.img>,format=raw,if=ide -display none -no-reboot -m 256 -cpu {0} -vga {1} (timeout {2}s, qmp {3})" -f $Cpu, $useVga, $TimeoutSec, $(if ($qmpPort) { $qmpPort } else { 'off' }))
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $spArgs = @{

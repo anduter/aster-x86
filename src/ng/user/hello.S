@@ -19,6 +19,11 @@
 #   read("/mnt/fat/HELLO.TXT") 校验 18 字节 ->
 #   create("/mnt/fat/NEW.TXT") + write("fat16") -> stat(size=5) ->
 #   unlink -> stat 必须 -ENOENT。
+#
+# WP2-4 demo（内核已把 ATA 真实磁盘的 FAT16 挂到 /mnt/disk）：
+#   read("/mnt/disk/HELLO.TXT") 校验 18 字节 ->
+#   create/truncate("/mnt/disk/DISK.TXT") + write("disk24") -> 重开读回校验 ->
+#   stat(size=6)。
 #   每步失败就 exit(1)；成功打印 "ng: fs ..." 证据行。
 #
 # 系统调用约定（ABI 1.0 草案）：
@@ -233,6 +238,100 @@ _start:
     jne .Lfail
     PRINT_MSG fat_msg_unlink, fat_msg_unlink_len
 
+    # ---- WP2-4：真实磁盘镜像挂载点 /mnt/disk ------------------------------
+    # 20 open("/mnt/disk/HELLO.TXT", O_RDONLY) -> 21 read 18 字节并校验
+    leaq disk_hello_path(%rip), %rdi
+    xorl %esi, %esi
+    xorl %edx, %edx
+    movl $20, %eax
+    syscall
+    testq %rax, %rax
+    jle .Lfail
+    movq %rax, fs_fd(%rip)
+    movq fs_fd(%rip), %rdi
+    leaq fs_readbuf(%rip), %rsi
+    movl $32, %edx
+    movl $21, %eax
+    syscall
+    cmpq $18, %rax
+    jne .Lfail
+    leaq fs_readbuf(%rip), %rdi
+    leaq fat_hello(%rip), %rsi        # 同一份 "hello from fat16\r\n"
+    movl $18, %ecx
+    cld
+    repe cmpsb
+    jne .Lfail
+    movq fs_fd(%rip), %rdi
+    movl $23, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    PRINT_MSG disk_msg_read, disk_msg_read_len
+
+    # 20 open("/mnt/disk/DISK.TXT", O_CREAT|O_RDWR|O_TRUNC, 0644) -> 22 write
+    leaq disk_file_path(%rip), %rdi
+    movl $0x242, %esi
+    movl $0644, %edx
+    movl $20, %eax
+    syscall
+    testq %rax, %rax
+    jle .Lfail
+    movq %rax, fs_fd(%rip)
+    movq fs_fd(%rip), %rdi
+    leaq disk_data(%rip), %rsi
+    movl $6, %edx
+    movl $22, %eax
+    syscall
+    cmpq $6, %rax
+    jne .Lfail
+    movq fs_fd(%rip), %rdi
+    movl $23, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+
+    # 重新打开只读 -> 21 read 6 字节读回校验（offset 从 0 开始）
+    leaq disk_file_path(%rip), %rdi
+    xorl %esi, %esi
+    xorl %edx, %edx
+    movl $20, %eax
+    syscall
+    testq %rax, %rax
+    jle .Lfail
+    movq %rax, fs_fd(%rip)
+    movq fs_fd(%rip), %rdi
+    leaq fs_readbuf(%rip), %rsi
+    movl $16, %edx
+    movl $21, %eax
+    syscall
+    cmpq $6, %rax
+    jne .Lfail
+    leaq fs_readbuf(%rip), %rdi
+    leaq disk_data(%rip), %rsi
+    movl $6, %ecx
+    cld
+    repe cmpsb
+    jne .Lfail
+    movq fs_fd(%rip), %rdi
+    movl $23, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    PRINT_MSG disk_msg_write, disk_msg_write_len
+
+    # 24 stat("/mnt/disk/DISK.TXT")：type=FILE(1)、size=6
+    leaq disk_file_path(%rip), %rdi
+    leaq fs_statbuf(%rip), %rsi
+    movl $24, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    cmpl $1, fs_statbuf(%rip)
+    jne .Lfail
+    cmpq $6, fs_statbuf+8(%rip)
+    jne .Lfail
+    PRINT_MSG disk_msg_stat, disk_msg_stat_len
+
     # ---- WP2-3：readkey（30）非阻塞轮询 -----------------------------------
     # 先打印 ready，run-ng 用 QMP input-send-event 注入 'a'；没有注入时走超时分支。
     # 返回 (flags<<24)|(ascii<<16)|scancode；-EAGAIN(-11) 继续重试。
@@ -312,6 +411,15 @@ fat_msg_stat:
 fat_msg_unlink:
     .ascii "ng: fs fat unlink ok\r\n"
     .set fat_msg_unlink_len, . - fat_msg_unlink
+disk_msg_read:
+    .ascii "ng: fs disk read ok\r\n"
+    .set disk_msg_read_len, . - disk_msg_read
+disk_msg_write:
+    .ascii "ng: fs disk write ok\r\n"
+    .set disk_msg_write_len, . - disk_msg_write
+disk_msg_stat:
+    .ascii "ng: fs disk stat ok (size=6)\r\n"
+    .set disk_msg_stat_len, . - disk_msg_stat
 input_ready_msg:
     .ascii "ng: ring3 input ready\r\n"
     .set input_ready_msg_len, . - input_ready_msg
@@ -333,6 +441,9 @@ fat_hello:
 fat_data:
     .ascii "fat16"
     .set fat_data_len, . - fat_data
+disk_data:
+    .ascii "disk24"
+    .set disk_data_len, . - disk_data
 fs_path:
     .asciz "/tmp/a"
 fs_tmp:
@@ -341,6 +452,10 @@ fat_hello_path:
     .asciz "/mnt/fat/HELLO.TXT"
 fat_new_path:
     .asciz "/mnt/fat/NEW.TXT"
+disk_hello_path:
+    .asciz "/mnt/disk/HELLO.TXT"
+disk_file_path:
+    .asciz "/mnt/disk/DISK.TXT"
 
     .section .data
     .align 8

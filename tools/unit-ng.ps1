@@ -25,6 +25,9 @@
 #   - src/drivers/{pci,video,input} : WP2-3 的 L1D 驱动（PCI 地址/BAR、Bochs VBE
 #                寄存器、8x16 字体、帧缓冲绘制/读回、VGA 文本、PS/2 scancode/
 #                环形缓冲），端口 IO 全部注入 fake ops（tests/unit-ng/test_drivers.c）
+#   - src/drivers/block/ata.c + src/ng/ata_blk.c : WP2-4 的 ATA PIO 驱动与
+#                blk_env 适配（寄存器/LBA/BSY-DRQ-ERR-超时状态机、FAT16 在
+#                fake ATA 盘上读写，tests/unit-ng/test_ata.c）
 # 这些模块不 include 串口/端口 IO，所以能脱离内核直接跑。
 #
 # 输出必须包含 `N checks, M failures`；M=0 且 N>=20 才算 PASS。
@@ -80,6 +83,8 @@ $sources = @(
     'src/services/fs/vfs.c',
     'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',
+    'src/ng/ata_blk.c',
+    'src/drivers/block/ata.c',
     'src/drivers/pci/pci.c',
     'src/drivers/video/vbe.c',
     'src/drivers/video/fb.c',
@@ -98,6 +103,7 @@ $sources = @(
     'tests/unit-ng/test_syscall.c',
     'tests/unit-ng/test_vfs.c',
     'tests/unit-ng/test_fat16.c',
+    'tests/unit-ng/test_ata.c',
     'tests/unit-ng/test_drivers.c'
 )
 $srcPaths = @()

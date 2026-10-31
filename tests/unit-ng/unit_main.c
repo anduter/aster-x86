@@ -18,6 +18,7 @@ int test_uaccess(void);
 int test_syscall(void);
 int test_vfs(void);
 int test_fat16(void);
+int test_ata(void);
 int test_drivers(void);
 
 int ut_checks;
@@ -44,6 +45,7 @@ int main(void)
     test_syscall();
     test_vfs();
     test_fat16();
+    test_ata();
     test_drivers();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);

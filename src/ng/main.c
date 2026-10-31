@@ -18,7 +18,10 @@
  *      要调 20..27，所以排在 WP1-7 之前）；
  *  10. FAT16 自检（WP2-2：嵌入镜像 -> PMM RAM 盘 -> /mnt/fat；ring3 demo
  *      读 HELLO.TXT / 建 NEW.TXT，所以必须排在 WP1-7 之前）；
- *  11. ELF64 加载器 + ring3 hello（WP1-7：PMM 页、用户地址空间、CR3
+ *  11. 块设备自检（WP2-4：PCI PIIX3 + ATA PIO -> 真实 disk.img 上的 FAT16
+ *      挂到 /mnt/disk；ring3 demo 读 HELLO.TXT / 写 DISK.TXT，所以排在
+ *      WP1-7 之前）；
+ *  12. ELF64 加载器 + ring3 hello（WP1-7：PMM 页、用户地址空间、CR3
  *      切换、copyin/copyout、per-thread 内核栈；排在 WP1-6/2-1 之后）。
  *
  * ipc_init() 不分配内存，只把端口表/句柄表清零并绑定环境钩子，所以放在
@@ -41,6 +44,7 @@
 #include "trap.h"
 #include "types.h"
 #include "wp23.h"
+#include "wp24.h"
 
 void kmain(u64 mb_info)
 {
@@ -173,6 +177,24 @@ void kmain(u64 mb_info)
     }
 
     serial_puts("ng: WP2-2 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+
+    /* WP2-4：ATA PIO + 真实磁盘镜像上的 FAT16（/mnt/disk）。ring3 demo 要读
+     * HELLO.TXT、写 DISK.TXT，所以排在 ELF64/ring3 之前。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += wp24_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP2-4 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP2-4 selftest ");
     if (fails == 0) {
         serial_puts("PASS\r\n");
     } else {

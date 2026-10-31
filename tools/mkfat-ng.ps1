@@ -1,31 +1,38 @@
 ﻿# =============================================================================
-# mkfat-ng.ps1 - ng WP2-2: 生成 1.44MB FAT16 测试镜像（HELLO.TXT + DIR/A.TXT）
+# mkfat-ng.ps1 - ng WP2-2/2-4: 生成 FAT16 测试镜像
 #
-# 为什么是 FAT16：ng 的 FAT16 后端只认 16 位 FAT 表项几何。1.44MB 软盘几何
-# 下簇只有 2841 个，按微软原始规范会落进 FAT12 的簇数区间；本 WP 的判定标准
-# 是 **BPB 与 16 位表项一致**（FAT 区必须覆盖 clusters+2 个 16 位项），所以
-# 镜像用 fat_sectors=12（FAT12 的 1.44MB 软盘是 9）容纳 2843 个表项，其余
-# 几何保持软盘标准（512B/扇区、1 扇区/簇、2 份 FAT、224 个根目录项）。
+# 两种模式（同一份镜像构造代码）：
+#   - 默认 / -SizeMB >= 1：真实磁盘镜像 dist-ng/disk.img（默认 8MB，FAT16），
+#     由 run-ng.ps1 以 `-drive file=...,format=raw,if=ide` 挂到 QEMU 的
+#     PIIX3 IDE 主盘；内核 ATA PIO 驱动读它，FAT16 挂到 /mnt/disk。
+#   - -SizeMB 0：1.44MB 软盘几何（WP2-2 的 RAM 盘镜像 obj-ng/fat16.img），
+#     由 build-ng.ps1 以 .incbin 嵌进内核、启动时复制到 PMM RAM 盘挂在 /mnt/fat。
 #
-# 布局（2880 扇区 = 1474560 字节）：
+# 为什么 FAT16 判定是“16 位 FAT 表项几何”而不是簇数 >= 4085：WP2-2 的 1.44MB
+# 镜像只有 2841 个簇（按微软原始规范属于 FAT12 区间），但 FAT 区用 12 个扇区
+# 容纳了 clusters+2 个 16 位项，所以 FAT16 后端（fat16.c）按表项几何接受它。
+# 8MB 默认镜像因为 2 扇区/簇得到 8143 个簇，本身就落在 FAT16 区间（>= 4085）。
+#
+# 8MB 布局（16384 扇区 = 8388608 字节，2 扇区/簇 = 1024B/簇）：
 #   [0]                 引导扇区 / BPB
-#   [1..12]             FAT #1（12 扇区，可放 3072 个 16 位表项）
-#   [13..24]            FAT #2（副本）
-#   [25..38]            根目录（224 项 = 14 扇区）
-#   [39..]              数据区：簇 2 = HELLO.TXT 内容
-#                             簇 3 = DIR/A.TXT 内容
-#                             簇 4 = DIR 子目录（".", "..", A.TXT）
-#   clusters = (2880 - 39) / 1 = 2841
+#   [1..32]             FAT #1（32 扇区 = 8192 个 16 位表项）
+#   [33..64]            FAT #2（副本）
+#   [65..96]            根目录（512 项 = 32 扇区）
+#   [97..]              数据区：簇 2 = HELLO.TXT、簇 3 = DIR/A.TXT、
+#                             簇 4 = DIR 子目录
+#   clusters = (16384 - 97) / 2 = 8143
 #
-# 生成结果同时被 build-ng.ps1 用 .incbin 嵌进内核 .rodata，启动时复制到
-# PMM RAM 盘（src/ng/fat_ramdisk.c）。
+# 内容与 1.44MB 镜像一致：HELLO.TXT（18B "hello from fat16\r\n"）、
+# DIR/A.TXT（6B "dir a\n"）；ring3 demo 会另建 DISK.TXT。
 #
-# usage: powershell -File tools/mkfat-ng.ps1 [-Repo <root>] [-Out obj-ng/fat16.img]
+# usage: powershell -File tools/mkfat-ng.ps1 [-Repo <root>] [-Out dist-ng/disk.img]
+#                                            [-SizeMB 8]     # 0 = 1.44MB legacy
 # 退出码：0 = PASS；1 = FAIL。
 # =============================================================================
 param(
     [string]$Repo = '',
-    [string]$Out = 'obj-ng/fat16.img'
+    [string]$Out = 'dist-ng/disk.img',
+    [int]$SizeMB = 8
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,27 +49,65 @@ function Fail([string]$msg) {
     exit 1
 }
 
-# ---- 几何（1.44MB 软盘，FAT16 表项）---------------------------------------
+# ---- 几何 ------------------------------------------------------------------
 $BytesPerSector = 512
-$SecPerCluster = 1
 $Reserved = 1
 $NumFats = 2
-$RootEntries = 224
-$FatSectors = 12
-$TotalSectors = 2880
-$RootStart = $Reserved + $NumFats * $FatSectors          # 25
-$RootDirSectors = [int][Math]::Ceiling($RootEntries * 32 / $BytesPerSector) # 14
-$DataStart = $RootStart + $RootDirSectors                # 39
-$Clusters = [int](($TotalSectors - $DataStart) / $SecPerCluster) # 2841
-$ImageBytes = $TotalSectors * $BytesPerSector
 
-if ($Clusters -gt 65524) { Fail ("too many clusters: {0}" -f $Clusters) }
+if ($SizeMB -eq 0) {
+    # WP2-2：1.44MB 软盘几何 + 16 位表项几何
+    $ModeText = 'legacy 1.44MB'
+    $TotalSectors = 2880
+    $SecPerCluster = 1
+    $RootEntries = 224
+    $Media = 0xF0
+    $DriveNumber = 0x00
+    $VolumeLabel = 'ASTERFAT16 '
+    $VolumeId = [uint32]0x4E473230        # "NG02"
+} elseif ($SizeMB -ge 1 -and $SizeMB -le 64) {
+    # WP2-4：真实磁盘（8MB 默认）——2 扇区/簇得到 >= 4085 个簇，是真 FAT16。
+    $ModeText = ("disk {0}MB" -f $SizeMB)
+    $TotalSectors = [int]($SizeMB * 1024 * 1024 / $BytesPerSector)
+    $SecPerCluster = 2
+    $RootEntries = 512
+    $Media = 0xF8
+    $DriveNumber = 0x80
+    $VolumeLabel = 'ASTERDISK  '
+    $VolumeId = [uint32]0x4E473234        # "NG24"
+} else {
+    Fail ("-SizeMB out of range: {0} (0 = 1.44MB, 1..64 = FAT16 disk)" -f $SizeMB)
+}
+
+$RootDirSectors = [int][Math]::Ceiling($RootEntries * 32 / $BytesPerSector)
+
+# FAT 区大小与簇数互相依赖：迭代到不动点（最多 8 轮）。
+$FatSectors = 1
+$DataStart = 0
+$Clusters = 0
+for ($it = 0; $it -lt 8; $it++) {
+    $DataStart = $Reserved + $NumFats * $FatSectors + $RootDirSectors
+    if ($DataStart -ge $TotalSectors) { Fail ("no data area: data.start={0}" -f $DataStart) }
+    $Clusters = [int][Math]::Floor(($TotalSectors - $DataStart) / $SecPerCluster)
+    $FatNeeded = [int][Math]::Ceiling(($Clusters + 2) * 2 / $BytesPerSector)
+    if ($FatSectors -eq $FatNeeded) { break }
+    $FatSectors = $FatNeeded
+}
+$DataStart = $Reserved + $NumFats * $FatSectors + $RootDirSectors
+$Clusters = [int][Math]::Floor(($TotalSectors - $DataStart) / $SecPerCluster)
 $FatNeeded = [int][Math]::Ceiling(($Clusters + 2) * 2 / $BytesPerSector)
+
+if ($Clusters -lt 2 -or $Clusters -gt 65524) {
+    Fail ("clusters out of FAT16 range: {0}" -f $Clusters)
+}
 if ($FatSectors -lt $FatNeeded) {
     Fail ("FAT too small: {0} sectors, need {1}" -f $FatSectors, $FatNeeded)
 }
+if ($FatSectors -gt 0xFFFF) { Fail ("FAT too large: {0} sectors" -f $FatSectors) }
 
-Write-Host '=== mkfat-ng (WP2-2) ==='
+$ImageBytes = $TotalSectors * $BytesPerSector
+
+Write-Host '=== mkfat-ng (WP2-2/2-4) ==='
+Write-Host ("mode: {0}" -f $ModeText)
 Write-Host ("geometry: {0} sectors x {1}, spc={2}, FATS={3}x{4}, root={5} ({6} sec)" -f `
     $TotalSectors, $BytesPerSector, $SecPerCluster, $NumFats, $FatSectors, $RootEntries, $RootDirSectors)
 Write-Host ("          data.start={0}, clusters={1}, bytes/cluster={2}" -f `
@@ -119,18 +164,23 @@ $img[13] = [byte]$SecPerCluster
 Set-U16 14 $Reserved
 $img[16] = [byte]$NumFats
 Set-U16 17 $RootEntries
-Set-U16 19 $TotalSectors
-$img[21] = 0xF0                       # media：可移动盘
+if ($TotalSectors -le 0xFFFF) {
+    Set-U16 19 $TotalSectors
+    Set-U32 32 0
+} else {
+    Set-U16 19 0
+    Set-U32 32 ([uint32]$TotalSectors)
+}
+$img[21] = [byte]$Media
 Set-U16 22 $FatSectors
 Set-U16 24 18                         # sectors/track
 Set-U16 26 2                          # heads
 Set-U32 28 0                          # hidden sectors
-Set-U32 32 0                          # total sectors (32-bit)；<= 65535 时为 0
-$img[36] = 0x00                       # drive number（软盘）
+$img[36] = [byte]$DriveNumber         # drive number（0x00 软盘 / 0x80 硬盘）
 $img[37] = 0x00
 $img[38] = 0x29                       # extended boot signature
-Set-U32 39 ([uint32]0x4E473230)       # volume id "NG02"
-$label = [Text.Encoding]::ASCII.GetBytes('ASTERFAT16 ')
+Set-U32 39 $VolumeId
+$label = [Text.Encoding]::ASCII.GetBytes($VolumeLabel)
 [Array]::Copy($label, 0, $img, 43, 11)
 $fstype = [Text.Encoding]::ASCII.GetBytes('FAT16   ')
 [Array]::Copy($fstype, 0, $img, 54, 8)
@@ -144,7 +194,8 @@ Set-Fat 3 0xFFFF
 Set-Fat 4 0xFFFF
 
 # ---- 根目录 ----------------------------------------------------------------
-Set-DirEntry $RootStart 0 'ASTERFAT16 ' 0x08 0 0
+$RootStart = $Reserved + $NumFats * $FatSectors
+Set-DirEntry $RootStart 0 $VolumeLabel 0x08 0 0
 Set-DirEntry $RootStart 1 'HELLO   TXT' 0x20 2 18
 Set-DirEntry $RootStart 2 'DIR        ' 0x10 4 0
 # index 3.. 保持 0x00：目录结束
@@ -166,11 +217,19 @@ $check = [IO.File]::ReadAllBytes($Out)
 if ($check.Length -ne $ImageBytes) { Fail ("output size {0} != {1}" -f $check.Length, $ImageBytes) }
 if ($check[510] -ne 0x55 -or $check[511] -ne 0xAA) { Fail 'boot signature missing' }
 if ([BitConverter]::ToUInt16($check, 11) -ne 512) { Fail 'BPB bytes/sector != 512' }
-if ([BitConverter]::ToUInt16($check, 19) -ne $TotalSectors) { Fail 'BPB total sectors mismatch' }
+if ($check[13] -ne $SecPerCluster) { Fail 'BPB sectors/cluster mismatch' }
+if ([BitConverter]::ToUInt16($check, 17) -ne $RootEntries) { Fail 'BPB root entries mismatch' }
+if ([BitConverter]::ToUInt16($check, 22) -ne $FatSectors) { Fail 'BPB FAT size mismatch' }
+$bpbTotal = if ($TotalSectors -le 0xFFFF) {
+    [BitConverter]::ToUInt16($check, 19)
+} else {
+    [BitConverter]::ToUInt32($check, 32)
+}
+if ($bpbTotal -ne $TotalSectors) { Fail 'BPB total sectors mismatch' }
 
 $hello = [Text.Encoding]::ASCII.GetString($check, ($DataStart + 0) * 512, 18)
 if ($hello -ne "hello from fat16`r`n") { Fail 'HELLO.TXT content mismatch' }
-$a = [Text.Encoding]::ASCII.GetString($check, ($DataStart + 1) * 512, 6)
+$a = [Text.Encoding]::ASCII.GetString($check, ($DataStart + 1 * $SecPerCluster) * 512, 6)
 if ($a -ne "dir a`n") { Fail 'DIR/A.TXT content mismatch' }
 
 Write-Host ("files: HELLO.TXT (18 bytes), DIR/A.TXT (6 bytes)")

@@ -75,7 +75,7 @@ E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP
 | WP2-6 | shell 移植 | src/apps | 64 位 shell 可交互 |
 | WP2-7 | parity 套件 100 项 | tests/ | 100 项通过 |
 
-E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3 完成**（tag 待 E2 收口时打）。
+E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4 完成**（tag 待 E2 收口时打）。
 `src/services/fs` 成为第一个真正落地的 L1 服务域；`src/drivers` 成为第一个
 L1D 设备域：
 
@@ -95,20 +95,33 @@ L1D 设备域：
   帧缓冲控制台 + 棋盘/文字/像素读回自检；`-vga none` 回退 VGA 文本 0xB8000；
   PS/2 set 1 键盘 + 128 项事件环 + 非阻塞 syscall 30 `readkey`；ring3 demo
   经 run-ng QMP `input-send-event` 注入按键，打印 `ng: ring3 input ok (key=a)`；
+- WP2-4 块设备（`src/drivers/block/ata.c`，L1D）：legacy 0x1F0/0x3F6 的 ATA
+  PIO（IDENTIFY / LBA28 READ / WRITE / FLUSH），PCI 确认 QEMU PIIX3 IDE
+  （8086:7010）；所有等待都是有界轮询（BSY/DRQ/ERR/DF + 超时），错误返回
+  EIO、超时返回 ETIMEDOUT、不 panic；`src/ng/ata_blk.c` 把驱动包装成 L1
+  `blk_env`（L1D 不向上依赖 L1）；`tools/mkfat-ng.ps1 -SizeMB 8` 生成
+  `dist-ng/disk.img`（8MB FAT16、8143 簇），run-ng 以
+  `-drive file=...,format=raw,if=ide` 挂成 IDE 主盘，FAT16 挂 `/mnt/disk`；
+  ring3 demo 读 `HELLO.TXT`、写/读回 `DISK.TXT`、stat；
 - 内核自检 `ng: vfs mount ok` / `ng: ramfs write/read ok` / `ng: fd bad
   rejected` / `ng: vfs path edge ok` / `ng: WP2-1 selftest PASS`，`ng: fat16
   mount ok (clusters=2841)` / `read ok` / `write ok` / `chain edge ok` /
   `bad bpb rejected` / `ng: WP2-2 selftest PASS`，以及 WP2-3 的
   `ng: pci vga found` / `ng: vbe mode 1280x800x32 ok` /
   `ng: fb draw ok (readback)` / `ng: kbd init ok` / `ng: input event ok` /
-  `ng: WP2-3 selftest PASS`；run-ng **70 条期望行 + 27 条正则**（`-Fallback`
-  为 69/21）；
-- host 单测 1085 → 1438（WP2-1）→ 1824（WP2-2）→ **2290 checks**（WP2-3 +466，
-  含 `tests/unit-ng/test_drivers.c` 的 PCI/BAR、VBE、字体、键映射、环形缓冲、
-  VGA 文本、帧缓冲读回）；旧 32 位 305/305；
-- 设计/限制见 `docs/design/vfs-ng.md`、`fat16-ng.md`、`display-input-ng.md`，
-  证据见 `docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、`ng-WP2-3.md`。块设备
-  （WP2-4）/shell（WP2-6）未动；fb/输入不做 IRQ/鼠标（E3/C 之后）。
+  `ng: WP2-3 selftest PASS`，以及 WP2-4 的
+  `ng: ata identify ok (model=QEMU HARDDISK sectors=16384)` / `ata read ok` /
+  `ata write ok` / `ata timeout rejected` / `disk fat16 mount ok (clusters=8143)` /
+  `disk file rw ok` / `ng: WP2-4 selftest PASS`；run-ng **80 条期望行 + 34 条正则**
+  （`-Fallback` 为 79/28）；
+- host 单测 1085 → 1438（WP2-1）→ 1824（WP2-2）→ 2290（WP2-3，+466）→
+  **2522 checks**（WP2-4 +232，含 `tests/unit-ng/test_ata.c` 的寄存器/LBA
+  编码、BSY/DRQ/ERR/超时状态机、ata_blk_env、fake ATA 盘上的 FAT16 读写）；
+  旧 32 位 305/305；
+- 设计/限制见 `docs/design/vfs-ng.md`、`fat16-ng.md`、`display-input-ng.md`、
+  `block-ng.md`，证据见 `docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、
+  `ng-WP2-3.md`、`ng-WP2-4.md`。块设备（WP2-4）完成，shell（WP2-6）与
+  auth/log/pkg（WP2-5）未动；fb/输入不做 IRQ/鼠标（E3/C 之后）。
 
 ### E3
 
