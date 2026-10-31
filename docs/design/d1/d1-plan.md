@@ -596,7 +596,7 @@ D1 有三个高频冲突文件：`src/ng/main.c`（自检调用）、`src/ng/sys
 | D1-A libc 底座 | **newlib**（备选 picolibc，仅在 S1 预检失败时启用） |
 | D1-B TLS/HTTP | **BearSSL TLS 1.2** + 自写 HTTP/1.1；不依赖 OpenSSL；TLS 1.3 留 D2 |
 | D1-C 网络形态 | L1 内核网络库 + **native socket syscall** + 用户态 facade；netd 进程留 D2 |
-| D1-D 调度 | D1 **保持协作式**；tick IRQ 只用于时间/睡眠/HLT，不做抢占、不做 SMP 调度 |
+| D1-D 调度 | D1 **内核保持协作式 + ring3 tick 抢占（WP5-0g）**；tick IRQ 用于时间/睡眠/HLT/need_resched；不做内核抢占、不做 SMP 调度 |
 | D1-E 真机 | **一款 UEFI 机型** + GOP + PS/2（或 xHCI）+ Intel 网卡；AP 停泊；**不做安装器** |
 | D1-G 进程模型 | **execve + posix_spawn**；`fork()` 返回 `ENOSYS`（D2 再评估） |
 | D1-H ABI | **ABI 1.1 只追加**，新号自 48 起；ABI 1.0 语义不变；`abi-check` 同时校验 1.0/1.1 |
