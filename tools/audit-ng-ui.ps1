@@ -463,6 +463,10 @@ try {
         # 4) FOCUS 令牌策略：token=0 不能抢会话窗口的焦点。
         Check 'fix: focus token policy enforced' `
             ($t -match 'ng: focus reject ok \(id=[0-9]+ token=0x[0-9a-f]+')
+        # 5) v2 LIST_REPLY 的 entry 布局（44 vs 48 字节）不同：sessiond 只认
+        #    v3，registry/tokenfail 证据不被伪造的旧版本消息搅乱。
+        Check 'fix: v2 LIST_REPLY ignored (no registry mismatch)' `
+            (-not $t.Contains('session registry mismatch'))
     }
     }
 } finally {

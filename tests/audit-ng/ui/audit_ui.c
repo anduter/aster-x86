@@ -1536,6 +1536,73 @@ static void a_poison_list_reply(void)
     }
 }
 
+/*
+ * 第二轮：伪造**旧版本（v2）**的 LIST_REPLY 并广播。
+ *
+ * v2 的 entry 是 44 字节（没有 token），v3 是 48 字节。sessiond 以前只按
+ * v3 的 struct 读 entries[]，收到一条 v2 消息后从 entry[1] 起全部错位 ——
+ * 于是把垃圾当成 token/owner_pid，token_fail++ 并打出
+ * "ng: session registry mismatch"（内核 wp33 读的 registry/tokenfail 证据被
+ * 搅乱）。修复后 sessiond 只接受 version>=3 的 LIST_REPLY，这条消息被忽略。
+ *
+ * 这里手工拼字节（ds_msg_encode 只会编 v3），body 360 字节全 0xAB：
+ * 按 v3 结构读 entry[0].token 会拿到 title 区的 0xABABABAB != 0。
+ */
+static void a_poison_list_reply_v2(void)
+{
+    u8 buf[DS_IPC_HDR_SIZE + DS_MSG_HDR_SIZE + DS_LIST_REPLY_BODY_V2];
+    struct a_ipc_hdr *ih = (struct a_ipc_hdr *)buf;
+    u8 *p = buf + DS_IPC_HDR_SIZE;
+    u32 body = DS_LIST_REPLY_BODY_V2; /* 360 */
+    u32 total = DS_MSG_HDR_SIZE + body;
+    u32 magic = DS_PROTO_MAGIC;
+    u16 version = 2;
+    u16 type = (u16)DS_MSG_LIST_REPLY;
+    u32 seq = 1;
+    i32 status = 0;
+    u32 count = 1;
+    u32 reserved = 0;
+    u32 gen;
+    u32 slot;
+
+    ds_memzero(buf, (u64)sizeof(buf));
+    /* display 消息头（20 字节，小端字段）。 */
+    ds_memcopy(p + 0, &magic, 4);
+    ds_memcopy(p + 4, &version, 2);
+    ds_memcopy(p + 6, &type, 2);
+    ds_memcopy(p + 8, &total, 4);
+    ds_memcopy(p + 12, &status, 4);
+    ds_memcopy(p + 16, &seq, 4);
+    /* body：count + reserved + 360 字节全 0xAB。 */
+    ds_memcopy(p + DS_MSG_HDR_SIZE + 0, &count, 4);
+    ds_memcopy(p + DS_MSG_HDR_SIZE + 4, &reserved, 4);
+    {
+        u32 i;
+
+        for (i = 8u; i < body; i++) {
+            p[DS_MSG_HDR_SIZE + i] = 0xABu;
+        }
+    }
+    /* IPC 头。 */
+    ih->type = DS_MSG_LIST_REPLY;
+    ih->len = total;
+    ih->from = g_port;
+    ih->flags = 0;
+
+    for (gen = 1; gen <= A_ENUM_GENS; gen++) {
+        for (slot = 0; slot < A_ENUM_SLOTS; slot++) {
+            u32 ticket = (gen << 16) | slot;
+
+            if (ticket == 0 || ticket == g_port || ticket == g_port2 ||
+                ticket == g_sleep_port) {
+                continue;
+            }
+            (void)a_send_raw(ticket, buf,
+                             (u32)(DS_IPC_HDR_SIZE + total));
+        }
+    }
+}
+
 static int a_session_alive(u32 sess, struct session_msg *out, u32 *out_from)
 {
     struct session_msg m;
@@ -1666,6 +1733,17 @@ static void a_attack_session(void)
         (void)a_recv_raw(g_port, junk, (u32)sizeof(junk), DS_POLL_TICKS);
     }
     a_check(a_session_alive(sess, &r, &from), "session count-clamp", 1u);
+
+    /*
+     * 3b) 第二轮：伪造**旧版本（v2）**的 LIST_REPLY 广播。
+     * v2 的 entry 44 字节、v3 是 48 字节；sessiond 以前按 v3 布局解析，
+     * 从 entry[1] 起全部错位 -> token_fail++ / "session registry mismatch"
+     * （内核 wp33 读的 registry 证据被搅乱）。真正的断言在宿主侧：
+     * 串口里不允许出现 "session registry mismatch"。
+     */
+    a_poison_list_reply_v2();
+    a_sleep_ms(600u);
+    a_check(a_session_alive(sess, &r, &from), "session v2-poison", 2u);
 
     /* 4) KILL 风暴：64 条坏令牌 KILL + REGISTER 洪泛，然后仍然存活。 */
     for (i = 0; i < 64u; i++) {
