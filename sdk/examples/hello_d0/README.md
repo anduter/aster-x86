@@ -3,6 +3,8 @@
 > 这是 **WP4-2 外部开发者测试**的产物：只读 `sdk/README.md`、
 > `docs/sdk/getting-started.md`、`sdk/include/aster/**`、`docs/abi/abi-1.0-draft.md`
 > 和 `docs/design/display-server-ng.md`，从零写出来的普通应用。
+> （读文档时 ABI 1.0 还是草案；提交前并行 WP4-1 把它冻结成
+> `docs/abi/abi-1.0.md`，`sdk/include/**` 没有变化。）
 > **不是 `hello_gui` 的复制**：没有 demo harness 角色（`window`/`hold`），
 > 没有照搬它的布局和证据行。
 
@@ -269,9 +271,11 @@ while (aster_app_running(&app)) {
    失焦没有事件。
 8. **输入（P2）**：没有鼠标、没有按键重复/修饰键状态（只有 scancode）、
    没有焦点变化事件。
-9. **ABI 稳定性（P0/文档）**：ABI 1.0 未冻结；没有 `abi_version()` 调用，
-   应用只能按头文件版本假设（本应用把 `ASTER_SDK_VERSION`/`ASTER_ABI_VERSION`
-   打进 boot 行，方便日后对账）。
+9. **ABI 稳定性（P0/文档）**：本 WP 写作期间 ABI 1.0 从草案冻结（并行
+   WP4-1，`docs/abi/abi-1.0.md` + `abi-1.0.h` + `tools/abi-check.ps1`；
+   `sdk/include/**` 无 diff）。1.0 明确**没有**运行时 `abi_version()`（延后
+   到后续 major），应用仍只能按编译期宏假设；本应用把
+   `ASTER_SDK_VERSION`/`ASTER_ABI_VERSION` 打进 boot 行，方便日后对账。
 
 文档侧的最小缺口（详见 `docs/claims/ng-WP4-2.md`）：
 
@@ -282,8 +286,9 @@ while (aster_app_running(&app)) {
   「外部开发者不改仓库怎么真跑」的路径（本 README 的 overlay 只能算
   workaround）；
 - 没有任何文档说明 `sdk-check` 是宿主语法门禁、不覆盖链接/运行；
-- ABI 草案的 §10 已列 13 个缺口，但 SDK 文档没有把「哪些缺口会影响 GUI
-  应用」挑出来。
+- ABI 冻结版（`abi-1.0.md`）§10 已对草案 13 项 + 审计 2 项给出处理结论，
+  但 SDK 文档没有把「哪些缺口会影响 GUI 应用」挑出来（例如仍无运行时版本
+  查询、`shm` 无 free、`DESTROY` 无 ack）。
 
 ## 8. 验证记录（2026-10-31，ng @ `9a6ab48`）
 

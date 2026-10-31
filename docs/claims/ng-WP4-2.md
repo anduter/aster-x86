@@ -3,8 +3,9 @@
 ## 结论
 
 **PASS（受限口径）** —— 以「外部开发者」身份（只读文档 / SDK 头，不改
-内核 / 桌面 / 构建系统，只能新增自己的应用）在 `ng` 基线 `9a6ab48`（tag
-`ng-e3`）上从零写出并跑通了一个有实际内容的 GUI 应用：
+内核 / 桌面 / 构建系统，只能新增自己的应用）在 `ng` 上（起始基线
+`9a6ab48` tag `ng-e3`，提交 parent `f40464c`）从零写出并跑通了一个有实际
+内容的 GUI 应用：
 
 - **应用**：`sdk/examples/hello_d0`，480×300、标题 `D0 Demo`；背景 + 标题
   文字 + 3 个彩色卡片（各带柱状图 / 嵌套画框 / 波形）+ 5 位定宽计数器 +
@@ -32,8 +33,13 @@
    不再是带 harness 角色的 hello_gui 而按设计失败（日志里
    `ng: WP3-1 display status FAIL` 是预期；`d0-demo.ps1` 只断言 hello_d0
    自己的行为与像素）。
-3. **ABI 未冻结**：按 `docs/abi/abi-1.0-draft.md` 的草案使用；应用把
-   `sdk=0.1.0-alpha abi=0x00010000` 打进 boot 行，方便日后对账。
+3. **ABI 状态在本次工作中变化**：开始时 ABI 1.0 仍是草案（必读清单给的是
+   `docs/abi/abi-1.0-draft.md`）；并行 WP4-1 于 18:06 落地 `f40464c`
+   （`abi-1.0.md` 冻结 + `docs/abi/abi-1.0.h` + `tools/abi-check.ps1`），
+   它也是本提交的 parent。`sdk/include/**` 在 `9a6ab48..f40464c` **无 diff**，
+   应用用到的调用号/布局未变；冻结版明确 1.0 **没有运行时 `abi_version()`**
+   （延后到后续 major），应用仍按编译期宏假设，并把
+   `sdk=0.1.0-alpha abi=0x00010000` 打进 boot 行方便对账。
 
 **给 D1 的一句话**：写 GUI 应用本身「一天内」可以完成；**把外部应用装进
 镜像并让产品启动链（sessiond/LAUNCH）拉起它，目前没有一条不改仓库的路**，
@@ -43,7 +49,7 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 / 基线 | `ng` @ `9a6ab48`（tag `ng-e3`）；工作区另有未跟踪 `obj-ng/`（WP4-2 未碰） |
+| 分支 / 基线 | `ng`，起始 `9a6ab48`（tag `ng-e3`）；提交 parent `f40464c`（并行 WP4-1 ABI 冻结，18:06:02 落地）；工作区另有未跟踪 `obj-ng/`（WP4-2 未碰） |
 | 工具链 | clang / ld.lld 23.1.4（`D:\msys64\mingw64\bin`）；目标 `x86_64-elf` |
 | QEMU | QEMU 11.0.0，`-m 256 -cpu max -vga std -drive …if=ide -display none -no-reboot` |
 | 宿主 | Windows（PowerShell）；`tools/d0-demo.ps1` 与仓库其它 tools 一样是 Windows 脚本 |
@@ -54,7 +60,7 @@
 
 | 路径 | 内容 | 状态 |
 |---|---|---|
-| `sdk/examples/hello_d0/main.c` | 普通 GUI 应用：窗口/绘制/事件循环/会话/8s 空闲退出；约 600 行（含注释） | **新** |
+| `sdk/examples/hello_d0/main.c` | 普通 GUI 应用：窗口/绘制/事件循环/会话/8s 空闲退出；约 550 行（含注释） | **新** |
 | `sdk/examples/hello_d0/README.md` | 从零到运行、问题记录、SDK 缺口 | **新** |
 | `sdk/examples/hello_d0/screen.png` | QEMU QMP screendump 裁出的 480×300 窗口 | **新** |
 | `tools/d0-demo.ps1` | 编译/链接校验 + overlay 走 `build-ng -SdkDemo` 的 QEMU 真跑与断言 | **新** |
@@ -76,7 +82,8 @@
 | 首次 QEMU 真跑（手工） | 18:02（+25s 启动） | 看到 `ng: d0 demo up` + **8s 空闲自动退出**证据 |
 | `tools/d0-demo.ps1` 首次 PASS | 18:03:41（+6m54s） | 含 overlay 构建 15.6s |
 | README 完成 | 18:05:07（+8m20s） | — |
-| 本 claims 完成 | 约 18:10（总计约 **13 分钟**） | 含截图、证据整理 |
+| 并行 WP4-1 ABI 冻结落地 | 18:06:02（共享工作区 `f40464c`） | 本 WP 未参与；`sdk/include` 无 diff；提交前 `abi-check` 复核 PASS |
+| 本 claims 完成 | 约 18:10（总计约 **13 分钟**） | 含截图、冻结后复核与证据整理 |
 
 **解读**：本会话是 agent 速度，读文档 4 分钟内完成；人类外部开发者预计
 「读文档 + 写类似应用 + 跑通」约 **2–4 小时**（不含产品部署），远低于
@@ -95,7 +102,7 @@ WP4-2 的「一天内」出口。**但**如果要求「装进镜像、被 sessio
 | `sdk/include/aster/display.h` | v3 CREATE/FOCUS/LIST body、版本策略、尺寸上限、`_Static_assert` 锁布局 | `aster_display_destroy()` 无 reply（注释只说「没有 SHM_FREE」）；`ASTER_DISPLAY_TITLE_MAX=16`（15 字符）只在宏名旁，`aster_app_config.title` 没提截断 |
 | `sdk/include/aster/draw.h` | 像素格式、裁剪语义、字模范围 `0x20..0x7E`、不处理 `\n`、不混合 alpha 都写清 | 没有缩放/换行/宽度查询；只有 pixel/fill/rect/char/text，没有 line/circle；想画大字只能自己用 `aster_font_glyph` |
 | `sdk/include/aster/ipc.h` / `fs.h` / `syscall.h` / `types.h` | 调用号表、结构布局、句柄语义、错误码、`aster_memcopy/memzero` 都有；`shm_alloc` 的 8 字节 `va` 坑有显式注释 | 没有 `snprintf` 类格式化；没有 `sleep/timer/uptime`；`abi_version()` 不存在 |
-| `docs/abi/abi-1.0-draft.md` | 调用约定、寄存器/返回值、结构布局、错误码、长度上限、§10 的 13 个冻结前缺口都很实；明确「不是稳定 ABI」 | 草案不是 SDK 的「使用手册」：外部开发者不会从它学到「写 GUI 要哪个头」；§10 的缺口没有按「对 GUI 应用的影响」排序；ABI 版本查询缺失 |
+| `docs/abi/abi-1.0-draft.md`（提交时已被冻结版 `abi-1.0.md` 取代） | 调用约定、寄存器/返回值、结构布局、错误码、长度上限、§10 的 13 个冻结前缺口都很实；明确「不是稳定 ABI」 | 草案不是 SDK 的「使用手册」：外部开发者不会从它学到「写 GUI 要哪个头」；§10 的缺口没有按「对 GUI 应用的影响」排序；ABI 版本查询缺失。冻结版 §10 对 13+2 项给出结论，但仍不是使用手册，且 `abi_version()` 明确延后 |
 | `docs/design/display-server-ng.md` | displayd 的协议/合成/焦点/输入/z-order/像素格式/探针位置、WP3-3 token 规则都清楚；解释了为什么不能劫持 shm | 没有「普通应用必须做什么/不必做什么」；`(25,25)=#3070c0` 的探针契约只散在 claims；session 细节在 `session-ng.md`（本次必读清单没列，但 README/头文件够用） |
 | `docs/claims/ng-WP3-4.md` | 是唯一能解释「`-SdkDemo` 把 hello_gui 放到 /bin/demo、断言 title=Aster SDK / 探针」的地方 | 外部开发者不在必读清单里；README 只链 getting-started，导致「怎么真跑自己的应用」必须靠读 claims + build-ng 源码 |
 
@@ -159,7 +166,7 @@ API 设计（`aster_app_*` 骨架、v3 token、会话 argv、脏矩形提交）�
 | getting-started 没有「外部应用怎么真跑」 | 要么给 build-ng 加 `-DemoSrc <path>`（最小改动、最有用），要么把 `tools/d0-demo.ps1` 的 overlay 方案写成正式文档；同时把 `sdk-check` 的能力边界写清 |
 | getting-started 的 PowerShell 链接示例 | 改成数组/引号写法，或加一句「PS 会把 `-Wl,...` 的逗号当数组分隔符」 |
 | 头文件没有格式化/缩放/定时器 | D1 的 `aster_text`/`aster_time` 小模块；至少先在 `sdk/README` 的「SDK 缺什么」列出来（现在 README 只列了 alpha 限制，没列这些） |
-| ABI 草案 §10 的 13 个缺口 | 加一栏「对 GUI/外部应用的影响」，把 `abi_version()`、SHM free、权限空壳、`EACCES vs EPERM` 标出来 |
+| ABI 冻结版 §10 的 15 项结论 | 加一栏「对 GUI/外部应用的影响」，把 `abi_version()`、SHM free、权限空壳、`EACCES vs EPERM` 标出来 |
 | `-SdkDemo` 的断言/探针契约只在 claims | getting-started §5 补一句「示例要画 `(25,25)=#3070c0`、title 由 sdk-demo 断言」；否则外部开发者不知道为什么自己的应用一进 `/bin/demo` 就让 WP3-1 FAIL |
 | 会话链的验证入口 | 文档明确：当前只有 WM LAUNCH 能给 token；普通应用在 QEMU 里无法自测会话；给出「D1 安装器落地后怎么验证」的占位 |
 
@@ -176,6 +183,10 @@ $ powershell -ExecutionPolicy Bypass -File tools/sdk-check.ps1
        sdk-test: 237 checks, 0 failures
 sdk-check: PASS (10 files + 237 SDK host checks)
 
+# 提交前在冻结后的 ABI 树上复核（WP4-1 / f40464c）
+$ powershell -ExecutionPolicy Bypass -File tools/abi-check.ps1
+abi-check: PASS (29 syscalls, 28 errors, 64 constants, 4 struct sizes)
+
 $ powershell -ExecutionPolicy Bypass -File tools/d0-demo.ps1 -NoQemu
 d0-demo: link ok (23296 bytes, 2 PT_LOAD, entry 0x40000000, end 0x4000468e)
 d0-demo: PASS (link-only, 0.5s; QEMU skipped by -NoQemu)
@@ -190,6 +201,9 @@ d0-demo: key ok (space -> count=1)
 d0-demo: screendump card=(190,180)#c0504a panel=(200,290)#16202b header=(620,150)#18222e
 d0-demo: q quit ok (reason=q/esc)
 d0-demo: PASS (480x300 D0 Demo, 3 cards, key+redraw, q quit; 15.6s, cpu max)
+
+# 在 ABI 冻结后的 parent（f40464c）上重跑一次，同样 PASS（15.2s）：
+# d0-demo: PASS (480x300 D0 Demo, 3 cards, key+redraw, q quit; 15.2s, cpu max)
 ```
 
 串口关键行（同一轮）：
@@ -248,6 +262,10 @@ screendump 裁切；注入空格后 `count=1`）。
    `tools/build-ng.ps1`、`tools/sdk-demo.ps1`、`src/desktop/display/displayd.c`
    和 `src/ng/wp31_selftest.c`。这本身就是文档缺口：如果文档把「普通应用 vs
    `/bin/demo` demo harness」和「外部应用怎么跑」写清，就不需要读这些实现。
+8. **并行工作区**：WP4-1 在本 WP 写作期间提交了 `f40464c`（ABI 冻结），
+   工作区同时还有 `docs/release/`、`tools/release-ng.ps1`、`docs/design/*`
+   等**其它会话的未提交改动**。本 WP 只 stage/提交自己的 5 个文件，没有
+   触碰这些路径；commit hook 只检查了暂存区。
 
 ## 出口
 
