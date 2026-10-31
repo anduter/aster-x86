@@ -50,11 +50,22 @@ SECTIONS
      * 落在 PD[1] 的 2 MiB 恒等大页（RW+NX）里；mem_selftest.c 在 PMM 里
      * 保留 [__fat16_img_start, __fat16_img_end)，启动时 fat_ramdisk 把它
      * 复制到 PMM 页。这样内核正文/.rodata/.bss 仍然 < 2 MiB。
+     *
+     * WP3-3：7 个用户 ELF 的 .incbin blob 也从 .rodata 挪到 2 MiB 之后的
+     * `.bigdata` 段（同一条 PD[1] 恒等大页）。它们只被内核读（proc_init
+     * 种进 ramfs），不执行；这样 WP3-3 新增 sessiond（24 KB）后内核正文/
+     * .bss 仍留在第一个 2 MiB 窗口里，并留出 ~100 KB 余量。
+     * mem_selftest.c 保留 [__bigdata_start, __bigdata_end)。
      */
     . = 0x200000;
     __fat16_img_start = .;
     .fat16 : { KEEP(*(.fat16)) }
     __fat16_img_end = .;
+
+    . = ALIGN(4096);
+    __bigdata_start = .;
+    .bigdata : { KEEP(*(.bigdata)) }
+    __bigdata_end = .;
 
     /DISCARD/ : {
         *(.comment)

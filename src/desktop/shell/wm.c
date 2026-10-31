@@ -1,36 +1,38 @@
 /*
  * ng WP3-2: shell/WM（L2b，ring3 进程 /bin/wm）。
+ * ng WP3-3: WM 只是 UI 前端 —— 应用生命周期归 sessiond。
  *
- * WM 是 displayd 的**普通客户端**：不映射 LFB、不碰内核表面表，只通过
- * display 协议 v2 干活：
- *   - CREATE(1280x32, title="Aster Panel", flags=POS, x=0,y=0) -> 共享内存
- *     surface，画 top bar（标题 / 时钟占位 / 启动器按钮 / 任务按钮 / 通知区）；
- *   - REGISTER_HOTKEY(surface, key=ANY)：displayd 把每个按键先给 WM 一份
- *     （INPUT.flags & DS_INPUT_F_GLOBAL），再按焦点转发；
- *   - LIST -> LIST_REPLY：拿 surface 表快照做任务列表；
- *   - FOCUS(id)：Tab / Alt+Tab 切换焦点；
- *   - spawn（syscall 40）：启动器 1..9 启动 /bin 程序。
+ * 两种运行方式：
+ *   - 会话模式（init -> sessiond -> wm）：argv 带 `session=<ticket>` 与
+ *     `token=<hex>`。WM 用 REGISTER/HEARTBEAT 把面板与存活报给 sessiond，
+ *     启动器发 LAUNCH（sessiond spawn 应用），不再自己 spawn 应用。
+ *   - 直连模式（WP3-2 自检：内核直接 spawn WM，没有会话通道）：启动器保留
+ *     本地 spawn 作为兼容路径；真实启动永远走会话模式。
  *
- * 证据行（内核 wp32 自检 + run-ng）：
+ * 其它职责与 WP3-2 相同：面板 surface + 共享内存绘制 + REGISTER_HOTKEY +
+ * LIST/FOCUS 任务切换 + WM_STATUS 计数。
+ *
+ * 证据行（内核 wp32/wp33 自检 + run-ng）：
  *   ng: wm up (pid=.. panel=1280x32)
  *   ng: wm panel ok (px=0x202838 at=0,0)
+ *   ng: wm session ok (ticket=.. token=0x..)
+ *   ng: wm registry ok (apps=.. windows=.. procs=..)
  *   ng: wm launcher ok (apps=3 pkgs=1)
- *   ng: wm app ok (n=0 path=/bin/demo)
- *   ng: wm pkg ok (path=/System/Packages/hello)
  *   ng: wm tasks ok (n=2 apps=1)
- *   ng: wm task ok (id=2 x=192 y=152 title=Demo)
  *   ng: wm task switch ok (focus=2 from=1 via=key|auto)
- *   ng: wm launch ok (app=/bin/demo pid=.. via=key|auto)
+ *   ng: wm launch req ok (app=/bin/demo via=key|auto)      [会话模式]
+ *   ng: wm launch ok (app=/bin/demo pid=.. via=key|auto)  [直连兼容]
  *   ng: wm exit (rounds=.. switch=.. launch=..)
  *
- * 没有输入（-NoQmp）时，WM 在 3s 后用 auto 分支做一次切换/启动，保证自检
- * 在无 QMP 环境下仍有证据（与 WP3-1 demo 的 timeout 分支同一套路）。
+ * 没有输入（-NoQmp）时，WM 在 3s 后走 auto 分支做一次切换/启动；没有任何
+ * 窗口时也会 auto 启动第一个应用（WP3-3 会话自检用）。
  *
  * 无 libc：syscall 内联；字符串/十进制/十六进制自己实现。
  */
 #include "ds_draw.h"
 #include "ds_protocol.h"
 #include "ds_wm.h"
+#include "session_protocol.h"
 #include "types.h"
 
 #ifndef NULL
@@ -217,6 +219,11 @@ static u32 g_port;
 static u32 g_server;
 static u32 g_seq;
 static u32 g_self_id;
+static u32 g_session; /* sessiond 端口 ticket（0 = 直连兼容模式） */
+static u32 g_token;   /* WM 的 role_token */
+static u32 g_session_list_printed;
+static u32 g_empty_idle;
+static u32 g_rounds;
 static u32 g_panel_va;
 static u32 g_panel_px;
 static struct ds_wm_layout g_layout;
@@ -253,6 +260,155 @@ static u32 g_rep_launch;
 static u32 g_rep_valid;
 
 
+static int w_recv_msg(struct ds_msg *m, u64 timeout);
+
+/* ------------------------------------------------------------------------- */
+/* 会话通道（WP3-3）                                                          */
+/* ------------------------------------------------------------------------- */
+
+/* 一条 IPC 帧：display 协议或 session 协议（按 magic 区分）。 */
+struct w_frame {
+    int kind; /* 0 = display，1 = session */
+    struct ds_msg ds;
+    struct session_msg ss;
+};
+
+static int w_recv_frame(struct w_frame *f, u64 timeout)
+{
+    u8 buf[SESSION_IPC_HDR_SIZE + SESSION_MSG_MAX];
+    struct ds_ipc_hdr h;
+    u32 magic = 0;
+    i64 r = w_sys4(W_SYS_PORT_RECV, (i64)g_port, (i64)buf, (i64)sizeof(buf),
+                   (i64)timeout);
+
+    if (r < 0) {
+        return (int)r;
+    }
+    if ((u64)r < (u64)DS_IPC_HDR_SIZE || (u64)r > (u64)sizeof(buf)) {
+        return DS_EINVAL;
+    }
+    ds_memcopy(&h, buf, DS_IPC_HDR_SIZE);
+    if ((u64)h.len + (u64)DS_IPC_HDR_SIZE != (u64)r) {
+        return DS_EINVAL;
+    }
+    ds_memcopy(&magic, buf + DS_IPC_HDR_SIZE, 4);
+    if (magic == SESSION_MAGIC) {
+        if (h.len > (u32)SESSION_MSG_MAX) {
+            return DS_EINVAL;
+        }
+        if (session_msg_decode(buf + DS_IPC_HDR_SIZE, h.len, &f->ss) != DS_OK) {
+            return DS_EINVAL;
+        }
+        f->kind = 1;
+        return DS_OK;
+    }
+    if (magic == DS_PROTO_MAGIC) {
+        if (h.len > (u32)DS_MSG_MAX) {
+            return DS_EINVAL;
+        }
+        if (ds_msg_decode(buf + DS_IPC_HDR_SIZE, h.len, &f->ds) != DS_OK) {
+            return DS_EINVAL;
+        }
+        f->kind = 0;
+        return DS_OK;
+    }
+    return DS_EINVAL;
+}
+
+/* 只等 display 协议消息（面板建立阶段用；session 帧直接丢弃）。 */
+static int w_recv_ds(struct ds_msg *m, u64 timeout)
+{
+    for (;;) {
+        struct w_frame f;
+        int rc = w_recv_frame(&f, timeout);
+
+        if (rc != 0) {
+            return rc;
+        }
+        if (f.kind == 0) {
+            ds_memcopy(m, &f.ds, (u64)sizeof(*m));
+            return (int)m->type;
+        }
+    }
+}
+
+static int w_send_session(const struct session_msg *m)
+{
+    u8 buf[SESSION_IPC_HDR_SIZE + SESSION_MSG_MAX];
+    struct session_ipc_hdr *h = (struct session_ipc_hdr *)buf;
+    int n = session_msg_encode(m, buf + SESSION_IPC_HDR_SIZE, SESSION_MSG_MAX);
+
+    if (n <= 0) {
+        return DS_EINVAL;
+    }
+    h->type = m->type;
+    h->len = (u32)n;
+    h->from = g_port;
+    h->flags = 0;
+    return (int)w_sys4(W_SYS_PORT_SEND, (i64)g_session, (i64)buf,
+                       (i64)(SESSION_IPC_HDR_SIZE + (u32)n), 0);
+}
+
+static void wm_session_register(void)
+{
+    struct session_msg m;
+
+    if (g_session == 0) {
+        return;
+    }
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = SESSION_MSG_REGISTER;
+    m.seq = ++g_seq;
+    m.u.reg.token = g_token;
+    m.u.reg.port = g_port;
+    m.u.reg.surface_id = g_self_id;
+    ds_title_set(m.u.reg.title, "Aster Panel");
+    (void)w_send_session(&m);
+    w_put("ng: wm session ok (session=");
+    w_putdec(g_session);
+    w_put(" token=");
+    w_puthex(g_token);
+    w_put(")\r\n");
+
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = SESSION_MSG_LIST;
+    m.seq = ++g_seq;
+    (void)w_send_session(&m);
+}
+
+static void wm_session_heartbeat(void)
+{
+    struct session_msg m;
+
+    if (g_session == 0) {
+        return;
+    }
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = SESSION_MSG_HEARTBEAT;
+    m.seq = ++g_seq;
+    m.u.hb.token = g_token;
+    m.u.hb.rounds = g_rounds;
+    (void)w_send_session(&m);
+}
+
+/* sessiond 的注册表快照（LOOKUP/LIST 通路证据）。 */
+static void wm_handle_session_msg(const struct session_msg *sm)
+{
+    if (sm->type != SESSION_MSG_LIST_REPLY) {
+        return;
+    }
+    if (g_session_list_printed < 4u) {
+        g_session_list_printed++;
+        w_put("ng: wm registry ok (apps=");
+        w_putdec(sm->u.list_reply.apps);
+        w_put(" windows=");
+        w_putdec(sm->u.list_reply.windows);
+        w_put(" procs=");
+        w_putdec(sm->u.list_reply.procs);
+        w_put(")\r\n");
+    }
+}
+
 /* ------------------------------------------------------------------------- */
 /* IPC 消息                                                                   */
 /* ------------------------------------------------------------------------- */
@@ -276,26 +432,7 @@ static int w_send_msg(const struct ds_msg *m)
 
 static int w_recv_msg(struct ds_msg *m, u64 timeout)
 {
-    u8 buf[DS_IPC_HDR_SIZE + DS_MSG_MAX];
-    struct ds_ipc_hdr h;
-    i64 r = w_sys4(W_SYS_PORT_RECV, (i64)g_port, (i64)buf, (i64)sizeof(buf),
-                   (i64)timeout);
-
-    if (r < 0) {
-        return (int)r;
-    }
-    if ((u64)r < (u64)DS_IPC_HDR_SIZE || (u64)r > (u64)sizeof(buf)) {
-        return DS_EINVAL;
-    }
-    ds_memcopy(&h, buf, DS_IPC_HDR_SIZE);
-    if ((u64)h.len + (u64)DS_IPC_HDR_SIZE != (u64)r ||
-        h.len > (u32)DS_MSG_MAX) {
-        return DS_EINVAL;
-    }
-    if (ds_msg_decode(buf + DS_IPC_HDR_SIZE, h.len, m) != DS_OK) {
-        return DS_EINVAL;
-    }
-    return (int)m->type;
+    return w_recv_ds(m, timeout);
 }
 
 /*
@@ -453,6 +590,7 @@ static void wm_focus(u32 id)
     m.type = DS_MSG_FOCUS;
     m.seq = ++g_seq;
     m.u.focus.surface_id = id;
+    m.u.focus.token = g_token;
     (void)w_send_msg(&m);
 }
 
@@ -505,6 +643,7 @@ static void wm_handle_list(const struct ds_msg *m)
         g_tasks_printed = 1;
         g_seen_tasks = 1;
         g_idle_rounds = 0;
+        g_empty_idle = 0;
         w_put("ng: wm tasks ok (n=");
         w_putdec(g_tasks.count);
         w_put(" apps=");
@@ -575,6 +714,30 @@ static void wm_do_launch(u32 index, u32 via)
         w_put("ng: wm launch FAIL (index)\r\n");
         return;
     }
+    if (g_session != 0) {
+        /*
+         * WP3-3：应用生命周期归 sessiond —— 启动器只发 LAUNCH，不 spawn。
+         * sessiond 校验 WM 令牌后 spawn，并把 pid/窗口记进注册表。
+         */
+        struct session_msg m;
+
+        ds_memzero(&m, (u64)sizeof(m));
+        m.type = SESSION_MSG_LAUNCH;
+        m.seq = ++g_seq;
+        m.u.launch.token = g_token;
+        session_path_set(m.u.launch.path, app->path);
+        (void)w_send_session(&m);
+        g_launches++;
+        g_last_launch_pid = 0;
+        w_put("ng: wm launch req ok (app=");
+        w_put(app->path);
+        w_put(" via=");
+        w_put((via == 0u) ? "key" : "auto");
+        w_put(")\r\n");
+        wm_report_if_changed();
+        return;
+    }
+    /* 直连兼容路径（只有 WP3-2 的内核自检会走到；真实启动有会话通道）。 */
     argv[0] = app->path;
     argv[1] = NULL;
     rc = w_sys4(W_SYS_SPAWN, (i64)app->path, (i64)argv, (i64)&pid, 0);
@@ -639,6 +802,7 @@ static int wm_setup_panel(void)
     m.u.create.x = 0;
     m.u.create.y = 0;
     m.u.create.owner_pid = (u32)w_sys(W_SYS_GETPID, 0, 0, 0);
+    m.u.create.token = g_token; /* v3：会话 manager 签发的 WM 令牌 */
     ds_title_set(m.u.create.title, "Aster Panel");
     if (w_send_msg(&m) != 0) {
         w_put("ng: wm FAIL (create send)\r\n");
@@ -720,23 +884,34 @@ static void wm_run(void)
     u32 rounds;
 
     wm_send_list();
+    if (g_session != 0) {
+        wm_session_heartbeat();
+    }
     for (rounds = 0; rounds < W_ROUNDS; rounds++) {
-        struct ds_msg m;
-        int type = w_recv_msg(&m, W_POLL_TICKS);
+        struct w_frame f;
+        int rc = w_recv_frame(&f, W_POLL_TICKS);
 
-        if (type == (int)DS_MSG_LIST_REPLY) {
-            wm_handle_list(&m);
-        } else if (type == (int)DS_MSG_INPUT) {
-            wm_handle_input(&m);
-        } else if (type < 0 && type != W_ETIMEDOUT) {
+        g_rounds = rounds;
+        if (rc == 0) {
+            if (f.kind == 1) {
+                wm_handle_session_msg(&f.ss);
+            } else if (f.ds.type == (u16)DS_MSG_LIST_REPLY) {
+                wm_handle_list(&f.ds);
+            } else if (f.ds.type == (u16)DS_MSG_INPUT) {
+                wm_handle_input(&f.ds);
+            }
+        } else if (rc != W_ETIMEDOUT) {
             w_put("ng: wm display gone (rc=");
-            w_putdec((u32)(-type));
+            w_putdec((u32)(-rc));
             w_put(")\r\n");
             break;
         }
 
         if ((rounds % W_LIST_EVERY) == (W_LIST_EVERY - 1u)) {
             wm_send_list();
+            if (g_session != 0) {
+                wm_session_heartbeat();
+            }
         }
 
         /* 自检 fallback：没有 QMP 输入时也能产出切换/启动证据。 */
@@ -745,6 +920,17 @@ static void wm_run(void)
             if (g_idle_rounds >= W_AUTO_ROUNDS && g_auto_switch_tried == 0u) {
                 g_auto_switch_tried = 1;
                 wm_do_switch(1);
+            }
+        }
+        /*
+         * 会话自检：一个应用窗口都没有时（WP3-3 每次会话从零开始），
+         * 3s 后自动启动第一个应用 —— QMP 模式下通常先收到 '1'。
+         */
+        if (g_seen_tasks == 0u && g_launches == 0u) {
+            g_empty_idle++;
+            if (g_empty_idle >= W_AUTO_ROUNDS && g_auto_launch_tried == 0u) {
+                g_auto_launch_tried = 1;
+                wm_do_launch(0, 1);
             }
         }
         if (g_switches > 0u && g_launches == 0u) {
@@ -757,11 +943,24 @@ static void wm_run(void)
     }
 }
 
-int w_main(void)
+int w_main(long argc, char **argv)
 {
     u32 pid = (u32)w_sys(W_SYS_GETPID, 0, 0, 0);
+    u32 i;
     i64 rc;
 
+    /* 会话参数：argv 里的 `session=<ticket>` / `token=<hex>`（WP3-3）。 */
+    g_session = 0;
+    g_token = 0;
+    for (i = 1; argv != NULL && i < (u32)argc; i++) {
+        u32 v = 0;
+
+        if (session_arg_parse_u32(argv[i], "session=", &v) != 0) {
+            g_session = v;
+        } else if (session_arg_parse_u32(argv[i], "token=", &v) != 0) {
+            g_token = v;
+        }
+    }
     rc = w_sys(W_SYS_MKDIR, (i64)"/run", 0755, 0);
     if (rc != 0 && rc != W_EEXIST) {
         /* displayd 通常已经建好 /run；失败不致命（WM 状态经 WM_STATUS 上报）。 */
@@ -790,6 +989,7 @@ int w_main(void)
     wm_register_hotkey();
     wm_launcher_scan();
     wm_report_if_changed();
+    wm_session_register();
     wm_run();
 
     (void)w_sys(W_SYS_PORT_CLOSE, (i64)g_port, 0, 0);

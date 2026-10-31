@@ -109,12 +109,12 @@ int ds_table_create(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
 {
     /* v1 语义：空标题、级联放置（WP3-1 的调用方与单测继续用它）。 */
     return ds_table_create_ex(t, w, h, owner_pid, client_ticket, shm_handle,
-                              shm_pages, pixels, NULL, -1, -1, out_id);
+                              shm_pages, pixels, NULL, -1, -1, 0, out_id);
 }
 
 int ds_table_create_ex(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
                        u32 client_ticket, u32 shm_handle, u32 shm_pages,
-                       u64 pixels, const char *title, i32 x, i32 y,
+                       u64 pixels, const char *title, i32 x, i32 y, u32 token,
                        u32 *out_id)
 {
     u64 need_pages;
@@ -201,6 +201,7 @@ int ds_table_create_ex(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
         }
     }
     s->owner_pid = owner_pid;
+    s->token = token;
     s->client_ticket = client_ticket;
     s->shm_handle = shm_handle;
     s->shm_pages = shm_pages;
@@ -262,7 +263,7 @@ u32 ds_table_fill_list(const struct ds_table *t, struct ds_list_entry *out,
             continue;
         }
         ds_list_entry_set(&out[n], s->id, s->owner_pid, s->x, s->y, s->w, s->h,
-                          (s->id == t->focus_id) ? 1u : 0u, s->title);
+                          (s->id == t->focus_id) ? 1u : 0u, s->token, s->title);
         n++;
     }
     return n;

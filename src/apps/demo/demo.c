@@ -17,6 +17,7 @@
  */
 #include "ds_draw.h"
 #include "ds_protocol.h"
+#include "session_protocol.h"
 #include "types.h"
 
 #ifndef NULL
@@ -242,6 +243,152 @@ static int e_recv_msg(u32 port, struct ds_msg *m, u32 *out_from, u64 timeout)
 }
 
 /* ------------------------------------------------------------------------- */
+/* 会话通道（WP3-3：sessiond 启动应用时经 argv 发 ticket/token）              */
+/* ------------------------------------------------------------------------- */
+
+static u32 e_session; /* sessiond 端口 ticket（0 = 没有会话通道） */
+static u32 e_token;   /* 本应用的 role_token */
+
+static int e_send_session(u32 to, const struct session_msg *m, u32 from)
+{
+    u8 buf[SESSION_IPC_HDR_SIZE + SESSION_MSG_MAX];
+    struct session_ipc_hdr *h = (struct session_ipc_hdr *)buf;
+    int n = session_msg_encode(m, buf + SESSION_IPC_HDR_SIZE, SESSION_MSG_MAX);
+
+    if (n <= 0) {
+        return DS_EINVAL;
+    }
+    h->type = m->type;
+    h->len = (u32)n;
+    h->from = from;
+    h->flags = 0;
+    return (int)e_sys4(E_SYS_PORT_SEND, (i64)to, (i64)buf,
+                       (i64)(SESSION_IPC_HDR_SIZE + (u32)n), 0);
+}
+
+static void e_session_register(u32 port, u32 surface_id, const char *title)
+{
+    struct session_msg m;
+
+    if (e_session == 0) {
+        return;
+    }
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = SESSION_MSG_REGISTER;
+    m.seq = 1;
+    m.u.reg.token = e_token;
+    m.u.reg.port = port;
+    m.u.reg.surface_id = surface_id;
+    ds_title_set(m.u.reg.title, title);
+    (void)e_send_session(e_session, &m, port);
+    e_put("ng: demo session ok (session=");
+    e_putdec(e_session);
+    e_put(" token=");
+    e_puthex(e_token);
+    e_put(")\r\n");
+}
+
+static void e_session_heartbeat(u32 port, u32 rounds)
+{
+    struct session_msg m;
+
+    if (e_session == 0) {
+        return;
+    }
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = SESSION_MSG_HEARTBEAT;
+    m.seq = rounds + 1u;
+    m.u.hb.token = e_token;
+    m.u.hb.rounds = rounds;
+    (void)e_send_session(e_session, &m, port);
+}
+
+static void e_session_exit(u32 port, u32 code)
+{
+    struct session_msg m;
+
+    if (e_session == 0) {
+        return;
+    }
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = SESSION_MSG_EXIT;
+    m.u.exit.token = e_token;
+    m.u.exit.code = code;
+    (void)e_send_session(e_session, &m, port);
+}
+
+/*
+ * 负向探针（WP3-3 自检）：
+ *   1. 用**应用令牌**发 LAUNCH（只有 WM 角色可以）-> sessiond 拒绝；
+ *   2. 用**应用令牌** FOCUS 别人的窗口 -> displayd 校验失败、拒绝。
+ * 两条都真的走 IPC，不是纯函数自测。
+ */
+static void e_probe_session(u32 port)
+{
+    struct session_msg m;
+
+    if (e_session == 0) {
+        return;
+    }
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = SESSION_MSG_LAUNCH;
+    m.u.launch.token = e_token;
+    /* 小端：直接按字节写进 u32 数组就是 session_path 的打包格式。 */
+    ds_memcopy(m.u.launch.path, "/bin/demo", 10);
+    (void)e_send_session(e_session, &m, port);
+    e_put("ng: demo role probe ok (path=/bin/demo)\r\n");
+}
+
+/* 用应用令牌 FOCUS 另一个窗口（预期 displayd 拒绝）。 */
+static void e_probe_focus(u32 server, u32 port, u32 self_id)
+{
+    struct ds_msg m;
+    u32 tries;
+    u32 i;
+    u32 target = 0;
+
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = DS_MSG_LIST;
+    if (e_send_msg(server, &m, port) != 0) {
+        return;
+    }
+    for (tries = 0; tries < DS_REPLY_WAIT_TRIES; tries++) {
+        int type = e_recv_msg(port, &m, NULL, DS_REPLY_WAIT_TICKS);
+
+        if (type == (int)DS_MSG_LIST_REPLY) {
+            break;
+        }
+        if (type < 0 && type != E_ETIMEDOUT) {
+            return;
+        }
+    }
+    if (m.type != (u16)DS_MSG_LIST_REPLY) {
+        return;
+    }
+    for (i = 0; i < m.u.list_reply.count && i < DS_LIST_MAX; i++) {
+        const struct ds_list_entry *le = &m.u.list_reply.entries[i];
+
+        if (le->id != self_id && le->token != e_token) {
+            target = le->id;
+            break;
+        }
+    }
+    if (target == 0) {
+        return;
+    }
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = DS_MSG_FOCUS;
+    m.u.focus.surface_id = target;
+    m.u.focus.token = e_token;
+    (void)e_send_msg(server, &m, port);
+    e_put("ng: demo focus probe ok (id=");
+    e_putdec(target);
+    e_put(" token=");
+    e_puthex(e_token);
+    e_put(")\r\n");
+}
+
+/* ------------------------------------------------------------------------- */
 /* 角色：默认（建 surface / 画 / commit / 等输入）                            */
 /* ------------------------------------------------------------------------- */
 
@@ -286,8 +433,8 @@ static int e_wait_reply(u32 port, struct ds_msg *out)
 }
 
 static int e_create_surface(u32 server, u32 my, u32 w, u32 h, const char *title,
-                            u32 flags, u32 pos_x, u32 pos_y, u32 *out_id,
-                            u32 *out_handle, u32 *out_pages)
+                            u32 flags, u32 pos_x, u32 pos_y, u32 token,
+                            u32 *out_id, u32 *out_handle, u32 *out_pages)
 {
     struct ds_msg m;
 
@@ -299,6 +446,7 @@ static int e_create_surface(u32 server, u32 my, u32 w, u32 h, const char *title,
     m.u.create.x = pos_x;
     m.u.create.y = pos_y;
     m.u.create.owner_pid = (u32)e_sys(E_SYS_GETPID, 0, 0, 0);
+    m.u.create.token = token;
     ds_title_set(m.u.create.title, title);
     if (e_send_msg(server, &m, my) != 0) {
         return -1;
@@ -355,8 +503,8 @@ static void e_role_client(void)
         u32 pg = 0;
         u32 sva = 0;
 
-        if (e_create_surface(server, my, 64, 48, "scratch", 0, 0, 0, &sid, &sh,
-                             &pg) != 0) {
+        if (e_create_surface(server, my, 64, 48, "scratch", 0, 0, 0, 0, &sid,
+                             &sh, &pg) != 0) {
             e_put("ng: demo FAIL (scratch create)\r\n");
             (void)e_sys(E_SYS_EXIT, 1, 0, 0);
         }
@@ -375,8 +523,8 @@ static void e_role_client(void)
     }
 
     /* CREATE(w,h,title=Demo) --from=my --> displayd */
-    if (e_create_surface(server, my, w, h, DS_DEMO_TITLE, 0, 0, 0, &surface_id,
-                         &shm_handle, &pages) != 0) {
+    if (e_create_surface(server, my, w, h, DS_DEMO_TITLE, 0, 0, 0, e_token,
+                         &surface_id, &shm_handle, &pages) != 0) {
         e_put("ng: demo FAIL (create)\r\n");
         (void)e_sys(E_SYS_EXIT, 1, 0, 0);
     }
@@ -540,7 +688,7 @@ static void e_role_window(void)
         (void)e_sys(E_SYS_EXIT, 1, 0, 0);
     }
     if (e_create_surface(server, my, DS_DEMO_W, DS_DEMO_H, DS_DEMO_TITLE, 0, 0,
-                         0, &surface_id, &shm_handle, &pages) != 0) {
+                         0, e_token, &surface_id, &shm_handle, &pages) != 0) {
         e_put("ng: demo FAIL (window create)\r\n");
         (void)e_sys(E_SYS_EXIT, 1, 0, 0);
     }
@@ -566,14 +714,20 @@ static void e_role_window(void)
     (void)e_send_msg(server, &m, my);
 
     /*
-     * 注意：**不发 FOCUS**。窗口焦点归 WM（WP3-2 的 Tab 任务切换）——
-     * 应用不再自己抢焦点，这是 S1/WP3-3 之前最小的一步。
+     * 注意：**不发 FOCUS**。窗口焦点归会话策略（sessiond 在 REGISTER 之后
+     * 发 FOCUS，令牌就是本窗口的；WP3-2 直连时由 WM 的 Tab 切换）。
      */
     e_put("ng: demo window up (id=");
     e_putdec(surface_id);
     e_put(" title=");
     e_put(DS_DEMO_TITLE);
     e_put(")\r\n");
+
+    if (e_session != 0) {
+        e_session_register(my, surface_id, DS_DEMO_TITLE);
+        e_probe_session(my);
+        e_probe_focus(server, my, surface_id);
+    }
 
     for (tries = 0; tries < E_WINDOW_ROUNDS; tries++) {
         int type = e_recv_msg(my, &m, NULL, DS_INPUT_WAIT_TICKS);
@@ -584,7 +738,11 @@ static void e_role_window(void)
         if (type < 0 && type != E_ETIMEDOUT) {
             break;
         }
+        if (e_session != 0 && (tries % 10u) == 9u) {
+            e_session_heartbeat(my, tries);
+        }
     }
+    e_session_exit(my, 0);
     (void)e_sys(E_SYS_PORT_CLOSE, (i64)my, 0, 0);
     e_put("ng: demo window done (id=");
     e_putdec(surface_id);
@@ -612,6 +770,20 @@ __attribute__((naked, noreturn)) void _start(void)
 
 int e_main(long argc, char **argv)
 {
+    long i;
+
+    /* sessiond 启动应用时经 argv 发 `session=<ticket>` / `token=<hex>`。 */
+    e_session = 0;
+    e_token = 0;
+    for (i = 1; argv != NULL && i < argc; i++) {
+        u32 v = 0;
+
+        if (session_arg_parse_u32(argv[i], "session=", &v) != 0) {
+            e_session = v;
+        } else if (session_arg_parse_u32(argv[i], "token=", &v) != 0) {
+            e_token = v;
+        }
+    }
     if (argc >= 2 && argv != NULL && e_streq(argv[1], "hold")) {
         e_role_hold();
         return 0;

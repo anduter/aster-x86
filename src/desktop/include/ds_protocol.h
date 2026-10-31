@@ -30,6 +30,16 @@
  *   - WM_STATUS：WM 把切换/启动计数报给 displayd，displayd 汇总进已有的
  *     `/run/display.status`（不新建 ramfs 节点；内核读同一份状态）。
  *
+ * v3（WP3-3，**只追加，v1/v2 兼容**）：
+ *
+ *   - CREATE 追加 `token`（session manager 签发的 32 位 role_token）：surface
+ *     记住属主令牌，LIST 把它报回去，FOCUS 用令牌做归属校验。
+ *   - LIST_REPLY 的每条 entry 追加 `token`（44 -> 48 字节）。
+ *   - FOCUS 的第二个 u32 从 reserved 变成 `token`：令牌匹配 surface 自己的
+ *     令牌、或令牌角色是 WM（shell 可以切换任何窗口）才允许改焦点；v3 且
+ *     token=0 走旧行为（兼容 WP3-1/3-2 客户端）。v2 客户端发 0 也走旧行为。
+ *   - 解码器接受 version 1..3；v1 CREATE 16 字节、v2 CREATE 40 字节、v3 44。
+ *
  * 消息 = 20 字节头（magic/version/type/len/status/seq）+ 固定长度 body，
  * body 只用 u32，编码/解码是**纯函数**（host 单测直接驱动，见
  * tests/unit-ng/test_desktop.c / test_wm.c）。IPC 的 16 字节头由各进程自己拼
@@ -49,8 +59,8 @@
 
 /* ---- 协议版本 / 尺寸 ------------------------------------------------------ */
 #define DS_PROTO_MAGIC 0x4453314Du /* "DS1M"（小端 "M1SD" 的内存序） */
-#define DS_PROTO_VERSION 2u
-#define DS_PROTO_VERSION_MIN 1u /* v1 客户端仍然可用（CREATE 无 title） */
+#define DS_PROTO_VERSION 3u
+#define DS_PROTO_VERSION_MIN 1u /* v1/v2 客户端仍然可用（CREATE 无 token） */
 #define DS_MSG_HDR_SIZE 20u
 #define DS_MSG_MAX 512u        /* 最大单条消息（LIST_REPLY 380 字节） */
 #define DS_MSG_WORDS_MAX 123u  /* ds_msg 的 body 联合体：DS_MSG_MAX - 20 字节头 */
@@ -76,6 +86,10 @@
 #define DS_CREATE_F_POS 0x1u
 /* v1 CREATE body 只有 16 字节（w,h,flags,reserved）。 */
 #define DS_CREATE_BODY_V1 16u
+/* v2 CREATE body 40 字节（没有 token）。 */
+#define DS_CREATE_BODY_V2 40u
+/* v2 LIST_REPLY body 360 字节（entry 44；v3 entry 48 -> 392）。 */
+#define DS_LIST_REPLY_BODY_V2 360u
 
 /* ---- demo 表面契约（L3 demo -> L2 displayd + run-ng 像素断言共用） ------- */
 #define DS_DEMO_W 400u
@@ -123,6 +137,7 @@ _Static_assert(sizeof(struct ds_fb_info) == 48, "ds_fb_info must be 48 bytes");
 #define DS_MSG_LIST_REPLY 10u     /* v2：server -> client，count + entries[] */
 #define DS_MSG_REGISTER_HOTKEY 11u /* v2：WM 注册全局热键 */
 #define DS_MSG_WM_STATUS 12u      /* v2：WM -> server，切换/启动计数（状态证据） */
+#define DS_MSG_SESSION_STATUS 13u /* v3：sessiond -> server，会话/令牌状态汇总 */
 
 /* INPUT 事件类型 */
 #define DS_INPUT_KEY_DOWN 1u
@@ -142,6 +157,7 @@ struct ds_create_body {
     u32 y;
     u32 owner_pid;               /* v2：客户端 getpid()；v1 没有（记 0） */
     u32 title[DS_TITLE_WORDS];   /* v2：NUL 结尾标题；v1 没有（空串） */
+    u32 token;                   /* v3：session manager 签发的 role_token；旧版本 0 */
 };
 
 struct ds_create_reply_body {
@@ -174,7 +190,7 @@ struct ds_destroy_body {
 
 struct ds_focus_body {
     u32 surface_id;
-    u32 reserved;
+    u32 token; /* v3：请求者令牌（0 = 旧行为；v1/v2 的 reserved 必须 0） */
 };
 
 struct ds_input_body {
@@ -194,7 +210,7 @@ struct ds_list_body {
     u32 reserved;
 };
 
-/* LIST_REPLY 的一条 surface 记录（44 字节；8 条 = 352 字节）。 */
+/* LIST_REPLY 的一条 surface 记录（v3 48 字节；8 条 = 384 字节）。 */
 struct ds_list_entry {
     u32 id;
     u32 owner_pid;
@@ -203,6 +219,7 @@ struct ds_list_entry {
     u32 w;
     u32 h;
     u32 focused; /* 1 = 当前焦点 */
+    u32 token;   /* v3：surface 的 role_token（v2 及以前为 0） */
     u32 title[DS_TITLE_WORDS];
 };
 
@@ -234,6 +251,31 @@ struct ds_wm_status_body {
     u32 lastpid;    /* 最近一次 spawn 的 pid */
 };
 
+/*
+ * v3：sessiond（L2c）把会话状态报给 displayd，displayd 汇总进已有的
+ * `/run/display.status`（**不新建 ramfs 节点**：节点池只有 32 个，WP3-3 又
+ * 种了一个 /bin/sessiond；内核 wp33 读同一份状态文件的 s* 字段）。
+ */
+struct ds_session_status_body {
+    u32 pid;      /* sessiond 的 pid */
+    u32 dpid;     /* sessiond 拉起的 displayd pid */
+    u32 procs;    /* 会话表里的进程数（WM + 应用） */
+    u32 apps;     /* L3 应用数 */
+    u32 windows;  /* 有窗口的会话项 */
+    u32 tokens;   /* 已签发令牌数 */
+    u32 launches; /* LAUNCH 成功次数 */
+    u32 kills;    /* KILL 次数 */
+    u32 exits;    /* EXIT 次数 */
+    u32 reaps;    /* 崩溃回收次数 */
+    u32 restarts; /* WM 重启次数 */
+    u32 wmpid;    /* 当前 WM pid（0 = 没有） */
+    u32 wmstate;  /* 0 none / 1 running / 2 等待重启 */
+    u32 apppid;   /* 最近一个运行中的应用 pid */
+    u32 tokenfail;/* 令牌/pid 绑定不一致次数（应为 0） */
+    u32 registry; /* 最近一次与 displayd LIST 同步是否通过（1 = 通过） */
+    u32 reserved;
+};
+
 /* ---- 解码后的完整消息 ----------------------------------------------------- */
 struct ds_msg {
     u32 magic;
@@ -255,6 +297,7 @@ struct ds_msg {
         struct ds_list_reply_body list_reply;
         struct ds_register_hotkey_body register_hotkey;
         struct ds_wm_status_body wm_status;
+        struct ds_session_status_body session_status;
         u32 words[DS_MSG_WORDS_MAX];
     } u;
 };
@@ -283,6 +326,7 @@ u32 ds_msg_size_v(u32 type, u16 version);
  * 编码器不修改 m）。成功返回总字节数；cap 不够或类型未知返回 DS_EINVAL。
  */
 #define DS_OK 0
+#define DS_EPERM (-1)
 #define DS_ENOENT (-2)
 #define DS_EIO (-5)
 #define DS_EBADF (-9)
@@ -311,9 +355,10 @@ int ds_msg_status_ok(const struct ds_msg *m);
 void ds_title_set(u32 out[DS_TITLE_WORDS], const char *s);
 void ds_title_get(const u32 in[DS_TITLE_WORDS], char *out, u32 cap);
 
-/* 填一条 LIST_REPLY 记录（标题截断/补 NUL）。 */
+/* 填一条 LIST_REPLY 记录（标题截断/补 NUL；token 见 v3）。 */
 void ds_list_entry_set(struct ds_list_entry *e, u32 id, u32 owner_pid, u32 x,
-                       u32 y, u32 w, u32 h, u32 focused, const char *title);
+                       u32 y, u32 w, u32 h, u32 focused, u32 token,
+                       const char *title);
 
 /* ---- 极简 mem 原语（freestanding；内核/user/host 三处同一份） ------------ */
 void ds_memzero(void *p, u64 n);

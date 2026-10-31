@@ -10,7 +10,8 @@
  */
 #include "ds_protocol.h"
 
-_Static_assert(sizeof(struct ds_create_body) == 40, "create body v2 must be 40");
+_Static_assert(sizeof(struct ds_create_body) == 44, "create body v3 must be 44");
+_Static_assert(DS_CREATE_BODY_V2 == 40u, "create body v2 must be 40");
 _Static_assert(sizeof(struct ds_create_reply_body) == 28,
                "create_reply body must be 28");
 _Static_assert(sizeof(struct ds_map_body) == 8, "map body must be 8");
@@ -20,17 +21,19 @@ _Static_assert(sizeof(struct ds_focus_body) == 8, "focus body must be 8");
 _Static_assert(sizeof(struct ds_input_body) == 20, "input body must be 20");
 _Static_assert(sizeof(struct ds_bye_body) == 8, "bye body must be 8");
 _Static_assert(sizeof(struct ds_list_body) == 4, "list body must be 4");
-_Static_assert(sizeof(struct ds_list_entry) == 44, "list entry must be 44");
-_Static_assert(sizeof(struct ds_list_reply_body) == 360,
-               "list reply body must be 360");
+_Static_assert(sizeof(struct ds_list_entry) == 48, "list entry v3 must be 48");
+_Static_assert(sizeof(struct ds_list_reply_body) == 392,
+               "list reply body v3 must be 392");
+_Static_assert(DS_MSG_HDR_SIZE + 392u <= DS_MSG_MAX,
+               "LIST_REPLY v3 must fit in DS_MSG_MAX");
 _Static_assert(sizeof(struct ds_register_hotkey_body) == 16,
                "register_hotkey body must be 16");
 _Static_assert(sizeof(struct ds_wm_status_body) == 28,
                "wm_status body must be 28");
+_Static_assert(sizeof(struct ds_session_status_body) == 68,
+               "session_status body must be 68");
 _Static_assert(sizeof(struct ds_msg) == DS_MSG_MAX,
                "ds_msg must be header + (DS_MSG_MAX - header) bytes of body");
-_Static_assert(DS_MSG_HDR_SIZE + 360u <= DS_MSG_MAX,
-               "LIST_REPLY must fit in DS_MSG_MAX");
 
 /* ------------------------------------------------------------------------- */
 /* 极简 mem/str                                                              */
@@ -149,7 +152,8 @@ void ds_title_get(const u32 in[DS_TITLE_WORDS], char *out, u32 cap)
 }
 
 void ds_list_entry_set(struct ds_list_entry *e, u32 id, u32 owner_pid, u32 x,
-                       u32 y, u32 w, u32 h, u32 focused, const char *title)
+                       u32 y, u32 w, u32 h, u32 focused, u32 token,
+                       const char *title)
 {
     if (e == NULL) {
         return;
@@ -162,6 +166,7 @@ void ds_list_entry_set(struct ds_list_entry *e, u32 id, u32 owner_pid, u32 x,
     e->w = w;
     e->h = h;
     e->focused = (focused != 0) ? 1u : 0u;
+    e->token = token;
     ds_title_set(e->title, title);
 }
 
@@ -177,8 +182,13 @@ u32 ds_msg_body_size_v(u32 type, u16 version)
     }
     switch (type) {
     case DS_MSG_CREATE:
-        return (version == 1u) ? DS_CREATE_BODY_V1
-                               : (u32)sizeof(struct ds_create_body);
+        if (version == 1u) {
+            return DS_CREATE_BODY_V1;
+        }
+        if (version == 2u) {
+            return DS_CREATE_BODY_V2;
+        }
+        return (u32)sizeof(struct ds_create_body);
     case DS_MSG_CREATE_REPLY:
         return (u32)sizeof(struct ds_create_reply_body);
     case DS_MSG_MAP:
@@ -196,12 +206,22 @@ u32 ds_msg_body_size_v(u32 type, u16 version)
     case DS_MSG_LIST:
         return (version == 1u) ? 0u : (u32)sizeof(struct ds_list_body);
     case DS_MSG_LIST_REPLY:
-        return (version == 1u) ? 0u : (u32)sizeof(struct ds_list_reply_body);
+        if (version == 1u) {
+            return 0u;
+        }
+        if (version == 2u) {
+            return DS_LIST_REPLY_BODY_V2;
+        }
+        return (u32)sizeof(struct ds_list_reply_body);
     case DS_MSG_REGISTER_HOTKEY:
         return (version == 1u) ? 0u
                                : (u32)sizeof(struct ds_register_hotkey_body);
     case DS_MSG_WM_STATUS:
         return (version == 1u) ? 0u : (u32)sizeof(struct ds_wm_status_body);
+    case DS_MSG_SESSION_STATUS:
+        return (version == 1u || version == 2u)
+                   ? 0u
+                   : (u32)sizeof(struct ds_session_status_body);
     default:
         return 0;
     }

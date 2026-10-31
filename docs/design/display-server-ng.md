@@ -370,3 +370,53 @@ ng: demo survives wm ok (alive=1 id=2)
 ng: WP3-2 selftest PASS
 QMP PPM: panel(4,4)=#202838 demo(217,177)=#3070c0
 ```
+
+## 14. WP3-3 追加：协议 v3 + L2c session manager
+
+WP3-3 仍然**不新增内核机制**（syscall/共享内存/LFB 都不动），把 display
+协议升到 **v3**（只追加）并新增 ring3 `/bin/sessiond`（L2c）。
+
+### 14.1 协议 v3（v1/v2 兼容）
+
+| 消息 | v3 变更 | 兼容 |
+|---|---|---|
+| `CREATE` | body 40 → 44，追加 `token`（session manager 签发的 role_token） | v1 16 B、v2 40 B 按版本解码，token=0 |
+| `LIST_REPLY` | entry 44 → 48，追加 `token`（body 360 → 392） | v2 客户端仍按 360 解码 |
+| `FOCUS` | 第二个 u32（原 reserved）变成 `token` | token=0 保持 WP3-2 行为；非 0 时要求「surface 自己的令牌」或「WM 令牌」，否则拒绝并打印 `ng: focus reject ok` |
+| `SESSION_STATUS`（新，13） | 68 B：pid/dpid/procs/apps/windows/tokens/launches/kills/exits/reaps/restarts/wmpid/wmstate/apppid/tokenfail/registry | 汇总进已有的 `/run/display.status`（`s*` 字段），**不新建 ramfs 文件** |
+
+displayd 从「令牌角色 = WM」的 CREATE 学到 `wm_token`（WM 面板），这样
+L2b 的 Tab 任务切换仍可以 FOCUS 任何窗口；应用只能 FOCUS 自己的窗口。
+`DS_PROTO_VERSION = 3`，解码器接受 1..3。
+
+### 14.2 L2c：应用不归 shell 管
+
+```text
+init ──spawn──> sessiond ──spawn──> displayd
+                    │        └──spawn──> wm（session=<ticket>, token=<WM>）
+wm 启动器 '1' ──LAUNCH(token,path)──> sessiond ──spawn──> app（token=<APP>）
+app ──REGISTER(token,surface,title)──> sessiond ──FOCUS(surface,token)──> displayd
+app/wm ──HEARTBEAT──> sessiond（800ms 无心跳 = 崩溃）
+kill WM ──> sessiond 回收面板 + 指数退避重启（20/40/80ms，limit=3）
+```
+
+- 窗口注册表 `{surface_id, app_pid, title, token}` 每 200ms 与 displayd 的
+  `LIST` 同步（id/owner_pid/token 三字段）；`LOOKUP`/`LIST` 对客户端开放。
+- kill WM 后应用（Demo）继续活着，sessiond 拉起新 WM（新令牌）后重新
+  CREATE 面板；run-ng 用第三张 QMP 截图断言面板与 Demo 窗口都在。
+- 细节（启动顺序/陈旧端口文件、令牌布局、退避、状态字段、`/run/*` 的 ramfs
+  节点预算、内核 2 MiB 窗口的 `.bigdata` 搬迁）见 **`session-ng.md`** 与
+  `docs/claims/ng-WP3-3.md`。
+
+### 14.3 证据（详见 `docs/claims/ng-WP3-3.md`）
+
+```text
+ng: sessiond up (pid=.. displayd=.. wm=.. port=..)
+ng: session app launch ok (pid=.. app=/bin/demo token=0x..)
+ng: session registry ok (apps=1 windows=2 procs=2)
+ng: role token ok (tokens=2 bound=2 mismatch=0)
+ng: session wm restart ok (old=17 new=19 restarts=1)
+ng: session survives wm ok (app=18 alive=1 wm=19 restarts=1)
+ng: WP3-3 selftest PASS
+QMP PPM（第三张）：panel(4,4)=#202838 demo(217,177)=#3070c0
+```

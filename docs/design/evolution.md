@@ -234,7 +234,34 @@ REGISTER_HOTKEY、WM_STATUS（计数由 displayd 汇总进已有的
 `tab`/`1`，并做第二次 `screendump` 断言 `(4,4)=#202838`（面板）与
 `(217,177)=#3070c0`（Demo 窗口）；kill WM 后 Demo 仍活着、displayd 继续服务
 （`ng: demo survives wm ok`）。证据见 `docs/claims/ng-WP3-2.md`。
-下一步：WP3-3 session manager（应用生命周期/窗口表/角色令牌）。
+
+**WP3-3 完成**（session manager，L2c + display 协议 v3）。L2 新增
+`src/desktop/session/sessiond.c`：ring3 `/bin/sessiond` 是**应用生命周期的
+唯一入口** —— init 只 spawn sessiond，sessiond 先 spawn displayd（先
+`unlink /run/display.port` 丢掉上一轮的死 ticket，再用 `LIST/LIST_REPLY`
+握手确认）再 spawn wm（`session=<ticket>`、`token=<WM role_token>` 经 argv
+传递，不新建 ramfs 发现文件）。WM 的启动器不再 spawn：`1..9` 发
+`LAUNCH(token,path)`，sessiond 校验角色后 `spawn` 应用并签发 32 位
+role_token（`seq|role|nonce`），登记 `{pid,token,role,surface,title}`；
+应用 `REGISTER` 窗口后由 sessiond 发 FOCUS（新窗口获得焦点），每 200ms 与
+displayd 的 `LIST` 同步注册表（id/owner_pid/token 三字段）。EXIT/KILL/
+心跳超时（800ms）回收窗口与进程；kill WM 后应用保活，sessiond 按
+`restart_limit=3` + 指数退避（20/40/80ms，TSC tick）重启 WM 并让新面板
+回来。display 协议升到 **v3**（只追加）：CREATE 加 `token`（44 B）、
+LIST_REPLY entry 加 `token`（48 B）、FOCUS 的 reserved 变成 `token`
+（displayd 校验 surface 令牌或 WM 令牌）、新增 SESSION_STATUS（会话状态汇总
+进已有的 `/run/display.status` 的 `s*` 字段，**不新建 ramfs 节点**）。
+内核镜像布局调整：7 个用户 ELF 的 `.incbin` 从 `.rodata` 挪到 2 MiB 之后的
+`.bigdata` 只读段（PD[1] 恒等大页 + PMM 保留），`__kernel_end=0x1E3000`
+（2 MiB 内留 ~118 KB）。自检：`ng: sessiond up` / `ng: session app launch ok`
+/ `ng: session registry ok` / `ng: role token ok` /
+`ng: session survives wm ok (app=.. alive=1 ...)` /
+`ng: session wm restart seen ok` / `ng: WP3-3 selftest PASS`，第三张 QMP
+截图断言 WM 重启后 `(4,4)=#202838` 与 `(217,177)=#3070c0`；host 单测
+4684 → **5025**（+341）；`ci-ng` 7/7、parity 100/100、旧 32 位 305/305。
+证据见 `docs/claims/ng-WP3-3.md`，设计见 `docs/design/session-ng.md`。
+下一步：WP3-4 SDK alpha + demo app（外部可编译 GUI app）、WP3-5 S1 故障
+注入（杀 shell/输入、应用存活、面板回来）。
 
 ### E4
 

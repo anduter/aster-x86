@@ -21,6 +21,7 @@
 #include "ds_composite.h"
 #include "ds_protocol.h"
 #include "ds_surface.h"
+#include "session_protocol.h"
 #include "types.h"
 
 #ifndef NULL
@@ -169,6 +170,12 @@ static u32 g_hotkey_key;     /* DS_HOTKEY_ANY = 所有键 */
 static u32 g_hotkey_prints;  /* 热键转发证据行计数 */
 static u32 g_last_list_n = 0xFFFFFFFFu;     /* LIST 证据行去重 */
 static u32 g_last_list_focus = 0xFFFFFFFFu;
+/*
+ * WP3-3：WM 的 role_token（从 WM 面板的 CREATE 学到）。v3 的 FOCUS 带令牌：
+ * 允许"自己的 surface"或"WM 令牌"改焦点；两者都不是 -> 拒绝并记数。
+ */
+static u32 g_wm_token;
+static u32 g_focus_rejects;
 /* WP3-2：WM 通过 WM_STATUS 报上来的计数（汇总进 /run/display.status）。 */
 static u32 g_wm_seen;
 static u32 g_wm_tasks;
@@ -177,6 +184,9 @@ static u32 g_wm_switch;
 static u32 g_wm_lastswitch;
 static u32 g_wm_launch;
 static u32 g_wm_lastpid;
+/* WP3-3：sessiond 通过 SESSION_STATUS 报上来的会话状态（同一份状态文件）。 */
+static u32 g_sess_seen;
+static struct ds_session_status_body g_sess;
 static struct ds_table g_table;
 static struct ds_screen g_screen;
 
@@ -204,7 +214,7 @@ static void d_status_append_u32(char *buf, u32 *len, u32 v)
 
 static void d_status_write(void)
 {
-    char buf[320];
+    char buf[512];
     char hex[10];
     u32 len = 0;
     u32 mapped = 0;
@@ -230,6 +240,20 @@ static void d_status_write(void)
     d_status_append_u32(buf, &len, g_inputs);
     d_status_append(buf, &len, " hotkey=");
     d_status_append_u32(buf, &len, (g_hotkey_client != 0) ? 1u : 0u);
+    /* WP3-3：带 role_token 的 surface 数（会话/令牌证据）。 */
+    {
+        u32 tok = 0;
+
+        for (i = 0; i < ds_table_count(&g_table); i++) {
+            struct ds_surface *s = ds_table_at(&g_table, i);
+
+            if (s != NULL && s->token != 0) {
+                tok++;
+            }
+        }
+        d_status_append(buf, &len, " tok=");
+        d_status_append_u32(buf, &len, tok);
+    }
     /* WP3-2：WM 的自治计数（内核 wp32 自检读同一份状态文件）。 */
     d_status_append(buf, &len, " wm=");
     d_status_append_u32(buf, &len, (g_wm_seen != 0) ? 1u : 0u);
@@ -251,6 +275,44 @@ static void d_status_write(void)
     (void)d_hexstr(g_px, hex);
     for (i = 0; hex[i] != '\0'; i++) {
         buf[len++] = hex[i];
+    }
+    /*
+     * WP3-3：会话状态（k=v；前缀 s 避免和显示/WM 字段冲突）。只有 sessiond
+     * 报过 SESSION_STATUS 才写，wp31/wp32 的旧状态行保持原样。
+     */
+    if (g_sess_seen != 0) {
+        d_status_append(buf, &len, " sess=1 spid=");
+        d_status_append_u32(buf, &len, g_sess.pid);
+        d_status_append(buf, &len, " sdpid=");
+        d_status_append_u32(buf, &len, g_sess.dpid);
+        d_status_append(buf, &len, " sprocs=");
+        d_status_append_u32(buf, &len, g_sess.procs);
+        d_status_append(buf, &len, " sapps=");
+        d_status_append_u32(buf, &len, g_sess.apps);
+        d_status_append(buf, &len, " swindows=");
+        d_status_append_u32(buf, &len, g_sess.windows);
+        d_status_append(buf, &len, " stokens=");
+        d_status_append_u32(buf, &len, g_sess.tokens);
+        d_status_append(buf, &len, " slaunches=");
+        d_status_append_u32(buf, &len, g_sess.launches);
+        d_status_append(buf, &len, " skills=");
+        d_status_append_u32(buf, &len, g_sess.kills);
+        d_status_append(buf, &len, " sexits=");
+        d_status_append_u32(buf, &len, g_sess.exits);
+        d_status_append(buf, &len, " sreaps=");
+        d_status_append_u32(buf, &len, g_sess.reaps);
+        d_status_append(buf, &len, " srestarts=");
+        d_status_append_u32(buf, &len, g_sess.restarts);
+        d_status_append(buf, &len, " swmpid=");
+        d_status_append_u32(buf, &len, g_sess.wmpid);
+        d_status_append(buf, &len, " swmstate=");
+        d_status_append_u32(buf, &len, g_sess.wmstate);
+        d_status_append(buf, &len, " sapppid=");
+        d_status_append_u32(buf, &len, g_sess.apppid);
+        d_status_append(buf, &len, " stokenfail=");
+        d_status_append_u32(buf, &len, g_sess.tokenfail);
+        d_status_append(buf, &len, " sregistry=");
+        d_status_append_u32(buf, &len, g_sess.registry);
     }
     buf[len++] = '\n';
     buf[len] = '\0';
@@ -475,6 +537,7 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
     u32 handle = 0;
     u32 id = 0;
     u32 owner_pid = 0;
+    u32 token = 0;
     i32 px = -1;
     i32 py = -1;
     char title[DS_TITLE_MAX];
@@ -489,6 +552,10 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
             px = (i32)m->u.create.x;
             py = (i32)m->u.create.y;
         }
+    }
+    /* v3 才带 role_token（会话 manager 签发；旧客户端为 0）。 */
+    if (m->version >= 3u) {
+        token = m->u.create.token;
     }
     if (w == 0 || h == 0 || w > DS_SURFACE_MAX_W || h > DS_SURFACE_MAX_H) {
         d_reply_status(from, DS_MSG_CREATE_REPLY, DS_EINVAL, m->seq);
@@ -512,7 +579,7 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
         return;
     }
     rc = ds_table_create_ex(&g_table, w, h, owner_pid, from, handle, pages, va,
-                            title, px, py, &id);
+                            title, px, py, token, &id);
     if (rc != DS_OK) {
         d_reply_status(from, DS_MSG_CREATE_REPLY, (i32)rc, m->seq);
         d_put("ng: surface create FAIL (table)\r\n");
@@ -550,6 +617,19 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
         d_putdec(id);
         d_put(" title=");
         d_put(title);
+        d_put(")\r\n");
+    }
+    if (token != 0) {
+        /* WM 的令牌从它的面板 CREATE 学到（v3 FOCUS 的跨窗口权限）。 */
+        if (session_token_is(token, SESSION_ROLE_WM)) {
+            g_wm_token = token;
+        }
+        d_put("ng: surface token ok (id=");
+        d_putdec(id);
+        d_put(" token=");
+        d_puthex(token);
+        d_put(" role=");
+        d_putdec(SESSION_TOKEN_ROLE(token));
         d_put(")\r\n");
     }
     g_last_list_n = 0xFFFFFFFFu;
@@ -628,6 +708,29 @@ static void d_handle_wm_status(const struct ds_msg *m)
     d_status_write();
 }
 
+/* WP3-3：sessiond 的会话/令牌状态（汇总进同一份 /run/display.status）。 */
+static void d_handle_session_status(const struct ds_msg *m)
+{
+    int changed = (g_sess_seen == 0) || (m->u.session_status.restarts !=
+                                         g_sess.restarts) ||
+                  (m->u.session_status.launches != g_sess.launches);
+
+    ds_memcopy(&g_sess, &m->u.session_status, (u64)sizeof(g_sess));
+    g_sess_seen = 1;
+    if (changed) {
+        d_put("ng: displayd session status ok (procs=");
+        d_putdec(g_sess.procs);
+        d_put(" apps=");
+        d_putdec(g_sess.apps);
+        d_put(" windows=");
+        d_putdec(g_sess.windows);
+        d_put(" restarts=");
+        d_putdec(g_sess.restarts);
+        d_put(")\r\n");
+    }
+    d_status_write();
+}
+
 static void d_handle_commit(const struct ds_msg *m)
 {
     struct ds_rect r;
@@ -650,6 +753,51 @@ static void d_handle_commit(const struct ds_msg *m)
     }
     d_composite_surface(sf);
     g_commits++;
+    d_status_write();
+}
+
+/*
+ * WP3-3：v3 的 FOCUS 带 role_token。允许两种请求者：
+ *   - surface 自己的令牌（应用把自己的窗口提到前面）；
+ *   - WM 的令牌（shell 做任务切换，可以切任何窗口）。
+ * 其它（含伪造/外来令牌）-> 拒绝 + 记数，不改变焦点。
+ * token=0（v1/v2 客户端或旧调用）保持 WP3-2 的行为。
+ */
+static void d_handle_focus(const struct ds_msg *m)
+{
+    u32 id = m->u.focus.surface_id;
+    u32 token = (m->version >= 3u) ? m->u.focus.token : 0u;
+    struct ds_surface *sf;
+
+    if (token != 0) {
+        sf = ds_table_find(&g_table, id);
+        if (!((sf != NULL && sf->token == token) ||
+              (g_wm_token != 0 && token == g_wm_token))) {
+            g_focus_rejects++;
+            d_put("ng: focus reject ok (id=");
+            d_putdec(id);
+            d_put(" token=");
+            d_puthex(token);
+            d_put(" n=");
+            d_putdec(g_focus_rejects);
+            d_put(")\r\n");
+            d_status_write();
+            return;
+        }
+    }
+    (void)ds_table_focus(&g_table, id);
+    d_status_write();
+}
+
+static void d_handle_destroy(const struct ds_msg *m)
+{
+    struct ds_surface *sf = ds_table_find(&g_table, m->u.destroy.surface_id);
+
+    if (sf != NULL && sf->token != 0 && sf->token == g_wm_token) {
+        g_wm_token = 0; /* WM 面板没了：它的跨窗口权限也失效 */
+    }
+    (void)ds_table_destroy(&g_table, m->u.destroy.surface_id);
+    g_last_list_n = 0xFFFFFFFFu;
     d_status_write();
 }
 
@@ -676,13 +824,10 @@ static void d_handle_msg(int type, const struct ds_msg *m, u32 from)
         d_handle_commit(m);
         break;
     case DS_MSG_FOCUS:
-        (void)ds_table_focus(&g_table, m->u.focus.surface_id);
-        d_status_write();
+        d_handle_focus(m);
         break;
     case DS_MSG_DESTROY:
-        (void)ds_table_destroy(&g_table, m->u.destroy.surface_id);
-        g_last_list_n = 0xFFFFFFFFu;
-        d_status_write();
+        d_handle_destroy(m);
         break;
     case DS_MSG_LIST:
         d_handle_list(m, from);
@@ -692,6 +837,9 @@ static void d_handle_msg(int type, const struct ds_msg *m, u32 from)
         break;
     case DS_MSG_WM_STATUS:
         d_handle_wm_status(m);
+        break;
+    case DS_MSG_SESSION_STATUS:
+        d_handle_session_status(m);
         break;
     case DS_MSG_BYE:
     default:

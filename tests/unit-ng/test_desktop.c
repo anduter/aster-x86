@@ -25,8 +25,9 @@
 
 static void t_protocol_sizes(void)
 {
-    CHECK(ds_msg_body_size(DS_MSG_CREATE) == 40); /* v2：title/owner_pid/pos */
+    CHECK(ds_msg_body_size(DS_MSG_CREATE) == 44); /* v3：+ role_token */
     CHECK(ds_msg_body_size_v(DS_MSG_CREATE, 1) == 16); /* v1 兼容 */
+    CHECK(ds_msg_body_size_v(DS_MSG_CREATE, 2) == 40); /* v2 兼容 */
     CHECK(ds_msg_body_size(DS_MSG_CREATE_REPLY) == 28);
     CHECK(ds_msg_body_size(DS_MSG_MAP) == 8);
     CHECK(ds_msg_body_size(DS_MSG_COMMIT) == 20);
@@ -35,7 +36,7 @@ static void t_protocol_sizes(void)
     CHECK(ds_msg_body_size(DS_MSG_INPUT) == 20);
     CHECK(ds_msg_body_size(DS_MSG_BYE) == 8);
     CHECK(ds_msg_body_size(99) == 0);
-    CHECK(ds_msg_size(DS_MSG_CREATE) == DS_MSG_HDR_SIZE + 40);
+    CHECK(ds_msg_size(DS_MSG_CREATE) == DS_MSG_HDR_SIZE + 44);
     CHECK(ds_msg_size(DS_MSG_CREATE_REPLY) == DS_MSG_HDR_SIZE + 28);
     CHECK(ds_msg_size(99) == 0);
     CHECK(sizeof(struct ds_msg) <= DS_MSG_MAX);
@@ -56,6 +57,7 @@ static void t_protocol_roundtrip(void)
     m.u.create.w = 400;
     m.u.create.h = 300;
     m.u.create.flags = 1;
+    m.u.create.token = 0xA1B2C3D4u;
     n = ds_msg_encode(&m, buf, sizeof(buf));
     CHECK(n == (int)ds_msg_size(DS_MSG_CREATE));
     CHECK(ds_msg_decode(buf, (u32)n, &d) == DS_OK);
@@ -66,6 +68,7 @@ static void t_protocol_roundtrip(void)
     CHECK(d.seq == 7);
     CHECK(d.u.create.w == 400 && d.u.create.h == 300);
     CHECK(d.u.create.flags == 1);
+    CHECK(d.u.create.token == 0xA1B2C3D4u);
     CHECK(ds_msg_status_ok(&d) == 1);
 
     memset(&m, 0, sizeof(m));

@@ -28,33 +28,39 @@
 
 static void t_proto_sizes(void)
 {
-    CHECK(ds_msg_body_size(DS_MSG_CREATE) == 40);
+    CHECK(ds_msg_body_size(DS_MSG_CREATE) == 44); /* v3：+ role_token */
     CHECK(ds_msg_body_size_v(DS_MSG_CREATE, 1) == 16);
     CHECK(ds_msg_body_size_v(DS_MSG_CREATE, 2) == 40);
+    CHECK(ds_msg_body_size_v(DS_MSG_CREATE, 3) == 44);
     CHECK(ds_msg_body_size(DS_MSG_CREATE_REPLY) == 28);
     CHECK(ds_msg_body_size(DS_MSG_LIST) == 4);
     CHECK(ds_msg_body_size_v(DS_MSG_LIST, 1) == 0);
-    CHECK(ds_msg_body_size(DS_MSG_LIST_REPLY) == 360);
+    CHECK(ds_msg_body_size(DS_MSG_LIST_REPLY) == 392);
     CHECK(ds_msg_body_size_v(DS_MSG_LIST_REPLY, 1) == 0);
+    CHECK(ds_msg_body_size_v(DS_MSG_LIST_REPLY, 2) == 360);
     CHECK(ds_msg_body_size(DS_MSG_REGISTER_HOTKEY) == 16);
     CHECK(ds_msg_body_size_v(DS_MSG_REGISTER_HOTKEY, 1) == 0);
     CHECK(ds_msg_body_size(DS_MSG_WM_STATUS) == 28);
     CHECK(ds_msg_body_size_v(DS_MSG_WM_STATUS, 1) == 0);
+    CHECK(ds_msg_body_size(DS_MSG_SESSION_STATUS) == 68);
+    CHECK(ds_msg_body_size_v(DS_MSG_SESSION_STATUS, 2) == 0);
     CHECK(ds_msg_size(DS_MSG_WM_STATUS) == DS_MSG_HDR_SIZE + 28);
     CHECK(ds_msg_body_size_v(DS_MSG_FOCUS, 1) == 8);
     CHECK(ds_msg_body_size_v(DS_MSG_FOCUS, 2) == 8);
+    CHECK(ds_msg_body_size_v(DS_MSG_FOCUS, 3) == 8);
     CHECK(ds_msg_body_size_v(DS_MSG_FOCUS, 0) == 0);
-    CHECK(ds_msg_body_size_v(DS_MSG_FOCUS, 3) == 0);
+    CHECK(ds_msg_body_size_v(DS_MSG_FOCUS, 4) == 0);
     CHECK(ds_msg_body_size(99) == 0);
-    CHECK(ds_msg_size(DS_MSG_CREATE) == DS_MSG_HDR_SIZE + 40);
-    CHECK(ds_msg_size(DS_MSG_LIST_REPLY) == DS_MSG_HDR_SIZE + 360);
+    CHECK(ds_msg_size(DS_MSG_CREATE) == DS_MSG_HDR_SIZE + 44);
+    CHECK(ds_msg_size(DS_MSG_LIST_REPLY) == DS_MSG_HDR_SIZE + 392);
     CHECK(ds_msg_size_v(DS_MSG_CREATE, 1) == DS_MSG_HDR_SIZE + 16);
     CHECK(ds_msg_size_v(DS_MSG_LIST, 1) == 0);
     CHECK(sizeof(struct ds_msg) <= DS_MSG_MAX);
-    CHECK(sizeof(struct ds_list_entry) == 44);
+    CHECK(sizeof(struct ds_list_entry) == 48);
     CHECK(sizeof(struct ds_register_hotkey_body) == 16);
-    CHECK(DS_MSG_HDR_SIZE + 360u <= DS_MSG_MAX);
-    CHECK(DS_PROTO_VERSION == 2u);
+    CHECK(sizeof(struct ds_session_status_body) == 68);
+    CHECK(DS_MSG_HDR_SIZE + 392u <= DS_MSG_MAX);
+    CHECK(DS_PROTO_VERSION == 3u);
     CHECK(DS_PROTO_VERSION_MIN == 1u);
     CHECK(DS_TITLE_MAX == 16u);
 }
@@ -75,6 +81,7 @@ static void t_proto_create_v2(void)
     m.u.create.x = 0;
     m.u.create.y = 0;
     m.u.create.owner_pid = 42;
+    m.u.create.token = 0x12345678u;
     ds_title_set(m.u.create.title, "Aster Panel");
     n = ds_msg_encode(&m, buf, sizeof(buf));
     CHECK(n == (int)ds_msg_size(DS_MSG_CREATE));
@@ -87,6 +94,7 @@ static void t_proto_create_v2(void)
     CHECK(d.u.create.h == DS_WM_PANEL_H);
     CHECK(d.u.create.flags == DS_CREATE_F_POS);
     CHECK(d.u.create.owner_pid == 42);
+    CHECK(d.u.create.token == 0x12345678u);
     {
         char title[DS_TITLE_MAX];
 
@@ -127,6 +135,7 @@ static void t_proto_create_v1(void)
     CHECK(d.u.create.w == 400 && d.u.create.h == 300);
     CHECK(d.u.create.flags == 0);
     CHECK(d.u.create.owner_pid == 0); /* v1 没有这个字段 */
+    CHECK(d.u.create.token == 0);     /* v1 没有 token */
     {
         char title[DS_TITLE_MAX];
 
@@ -137,8 +146,17 @@ static void t_proto_create_v1(void)
     buf[4] = 1;
     buf[8] = (u8)((DS_MSG_HDR_SIZE + 40u) & 0xFFu);
     CHECK(ds_msg_decode(buf, DS_MSG_HDR_SIZE + 40u, &d) == DS_EINVAL);
-    /* 版本 3 -> 拒绝。 */
+    /* 版本 2（40 字节 body）仍可解码：title/owner_pid 有、token 为 0。 */
+    buf[4] = 2;
+    CHECK(ds_msg_decode(buf, DS_MSG_HDR_SIZE + 40u, &d) == DS_OK);
+    CHECK(d.version == 2);
+    CHECK(d.u.create.owner_pid == 0);
+    CHECK(d.u.create.token == 0);
+    /* 版本 3 但用 40 字节 body -> 拒绝（v3 固定 44）。 */
     buf[4] = 3;
+    CHECK(ds_msg_decode(buf, DS_MSG_HDR_SIZE + 40u, &d) == DS_EINVAL);
+    /* 版本 4 -> 未知版本拒绝。 */
+    buf[4] = 4;
     CHECK(ds_msg_decode(buf, DS_MSG_HDR_SIZE + 40u, &d) == DS_EINVAL);
 }
 
@@ -162,9 +180,9 @@ static void t_proto_list(void)
     m.seq = 4;
     m.u.list_reply.count = 2;
     ds_list_entry_set(&m.u.list_reply.entries[0], 1, 7, 0, 0, 1280, 32, 1,
-                      "Aster Panel");
+                      0x2001u, "Aster Panel");
     ds_list_entry_set(&m.u.list_reply.entries[1], 2, 9, 192, 152, 400, 300, 0,
-                      "Demo");
+                      0x2002u, "Demo");
     n = ds_msg_encode(&m, buf, sizeof(buf));
     CHECK(n == (int)ds_msg_size(DS_MSG_LIST_REPLY));
     CHECK(ds_msg_decode(buf, (u32)n, &d) == DS_OK);
@@ -175,6 +193,8 @@ static void t_proto_list(void)
     CHECK(d.u.list_reply.entries[0].focused == 1);
     CHECK(d.u.list_reply.entries[1].x == 192);
     CHECK(d.u.list_reply.entries[1].w == 400);
+    CHECK(d.u.list_reply.entries[0].token == 0x2001u);
+    CHECK(d.u.list_reply.entries[1].token == 0x2002u);
     {
         char title[DS_TITLE_MAX];
 
@@ -186,8 +206,9 @@ static void t_proto_list(void)
     /* focused 归一化：非 0 -> 1。 */
     memset(&m, 0, sizeof(m));
     m.type = DS_MSG_LIST_REPLY;
-    ds_list_entry_set(&m.u.list_reply.entries[0], 5, 0, 1, 2, 3, 4, 9, "");
+    ds_list_entry_set(&m.u.list_reply.entries[0], 5, 0, 1, 2, 3, 4, 9, 0, "");
     CHECK(m.u.list_reply.entries[0].focused == 1);
+    CHECK(m.u.list_reply.entries[0].token == 0);
     CHECK(m.u.list_reply.entries[0].title[0] == 0);
 }
 
@@ -291,16 +312,18 @@ static void t_table_ext(void)
     ds_table_init(&t, TBL_W, TBL_H);
     CHECK(ds_table_create_ex(&t, DS_WM_PANEL_W, DS_WM_PANEL_H, 11, 0x30001,
                              0x40001, 40, (u64)(usize)spx, "Aster Panel", 0, 0,
-                             &id) == DS_OK);
+                             0x1001u, &id) == DS_OK);
     CHECK(id == 1);
     s = ds_table_find(&t, 1);
     CHECK(s != NULL && s->x == 0 && s->y == 0);
     CHECK(s != NULL && strcmp(s->title, "Aster Panel") == 0);
     CHECK(s != NULL && s->owner_pid == 11);
+    CHECK(s != NULL && s->token == 0x1001u);
 
     /* 不指定位置 -> 级联（面板算第 1 个，demo 落到 192,152）。 */
     CHECK(ds_table_create_ex(&t, 400, 300, 12, 0x30002, 0x40002, 118,
-                             (u64)(usize)spx, "Demo", -1, -1, &id) == DS_OK);
+                             (u64)(usize)spx, "Demo", -1, -1, 0x1002u,
+                             &id) == DS_OK);
     CHECK(id == 2);
     s = ds_table_find(&t, 2);
     CHECK(s != NULL && s->x == DS_FIRST_X + DS_CASCADE);
@@ -309,7 +332,7 @@ static void t_table_ext(void)
 
     /* 显式位置越界 -> 贴边（1200 + 400 > 1280 -> x = 880）。 */
     CHECK(ds_table_create_ex(&t, 400, 300, 13, 0x30003, 0x40003, 118, 0, "Big",
-                             1200, 0, &id) == DS_OK);
+                             1200, 0, 0x1003u, &id) == DS_OK);
     s = ds_table_find(&t, id);
     CHECK(s != NULL && s->x == 880);
 
@@ -330,6 +353,7 @@ static void t_table_ext(void)
     CHECK(list[3].focused == 1);
     CHECK(list[3].owner_pid == 12);
     CHECK(list[3].x == 192 && list[3].y == 152);
+    CHECK(list[3].token == 0x1002u);
     {
         char title[DS_TITLE_MAX];
 
@@ -570,18 +594,18 @@ static void build_tasks(struct ds_msg *m, u32 focus, u32 n)
     m->type = DS_MSG_LIST_REPLY;
     m->u.list_reply.count = n;
     ds_list_entry_set(&m->u.list_reply.entries[0], 1, 7, 0, 0, 1280, 32,
-                      (focus == 1), "Aster Panel");
+                      (focus == 1), 0x3001u, "Aster Panel");
     if (n >= 2) {
         ds_list_entry_set(&m->u.list_reply.entries[1], 2, 9, 192, 152, 400, 300,
-                          (focus == 2), "Demo");
+                          (focus == 2), 0x3002u, "Demo");
     }
     if (n >= 3) {
         ds_list_entry_set(&m->u.list_reply.entries[2], 3, 10, 224, 184, 400,
-                          300, (focus == 3), "Notes");
+                          300, (focus == 3), 0x3003u, "Notes");
     }
     for (i = 3; i < n; i++) {
         ds_list_entry_set(&m->u.list_reply.entries[i], i + 1, 0, 0, 0, 10, 10,
-                          0, "x");
+                          0, 0, "x");
     }
 }
 

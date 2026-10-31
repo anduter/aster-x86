@@ -39,6 +39,7 @@ struct ds_surface {
     u32 y;
     char title[DS_TITLE_MAX]; /* v2 CREATE title（v1 客户端为空串） */
     u32 owner_pid;     /* v2：客户端自报 getpid()；v1 客户端为 0 */
+    u32 token;         /* v3：CREATE 带的 role_token（旧客户端/旧版本为 0） */
     u32 client_ticket; /* 客户端回复端口 ticket（INPUT 推送目标） */
     u32 shm_handle;    /* SYS_SHM_ALLOC 返回的共享内存 handle */
     u32 shm_pages;
@@ -76,12 +77,13 @@ int ds_table_create(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
                     u64 pixels, u32 *out_id);
 
 /*
- * WP3-2：带标题/指定位置的 CREATE（display 协议 v2）。title 可为 NULL；
- * x/y >= 0 表示客户端指定左上角（DS_CREATE_F_POS），否则走级联放置。
+ * WP3-2：带标题/指定位置的 CREATE（display 协议 v2）。
+ * WP3-3：追加 token（v3 的 role_token；0 = 旧客户端）。
+ * title 可为 NULL；x/y >= 0 表示客户端指定左上角（DS_CREATE_F_POS）。
  */
 int ds_table_create_ex(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
                        u32 client_ticket, u32 shm_handle, u32 shm_pages,
-                       u64 pixels, const char *title, i32 x, i32 y,
+                       u64 pixels, const char *title, i32 x, i32 y, u32 token,
                        u32 *out_id);
 
 struct ds_surface *ds_table_find(struct ds_table *t, u32 id);

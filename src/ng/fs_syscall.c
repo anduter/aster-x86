@@ -35,6 +35,11 @@ struct vfs_ctx *fs_sys_ctx(void)
     return &g_ctx;
 }
 
+const struct ramfs *fs_sys_ramfs(void)
+{
+    return &g_ram;
+}
+
 /* 用户路径 -> 内核缓冲；返回 VFS_OK / EFAULT / ENAMETOOLONG。 */
 static int read_user_path(u64 upath, char *buf, u32 cap)
 {

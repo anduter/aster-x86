@@ -275,7 +275,7 @@ if ($Panic) {
         'ng: proc ipc cross ok (pid=',
         'ng: proc as isolated ok (va=0x40010000',
         'ng: proc kill ok (pids=',
-        'ng: desktop bin ok (displayd=/bin/displayd demo=/bin/demo wm=/bin/wm)',
+        'ng: desktop bin ok (displayd=/bin/displayd demo=/bin/demo wm=/bin/wm sessiond=/bin/sessiond)',
         'ng: WP3-0 selftest PASS',
         'ng: WP3-1 selftest PASS'
     )
@@ -438,6 +438,52 @@ if ($Panic) {
         }
     }
 
+    # WP3-3：session manager（L2c）。init 只 spawn sessiond；displayd/wm 由
+    # sessiond 拉起，应用经 WM 的 LAUNCH 由 sessiond spawn；kill WM 后应用
+    # 存活、WM 按退避重启。没有 LFB 时打印 skipped。
+    if ($Fallback) {
+        $required += @('ng: WP3-3 selftest skipped (no fb)')
+    } else {
+        $required += @(
+            'ng: sessiond spawn ok (pid=',
+            'ng: sessiond up (pid=',
+            'ng: session wm ready ok (wm=',
+            'ng: session launch seen ok (pid=',
+            'ng: session registry seen ok (apps=',
+            'ng: role token seen ok (tokens=',
+            'ng: session wm killed ok (pid=',
+            'ng: session wm restart seen ok (old=',
+            'ng: session survives wm ok (app=',
+            'ng: session app reap ok (',
+            'ng: session cleanup ok (live=0',
+            'ng: WP3-3 selftest PASS'
+        )
+        $patterns += @(
+            'ng: sessiond up \(pid=[0-9]+ displayd=[0-9]+ wm=[0-9]+ port=[0-9]+\)',
+            'ng: session start ok \(pid=[0-9]+ displayd=[0-9]+ wm=[0-9]+\)',
+            'ng: session app launch ok \(pid=[0-9]+ app=/bin/demo token=0x[0-9a-f]+\)',
+            'ng: session window ok \(pid=[0-9]+ id=[0-9]+ title=Demo\)',
+            'ng: session registry ok \(apps=[0-9]+ windows=[0-9]+ procs=[0-9]+\)',
+            'ng: role token ok \(tokens=[0-9]+ bound=[0-9]+ mismatch=0\)',
+            'ng: session launch reject ok \(token=0x[0-9a-f]+ role=2 n=[0-9]+\)',
+            'ng: focus reject ok \(id=[0-9]+ token=0x[0-9a-f]+ n=[0-9]+\)',
+            'ng: session wm restart ok \(old=[0-9]+ new=[0-9]+ restarts=[0-9]+\)',
+            'ng: session wm restart ready ok \(wm=[0-9]+ id=[0-9]+\)',
+            'ng: session registry seen ok \(apps=[0-9]+ windows=[0-9]+\)',
+            'ng: role token seen ok \(tokens=[0-9]+ tokenfail=0\)',
+            'ng: session cleanup ok \(live=0 nodes=[0-9]+\)'
+        )
+        if ($NoQmp) {
+            $patterns += @(
+                'ng: wm launch req ok \(app=/bin/demo via=auto\)'
+            )
+        } else {
+            $patterns += @(
+                'ng: wm launch req ok \(app=/bin/demo via=key\)'
+            )
+        }
+    }
+
     if ($Smoke) {
         $required += @('ng: shell skipped (smoke mode)')
     } elseif (-not $NoQmp) {
@@ -515,6 +561,9 @@ if ($Panic) {
         'ng: demo .* FAIL',
         'ng: WP3-2 .* FAIL',
         'ng: wm .* FAIL',
+        'ng: session .* FAIL',
+        'ng: role token .* FAIL',
+        'ng: WP3-3 .* FAIL',
         'ng: hotkey .* FAIL',
         'ng: parity FAIL',
         '(?m)^parity: [0-9]+/100 .* \.\.\. FAIL'
@@ -590,7 +639,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP3-1) ==='
+Write-Host '=== run-ng (WP3-3) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("disk: {0} ({1} bytes, ide)" -f $disk, (Get-Item -LiteralPath $disk).Length)
 Write-Host ("shell: {0}" -f $(if ($Smoke) { 'skipped (-Smoke)' } elseif ($NoQmp) { 'no QMP injection (-NoQmp)' } else { 'QMP command script' }))
@@ -847,6 +896,11 @@ $wmScreenChecked = $false
 $wmScreenOk = $false
 $wmScreenMsg = ''
 $wmScreenPixel = ''
+$wp33LaunchInjected = $false
+$wp33ScreenChecked = $false
+$wp33ScreenOk = $false
+$wp33ScreenMsg = ''
+$wp33ScreenPixel = ''
 $wmTaskX = 192
 $wmTaskY = 152
 $shellTyped = $false
@@ -905,6 +959,15 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
                     Write-Host 'run-ng: QMP sendkey 1 -> WM launcher spawn demo'
                 } else {
                     Write-Host 'run-ng: WARN QMP sendkey 1 failed; WM uses auto fallback'
+                }
+            }
+            # WP3-3：sessiond 的 WM 就绪 -> 注入 '1'（WM 发 LAUNCH，由 sessiond spawn）。
+            if (-not $wp33LaunchInjected -and $qmp -and -not $Fallback -and $text.Contains('ng: session wm ready ok (wm=')) {
+                $wp33LaunchInjected = $true
+                if (Send-QmpKey $qmp '1') {
+                    Write-Host 'run-ng: QMP sendkey 1 -> session LAUNCH (sessiond spawn demo)'
+                } else {
+                    Write-Host 'run-ng: WARN QMP sendkey 1 failed; WM uses auto launch'
                 }
             }
             # WP3-1：第一帧合成完成 -> screendump + 像素断言（只做一次）。
@@ -983,6 +1046,43 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
                     $wmScreenMsg = 'QMP screendump (wm) failed'
                 }
             }
+            # WP3-3：WM 重启后会话回来了 -> screendump 断言面板 + Demo 窗口仍在。
+            if (-not $wp33ScreenChecked -and $qmp -and -not $Fallback -and -not $NoQmp -and $text.Contains('ng: session wm restart ready ok (wm=')) {
+                $wp33ScreenChecked = $true
+                $shot3 = Join-Path $tmpBase 'screen3.ppm'
+                Remove-Item -LiteralPath $shot3 -Force -ErrorAction SilentlyContinue
+                $task3 = [regex]::Matches($text, 'ng: wm task ok \(id=(\d+) x=(\d+) y=(\d+) title=Demo\)')
+                if ($task3.Count -gt 0) {
+                    $wmTaskX = [int]$task3[$task3.Count - 1].Groups[2].Value
+                    $wmTaskY = [int]$task3[$task3.Count - 1].Groups[3].Value
+                }
+                if (Send-QmpScreendump $qmp $shot3) {
+                    for ($i = 0; $i -lt 60; $i++) {
+                        if ((Test-Path -LiteralPath $shot3) -and (Get-Item -LiteralPath $shot3).Length -gt 54) { break }
+                        Start-Sleep -Milliseconds 50
+                    }
+                    Start-Sleep -Milliseconds 150
+                    $ppm3 = $null
+                    if (Test-Path -LiteralPath $shot3) { $ppm3 = Read-Ppm $shot3 }
+                    $panelPx3 = Get-PpmPixel $ppm3 4 4
+                    $demoPx3 = Get-PpmPixel $ppm3 ($wmTaskX + 25) ($wmTaskY + 25)
+                    if ($null -eq $panelPx3 -or $null -eq $demoPx3) {
+                        $wp33ScreenMsg = ("no ppm/pixel panel=({0}) demo=({1},{2})" -f $panelPx3, ($wmTaskX + 25), ($wmTaskY + 25))
+                    } elseif ($panelPx3[0] -ne 0x20 -or $panelPx3[1] -ne 0x28 -or $panelPx3[2] -ne 0x38) {
+                        $wp33ScreenMsg = ("panel (4,4)=#{0:x2}{1:x2}{2:x2}, want #202838" -f $panelPx3[0], $panelPx3[1], $panelPx3[2])
+                    } elseif ($demoPx3[0] -ne 0x30 -or $demoPx3[1] -ne 0x70 -or $demoPx3[2] -ne 0xC0) {
+                        $wp33ScreenMsg = ("demo ({0},{1})=#{2:x2}{3:x2}{4:x2}, want #3070c0" -f ($wmTaskX + 25), ($wmTaskY + 25), $demoPx3[0], $demoPx3[1], $demoPx3[2])
+                    } else {
+                        $wp33ScreenOk = $true
+                        $wp33ScreenPixel = ("panel(4,4)=#{0:x2}{1:x2}{2:x2} demo({3},{4})=#{5:x2}{6:x2}{7:x2}" -f `
+                            $panelPx3[0], $panelPx3[1], $panelPx3[2], ($wmTaskX + 25), ($wmTaskY + 25), `
+                            $demoPx3[0], $demoPx3[1], $demoPx3[2])
+                        Write-Host ("run-ng: wp3-3 screendump pixel ok {0}" -f $wp33ScreenPixel)
+                    }
+                } else {
+                    $wp33ScreenMsg = 'QMP screendump (wp3-3) failed'
+                }
+            }
             # WP2-6：shell 已 ready -> 逐字符注入整条命令序列（一次会话只做一次）。
             if (-not $Smoke -and -not $NoQmp -and $qmp -and -not $shellTyped -and                $text.Contains('ng: shell ready')) {
                 $shellTyped = $true
@@ -1032,6 +1132,10 @@ if ($matched) {
             Fail ("WP3-2 screendump pixel assertion failed ({0})" -f $wmScreenMsg)
         }
         Write-Host ("run-ng: wm screendump pixel: {0} (QMP PPM)" -f $wmScreenPixel)
+        if (-not $wp33ScreenChecked -or -not $wp33ScreenOk) {
+            Fail ("WP3-3 screendump pixel assertion failed ({0})" -f $wp33ScreenMsg)
+        }
+        Write-Host ("run-ng: wp3-3 screendump pixel: {0} (QMP PPM)" -f $wp33ScreenPixel)
     }
     $missingCount = @($required | Where-Object { -not $serialText.Contains($_) }).Count
     Write-Host ("run-ng: matched {0}/{1} expected lines + {2} patterns" -f ($required.Count - $missingCount), $required.Count, $patterns.Count)

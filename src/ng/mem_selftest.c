@@ -15,6 +15,8 @@ extern char __image_start[];
 extern char __kernel_end[];
 extern char __fat16_img_start[];
 extern char __fat16_img_end[];
+extern char __bigdata_start[];
+extern char __bigdata_end[];
 
 #define LOW_MEM_RESERVED 0x100000ULL /* 低 1 MiB：IVT/BDA/VGA/引导结构 */
 
@@ -92,6 +94,12 @@ int mem_boot_init(u64 boot_info)
     pmm_reserve((u64)(usize)__fat16_img_start,
                 (u64)(usize)__fat16_img_end -
                     (u64)(usize)__fat16_img_start);
+    /* WP3-3：紧随其后的用户 ELF blob 段（同一个 PD[1] 恒等大页）。 */
+    if ((u64)(usize)__bigdata_end > (u64)(usize)__bigdata_start) {
+        pmm_reserve((u64)(usize)__bigdata_start,
+                    (u64)(usize)__bigdata_end -
+                        (u64)(usize)__bigdata_start);
+    }
     if (map.boot_end > map.boot_start) {
         pmm_reserve(map.boot_start, map.boot_end - map.boot_start);
     }

@@ -24,6 +24,8 @@ int fs_sys_init(const struct fs_env *env);
 
 /* 内核自检拿上下文做直接调用（不经过用户指针）。 */
 struct vfs_ctx *fs_sys_ctx(void);
+/* 诊断：根 ramfs 的统计（节点/页/目录项用量；WP3-3 的容量证据）。 */
+const struct ramfs *fs_sys_ramfs(void);
 
 int fs_sys_open(u64 upath, u32 flags, u32 mode);
 int fs_sys_read(u32 fd, u64 ubuf, u64 len);

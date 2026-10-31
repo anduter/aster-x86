@@ -28,6 +28,7 @@ int test_proc(void);
 int test_shm(void);
 int test_desktop(void);
 int test_wm(void);
+int test_session(void);
 int test_parity(void);
 
 int ut_checks;
@@ -64,6 +65,7 @@ int main(void)
     test_shm();
     test_desktop();
     test_wm();
+    test_session();
     test_parity();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);
