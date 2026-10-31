@@ -4,7 +4,7 @@
 - 工具：`tools/audit-ng-sys.ps1` + ring3 探针 `tests/audit-ng/sys/audit_sys.c`
   （独立 ELF，经 FAT16 注入 `AUDIT.ELF`，由 ring3 shell 拉起；QMP 用随机空闲端口，
   不碰 soak 的 11995/11996）。
-- 结论：**531 个边界用例在 `-cpu max` 与 `-cpu qemu64` 下都 PASS，无内核
+- 结论：**554 个边界用例在 `-cpu max` 与 `-cpu qemu64` 下都 PASS，无内核
   panic**。找到并修复 2 个真实缺陷（都不是 panic，但都会破坏文件/耗尽资源）；
   ring3 异常 -> 内核 panic 仍是已知限制（本轮的 `-Scenario crash` 继续按预期
   观察到 `PANIC: vec=0xe`）。
@@ -13,7 +13,7 @@
 
 | 项 | 值 |
 |---|---|
-| 边界用例 | **531 / 531 PASS**（`AUDIT: summary pass=531 fail=0 total=531`） |
+| 边界用例 | **554 / 554 PASS**（`AUDIT: summary pass=554 fail=0 total=554`） |
 | CPU | `max`（SMEP/SMAP on）与 `qemu64`（SMEP/SMAP off）两轮都 PASS |
 | 内核 panic | boundary 场景 0 次；crash 场景按设计 1 次（已知限制） |
 | 发现 | 2 个（`vfs_open` 失败副作用、ramfs 节点池耗尽） |
@@ -31,11 +31,12 @@
 | `proc*` | 153 | 40..47：spawn 8 项 argv（126/127 单项、正好 8 项、无 NULL 终结、argv=NULL）、path 62/63、坏 argv 元素/跨页、upid 预校验/页尾、spawn 目录、exit code 掩码、self-kill（含带 shm/fb 映射）、kill pid/sig 边界、kill 幂等/已回收、wait status NULL/页尾/跨页、wait 非子进程、线程池/进程表耗尽与回收、kill 阻塞在 send/recv/wait 的进程、并发 spawn/kill/wait storm、shm/fb 映射与 kill/正常退出回收 |
 | `shm*`/`fb*` | 43 | 45/46/47：pages 0/1025/u64max、坏/跨页输出指针、对象表 8 满 ENOSPC、同一对象 8 个映射满、跨进程 map（kill 与正常退出两条释放顺序）、FB 重复 map=EBUSY、LFB 子进程 kill/正常退出 |
 | `fuzz*` | 4 | 1500 条随机 VFS 路径（stat/open/listdir）、500 条随机 IPC 消息（合法缓冲 + 随机 len/type/flags/from + 隔条合法消息） |
+| `elf*` | 23 | syscall 40 的 ELF 输入：用户经 SYS_WRITE_FD 写出的空/垃圾/坏头/坏 PT_LOAD（对齐、W^X、filesz>memsz、offset 越界、VA 越界、memsz 巨大、align、入口不在 X 段、段重叠、无 PT_LOAD、错 type/machine/ehsize/phentsize/phnum/phoff），最后用最小 exit(0) ELF 正向跑通 |
 
 ## 2. 复现
 
 ```powershell
-# 边界（默认 boundary；531 用例，~1 分钟）
+# 边界（默认 boundary；554 用例，~1 分钟）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\audit-ng-sys.ps1
 
 # 降级 CPU（无 SMEP/SMAP，走 pg_smap_on()=0 的 uaccess 路径）
@@ -91,11 +92,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\audit-ng-sys.ps1 -Scen
   `headroom >= 8`。创建出的临时文件随后全部 unlink，不影响后续用例。
 - 兼容性：`run-ng` 对 `nodes=` 只做正则匹配，`run-ng` 仍 PASS 159/159+75。
 
-## 5. 审计工具/探针改动（提交 `b007c04`、`6e05740`）
+## 5. 审计工具/探针改动（提交 `b007c04`、`6e05740`、`f46fbec`）
 
 | 路径 | 说明 |
 |---|---|
-| `tests/audit-ng/sys/audit_sys.c` | 216 -> **531** 用例；新增 marker 页边界、跨进程 IPC 唤醒/握手/EPERM、kill blocked sender/wait、self-kill（含 shm/fb 映射）、FAT16 读写/listdir/listdir 小缓冲、SVC 30..35、fd/线程/进程表耗尽、深队列、waiter 饱和、VFS/IPC 结构化 fuzz、退出时关端口唤醒 blocked sender、ramfs 余量与 `open` 失败副作用 |
+| `tests/audit-ng/sys/audit_sys.c` | 216 -> **554** 用例；新增 marker 页边界、跨进程 IPC 唤醒/握手/EPERM、kill blocked sender/wait、self-kill（含 shm/fb 映射）、FAT16 读写/listdir/listdir 小缓冲、SVC 30..35、fd/线程/进程表耗尽、深队列、waiter 饱和、VFS/IPC 结构化 fuzz、退出时关端口唤醒 blocked sender、ramfs 余量与 `open` 失败副作用、用户写出的畸形 ELF 与最小可执行 ELF |
 | `tools/audit-ng-sys.ps1` | 探针编译改 `-Os`（`.bss` 必须留在 `0x40010000` 以下：内核在该 VA 映射每进程 marker 页，ELF 段越界会被覆盖，脚本原有 PT_LOAD 断言会在编译后立刻拦下）；新增 13 条证据断言（含 `headroom >= 8`、探针退出后的 panic 复查）；补 UTF-8 BOM（仓库 pre-commit 强制） |
 
 > 说明：脚本里新增注释一律用 ASCII。Windows PowerShell 5.1 无 BOM 时按
@@ -123,7 +124,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\audit-ng-sys.ps1 -Scen
    `SYS_SHM_ALLOC` 只能 `ENOSPC`（已按此语义断言）。
 6. **ramfs/FAT16 固有上限**：ramfs 单文件 1 MiB、页池 2 MiB；FAT16 8.3 名字
    （扩展名 >3 字符返回 `ENAMETOOLONG`）。都是返回错误码，不是崩溃。
-7. **`SYS_WAIT`/`SYS_SPAWN` 的 copyout 在预校验之后**，正常不可达失败；
+7. **用户写出的 ELF 没有签名/权限校验**：spawn 会直接执行任何能读到的合法
+   ELF（当前所有进程 uid=0，属 D0 模型；包签名/执行策略在 E4/S1）。本轮只
+   验证畸形镜像是**返回 EINVAL 而不是 panic**。
+8. **`SYS_WAIT`/`SYS_SPAWN` 的 copyout 在预校验之后**，正常不可达失败；
    若未来页表可被第三方修改，失败会留下僵尸/孤儿子进程（当前协作式单核
    不会发生），记录备查。
 
@@ -133,8 +137,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\audit-ng-sys.ps1 -Scen
 powershell -File tools/unit-ng.ps1     # PASS，5315 checks / 0 failures
 powershell -File tools/build-ng.ps1    # PASS -> dist-ng/aster-ng.elf (2083056 B)
 powershell -File tools/run-ng.ps1      # PASS，159/159 + 75 patterns
-powershell -File tools/audit-ng-sys.ps1              # PASS，531/531，cpu max
-powershell -File tools/audit-ng-sys.ps1 -Cpu qemu64  # PASS，531/531
+powershell -File tools/audit-ng-sys.ps1              # PASS，554/554，cpu max
+powershell -File tools/audit-ng-sys.ps1 -Cpu qemu64  # PASS，554/554
 powershell -File tools/audit-ng-sys.ps1 -Scenario crash  # PASS（vec=0xe，已知限制）
 ```
 
@@ -147,4 +151,6 @@ powershell -File tools/audit-ng-sys.ps1 -Scenario crash  # PASS（vec=0xe，已�
 |---|---|
 | `b007c04` | `[ng][audit-sys]` 探针 216 -> 479 用例 + 脚本证据断言（第一段） |
 | `26f1b75` | `[ng][audit-sys]` vfs：open 失败不截断/不留文件（含 host 回归） |
-| `6e05740` | `[ng][audit-sys]` ramfs 池 32/64 -> 64/128；探针 531 用例 + headroom/副作用断言 |
+| `6e05740` | `[ng][audit-sys]` ramfs 池 32/64 -> 64/128；探针扩到 531 用例 + headroom/副作用断言 |
+| `f46fbec` | `[ng][audit-sys]` 探针新增 23 个"用户写出的 ELF"用例（554 总数）+ 脚本证据/阈值 |
+| 本条 | `[ng][audit-sys]` docs：本文件（554 用例、2 个修复、未修项） |
