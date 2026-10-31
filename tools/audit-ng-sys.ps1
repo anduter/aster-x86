@@ -383,7 +383,7 @@ try {
             $total = [int]$summary.Groups[3].Value
             Write-Host ("  [INFO] summary pass={0} fail={1} total={2}" -f $pass, $fails, $total) -ForegroundColor Cyan
             Check 'boundary: all cases PASS' ($fails -eq 0) ("(fail={0})" -f $fails)
-            Check 'boundary: case count >= 460' ($total -ge 460 -and $pass -ge 460) ("(total={0})" -f $total)
+            Check 'boundary: case count >= 540' ($total -ge 540 -and $pass -ge 540) ("(total={0})" -f $total)
             $failLines = [regex]::Matches($t, 'AUDIT: FAIL [^\r\n]+')
             foreach ($fl in ($failLines | Select-Object -First 12)) { Write-Host ("    " + $fl.Value) }
             $waitOk = Wait-Serial ('ng: shell wait ok \(pid={0} status=0\)' -f [regex]::Escape($probePid)) 20
@@ -433,6 +433,8 @@ try {
                 ($t.Contains('AUDIT: info vfs path fuzz ok'))
             Check 'boundary: ipc msg fuzz' `
                 ($t.Contains('AUDIT: info ipc msg fuzz ok'))
+            Check 'boundary: user-written ELF spawn' `
+                ($t.Contains('AUDIT: info user-written ELF spawn ok'))
             $headroom = [regex]::Match($t, 'AUDIT: info ramfs headroom=(\d+)')
             Check 'boundary: ramfs node headroom >= 8' `
                 ($headroom.Success -and [int]$headroom.Groups[1].Value -ge 8) `

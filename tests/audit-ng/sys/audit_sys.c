@@ -132,6 +132,38 @@ _Static_assert(sizeof(struct audit_stat) == 24, "vfs_stat");
 _Static_assert(sizeof(struct audit_dirent) == 80, "vfs_dirent");
 _Static_assert(sizeof(struct audit_fb_info) == 48, "ds_fb_info");
 
+/* 用户自己写进 /tmp 的 ELF（syscall 40 的输入）：字段布局与 ELF64 一致。 */
+struct audit_ehdr {
+    u8 ident[16];
+    u16 type;
+    u16 machine;
+    u32 version;
+    u64 entry;
+    u64 phoff;
+    u64 shoff;
+    u32 flags;
+    u16 ehsize;
+    u16 phentsize;
+    u16 phnum;
+    u16 shentsize;
+    u16 shnum;
+    u16 shstrndx;
+};
+
+struct audit_phdr {
+    u32 type;
+    u32 flags;
+    u64 offset;
+    u64 vaddr;
+    u64 paddr;
+    u64 filesz;
+    u64 memsz;
+    u64 align;
+};
+
+_Static_assert(sizeof(struct audit_ehdr) == 64, "ehdr");
+_Static_assert(sizeof(struct audit_phdr) == 56, "phdr");
+
 /* ---- 静态缓冲（.bss；16 KiB 用户栈之外）-------------------------------- */
 static u8 g_buf[64];
 /*
@@ -2512,6 +2544,190 @@ static void test_proc2(void)
     put_str("AUDIT: info proc table/thread pool limits ok\n");
 }
 
+/* ------------------------------------------------------------------------- */
+/* syscall 40 的输入：用户自己写出的 ELF（畸形镜像 + 最小正向对照）           */
+/* ------------------------------------------------------------------------- */
+static u8 g_elf[512] __attribute__((aligned(8)));
+
+static void elf_zero(u32 n)
+{
+    u32 i;
+
+    for (i = 0; i < n; i++) {
+        g_elf[i] = 0;
+    }
+}
+
+static void elf_base(u32 len, u32 phnum, u64 phoff, u64 entry)
+{
+    struct audit_ehdr *eh = (struct audit_ehdr *)(void *)g_elf;
+
+    elf_zero(len);
+    eh->ident[0] = 0x7F;
+    eh->ident[1] = 'E';
+    eh->ident[2] = 'L';
+    eh->ident[3] = 'F';
+    eh->ident[4] = 2; /* ELFCLASS64 */
+    eh->ident[5] = 1; /* ELFDATA2LSB */
+    eh->ident[6] = 1; /* EV_CURRENT */
+    eh->type = 2;     /* ET_EXEC */
+    eh->machine = 62; /* EM_X86_64 */
+    eh->version = 1;
+    eh->entry = entry;
+    eh->phoff = phoff;
+    eh->ehsize = 64;
+    eh->phentsize = 56;
+    eh->phnum = (u16)phnum;
+}
+
+static void elf_ph(u32 idx, u32 type, u32 flags, u64 off, u64 va, u64 filesz,
+                   u64 memsz, u64 align)
+{
+    struct audit_phdr *ph =
+        (struct audit_phdr *)(void *)(g_elf + 64u + (u64)idx * 56u);
+
+    ph->type = type;
+    ph->flags = flags;
+    ph->offset = off;
+    ph->vaddr = va;
+    ph->paddr = va;
+    ph->filesz = filesz;
+    ph->memsz = memsz;
+    ph->align = align;
+}
+
+static i64 elf_spawn_case(const char *name, u32 len, i64 want, u32 *out_pid)
+{
+    i64 fd;
+    i64 rc;
+    u32 pid = 0;
+    char *av[2];
+
+    if (out_pid != NULL) {
+        *out_pid = 0;
+    }
+    fd = open_file("/tmp/bad.elf", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0) {
+        expect(name, fd, want);
+        return fd;
+    }
+    if (len > 0) {
+        rc = sys3(SYS_WRITE_FD, fd, (i64)(usize)g_elf, (i64)len);
+        if (rc != (i64)len) {
+            (void)sys3(SYS_CLOSE, fd, 0, 0);
+            (void)sys3(SYS_UNLINK, (i64)(usize)"/tmp/bad.elf", 0, 0);
+            expect(name, rc, want);
+            return rc;
+        }
+    }
+    (void)sys3(SYS_CLOSE, fd, 0, 0);
+    av[0] = (char *)"/tmp/bad.elf";
+    av[1] = NULL;
+    rc = spawn_argv(av, &pid);
+    expect(name, rc, want);
+    if (rc == 0 && out_pid != NULL) {
+        *out_pid = pid;
+    }
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/tmp/bad.elf", 0, 0);
+    return rc;
+}
+
+static void test_elf_spawn(void)
+{
+    u32 pid = 0;
+    int st = 0;
+    u32 i;
+
+    section("elf");
+
+    /* 空文件 / 纯垃圾。 */
+    (void)elf_spawn_case("elf.empty", 0, E_INVAL, NULL);
+    elf_zero(64);
+    for (i = 0; i < 64u; i++) {
+        g_elf[i] = 0xAA;
+    }
+    (void)elf_spawn_case("elf.garbage", 64, E_INVAL, NULL);
+
+    /* ELF 头字段。 */
+    elf_base(512, 0, 64, 0x40000000ULL);
+    (void)elf_spawn_case("elf.phnum0", 512, E_INVAL, NULL);
+    elf_base(512, 1, 4096, 0x40000000ULL);
+    (void)elf_spawn_case("elf.phoff_beyond", 512, E_INVAL, NULL);
+    elf_base(512, 1, 65, 0x40000000ULL);
+    (void)elf_spawn_case("elf.phoff_misalign", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    ((struct audit_ehdr *)(void *)g_elf)->phentsize = 64;
+    (void)elf_spawn_case("elf.phentsize", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    ((struct audit_ehdr *)(void *)g_elf)->ehsize = 32;
+    (void)elf_spawn_case("elf.ehsize", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    ((struct audit_ehdr *)(void *)g_elf)->type = 1;
+    (void)elf_spawn_case("elf.type", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    ((struct audit_ehdr *)(void *)g_elf)->machine = 3;
+    (void)elf_spawn_case("elf.machine", 512, E_INVAL, NULL);
+
+    /* PT_LOAD 字段（基准：off=0x100/va=0x40000000/filesz=memsz=16/align=4096）。 */
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x40000001ULL, 16, 16, 4096);
+    (void)elf_spawn_case("elf.seg_unaligned", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 7, 0x100, 0x40000000ULL, 16, 16, 4096);
+    (void)elf_spawn_case("elf.seg_wx", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x40000000ULL, 0x200, 0x100, 4096);
+    (void)elf_spawn_case("elf.seg_filesz_gt_memsz", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x1000, 0x40000000ULL, 16, 16, 4096);
+    (void)elf_spawn_case("elf.seg_offset_beyond", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x1000ULL, 16, 16, 4096);
+    (void)elf_spawn_case("elf.seg_low_va", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x7FFFFFFF0000ULL, 16, 16, 4096);
+    (void)elf_spawn_case("elf.seg_high_va", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x40000000ULL, 16, 0x100000000ULL, 4096);
+    (void)elf_spawn_case("elf.seg_huge_memsz", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x40000000ULL, 16, 16, 0x800);
+    (void)elf_spawn_case("elf.seg_align", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40002000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x40000000ULL, 16, 16, 4096);
+    (void)elf_spawn_case("elf.entry_outside", 512, E_INVAL, NULL);
+    elf_base(512, 2, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x40000000ULL, 16, 0x1000, 4096);
+    elf_ph(1, 1, 6, 0x100, 0x40000800ULL, 16, 0x1000, 4096);
+    (void)elf_spawn_case("elf.seg_overlap", 512, E_INVAL, NULL);
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 4, 4, 0, 0, 0, 0, 8); /* 只有 PT_NOTE */
+    (void)elf_spawn_case("elf.no_load", 512, E_INVAL, NULL);
+
+    /*
+     * 正向对照：用户经 SYS_WRITE_FD 写出的最小 ELF（一页 RX，entry=0x40000000，
+     * 代码 = exit(0)）。spawn 成功、子进程正常退出。
+     */
+    elf_base(512, 1, 64, 0x40000000ULL);
+    elf_ph(0, 1, 5, 0x100, 0x40000000ULL, 16, 16, 4096);
+    {
+        static const u8 code[16] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0x31, 0xFF,
+                                    0x0F, 0x05, 0xEB, 0xFE, 0x90, 0x90, 0x90,
+                                    0x90, 0x90};
+        u32 k;
+
+        for (k = 0; k < 16u; k++) {
+            g_elf[0x100 + k] = code[k];
+        }
+    }
+    if (elf_spawn_case("elf.good_spawn", 512, 0, &pid) == 0) {
+        st = -1;
+        expect("elf.good_wait", wait_status((i64)pid, &st), 0);
+        expect("elf.good_status", st, 0);
+        put_str("AUDIT: info user-written ELF spawn ok\n");
+    }
+}
+
 static void test_shm_fb2(void)
 {
     u64 va = 0;
@@ -2801,6 +3017,7 @@ int audit_main(long argc, char **argv)
     test_svc2();
     test_proc(argv);
     test_proc2();
+    test_elf_spawn();
     test_shm_fb();
     test_shm_fb2();
     test_fuzz();
