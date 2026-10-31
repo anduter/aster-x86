@@ -314,3 +314,13 @@
 - **理由**：WM/应用都在 ring3；用户态抢占足以解决“WM 自旋卡死全系统”，成本远低于全内核可抢占审计；D1 风险可控。
 - **影响**：isr.S 返回路径加 need_resched 检查；sched.c 加时间片计数；thread.h 加 need_resched/slice；D2 再做内核抢占/SMP/RT 优先级。
 - **替代**：D1 直接做 PREEMPT 内核——锁/可重入审计太大，否决；继续完全协作——WM 自旋仍会卡死，桌面不可用，否决。
+## ADR-022：输入服务化（displayd 认领 + 单一轮询点 + PS/2 鼠标）
+
+- **背景**：D0 只有键盘，且 main idle 与 shell/displayd 多处轮询 PS/2；桌面起来后 shell 与 displayd 从同一 `readkey` 队列 pop，导致键被 shell 吃掉、WM 收不到热键；鼠标只有光标图形没有驱动；idle 在 `IF=0` 下 `hlt` 有停死风险。
+- **决策**：
+  1. 内核维护**一条**输入事件队列；`ng_input_poll()` 只挂在 `sched_yield()` 调度点（所有 sleep/阻塞/空闲都经过），`readkey` 对 boot 同步演示兜底；
+  2. 新增 syscall **96 `input_event`**（键盘/移动/按键，非阻塞）与 **97 `input_claim`**（输入所有权）；displayd 启动即 claim，非属主 `readkey` 返回 `-EAGAIN` 并让出；
+  3. displayd 消费 96：键盘 → WM 热键副本 + 焦点窗口；鼠标 → 软件光标（save-under）+ 左键命中改焦点；
+  4. main 末尾 idle 不再 `hlt`，改 `sched_yield()`；tick/HLT idle 留给 WP5-0f。
+- **后果**：键鼠在桌面栈可用；shell 在桌面运行时不再抢键；输入延迟受调度点约束（无 IRQ，D1 可接受）。**不做** IRQ 输入、不做多消费者广播、不做鼠标绝对定位（属 D2/USB）。
+- **状态**：已实现（`docs/claims/ng-input-mouse.md`；run-ng 161/161 + 76，unit 5594/0）。
