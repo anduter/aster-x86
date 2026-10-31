@@ -21,6 +21,7 @@
  *     次调度回收）、摘掉它在端口等待链上的条目、关端口、销毁 AS。
  */
 #include "proc.h"
+#include "proc_str.h"
 
 #include "elf.h"
 #include "fbmap.h"
@@ -892,8 +893,8 @@ static int proc_copy_argv(u64 uargv, char argbuf[][PROC_ARG_MAX], u32 max_args,
         if (len < 0) {
             return PROC_EFAULT;
         }
-        if ((u32)len >= PROC_ARG_MAX) {
-            return PROC_EINVAL;
+        if (!proc_user_str_len_ok(len, PROC_ARG_MAX)) {
+            return PROC_ENAMETOOLONG;
         }
         argv_out[i] = argbuf[i];
         n++;
@@ -918,8 +919,8 @@ u64 proc_sys_spawn(u64 upath, u64 uargv, u64 upid)
     if (len < 0) {
         return (u64)(i64)PROC_EFAULT;
     }
-    if ((u32)len >= PROC_PATH_MAX) {
-        return (u64)(i64)PROC_EINVAL;
+    if (!proc_user_str_len_ok(len, PROC_PATH_MAX)) {
+        return (u64)(i64)PROC_ENAMETOOLONG;
     }
     argc = proc_copy_argv(uargv, argbuf, PROC_MAX_ARGS, argv);
     if (argc < 0) {

@@ -17,6 +17,7 @@
 #include "paging.h"
 #include "test_util.h"
 #include "uaccess.h"
+#include "proc_str.h"
 
 #define PG_SIZE 4096ULL
 
@@ -188,11 +189,33 @@ static void t_copyin_str(void)
 /* 入口                                                                       */
 /* ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- */
+/* 5. proc_user_str_len_ok：路径/argv 截断判定（WP3 加固）                      */
+/* ------------------------------------------------------------------------- */
+
+static void t_proc_str_len(void)
+{
+    /* cap=16：合法串最长 14（NUL 在 14），15/16 都是截断/超长。 */
+    CHECK(proc_user_str_len_ok(0, 16) == 1);
+    CHECK(proc_user_str_len_ok(14, 16) == 1);
+    CHECK(proc_user_str_len_ok(15, 16) == 0);
+    CHECK(proc_user_str_len_ok(16, 16) == 0);
+    CHECK(proc_user_str_len_ok(-1, 16) == 0);
+
+    /* cap=2：只能放 1 字节串（长度 <= 0）。 */
+    CHECK(proc_user_str_len_ok(0, 2) == 1);
+    CHECK(proc_user_str_len_ok(1, 2) == 0);
+
+    /* cap 退化值：0/1 一律拒绝。 */
+    CHECK(proc_user_str_len_ok(0, 0) == 0);
+    CHECK(proc_user_str_len_ok(0, 1) == 0);
+}
 int test_uaccess(void)
 {
     t_range_args();
     t_copy();
     t_page_perms();
     t_copyin_str();
+    t_proc_str_len();
     return 0;
 }

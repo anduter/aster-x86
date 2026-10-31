@@ -78,6 +78,7 @@
 #define PROC_ENOMEM (-12)
 #define PROC_EFAULT (-14)
 #define PROC_EBUSY (-16)
+#define PROC_ENAMETOOLONG (-36) /* 路径/参数超长（copyin_str 截断） */
 #define PROC_EINVAL (-22)
 #define PROC_ENOSPC (-28)
 #define PROC_ECHILD (-10)
