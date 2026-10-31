@@ -47,7 +47,7 @@
 
 ### P0-2 8h 浸泡没有“在跑”的证据
 
-- 证据：obj-ng/soak-final/ 只有 dry/pre/probe 目录（dry.log 是 shell transcript）；21:0x 无 qemu 进程；README/d1-plan 写“8h 在跑”。
+- 证据：obj-ng/soak-final/ 只有 dry/pre/probe 目录（dry.log 是 shell transcript）；审查时（21:0x 前）无 qemu；后续 8h 于 21:04 在 ng-d0-final 起跑，状态见 `docs/CURRENT.md`。
 - 影响：D0 的最终长跑门禁无法验收；若在别的机器跑，仓库里没有日志。
 - 修复：在 ng-d0-final 上重跑，日志落 obj-ng/soak-final/；完成后在 claims 记录起止时间、panic/OOM/泄漏/空闲 CPU。
 - 出口：soak: 8h pass (panic=0 oom=0 leak=.. idle_cpu=..)；或明确记录失败并修复后重跑。
@@ -128,7 +128,7 @@
 | 用户 #PF 串口洪泛 | src/ng/trap.c:186-193 每次 #PF 打印 cr2/error/rip | fault 隔离后加限流/采样，避免日志 DoS |
 | 资源配额缺失 | PROC_MAX=32、PROC_ELF_MAX=256KB、ramfs 池 64/128；无 per-user 配额 | 加 admission/配额/回收；压测 fork/spawn/文件 |
 | sessiond 20ms 轮询 / displayd 单线程 | sessiond.c S_LIST_EVERY=10；displayd 单线程事件循环 | 事件驱动、批量、背压；并发客户端压测 |
-| 文档/构建漂移 | obj-ng/ 未跟踪；D1 计划仍写 31 个 WP（0g 并入后 32）；WP5-0g 文档未提交 | 补 .gitignore、更新计数、合并 0g |
+| 文档/构建漂移 | obj-ng/ 未跟踪；已修复：`.gitignore` 补 /obj-ng/ /dist-ng/、D1 计数 32、0g 已接受并合并（见 CURRENT）。| — |
 
 ## 6. 已修复 / 已验证（避免重复）
 

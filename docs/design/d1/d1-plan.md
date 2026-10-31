@@ -1,4 +1,7 @@
-# D1 计划：可用桌面（POSIX / 网络 / 浏览器 B0 / 真机 / 浸泡）
+# D1 计划
+
+> 当前阶段：见 [CURRENT.md](../../CURRENT.md)（唯一状态源）。
+> 目标：可用桌面（POSIX / 网络 / 浏览器 B0 / 真机 / 浸泡）。
 
 > 状态：**规划（PLANNING）**，2026-10-31。D0 已关闭：tag `ng-d0-final`，HEAD `a44e896`。
 > 上位：`../architecture.md` §10（D1）、`../evolution.md` E5/D1、`../decisions.md`
@@ -30,7 +33,7 @@ FPU/SIMD、tick/时间/熵），再并行做 **POSIX 底座** 与 **网络核心
 做 **TLS/HTTP**，再上 **浏览器 B0**；**真机**作为独立车道从预检后并行推进，
 最后用 **浸泡** 收口。详细依赖与理由见 §3/§4。
 
-**规模**：31 个 WP（WP5-0…WP5-6 的子包），约 **50–60 个会话**（含 4 个预检）；
+**规模**：32 个 WP（WP5-0…WP5-6 的子包），约 **50–60 个会话**（含 4 个预检）；
 6 个里程碑 M1–M6。**不做日历承诺**，里程碑按出口断言判定。
 
 **最大风险**（详见 `risks.md`）：POSIX 生态（libc + FFmpeg/SDL2）能否按预算
@@ -50,7 +53,7 @@ FPU/SIMD、tick/时间/熵），再并行做 **POSIX 底座** 与 **网络核心
 | TLS/HTTP | 无 | 用户态 crypto、X.509、TLS 1.2、HTTP/1.1、信任库/时间/熵 |
 | 桌面 | displayd / WM / sessiond / SDK（S1 故障注入已验收） | 浏览器 B0；字体/PNG；终端不是 D1 出口 |
 | 真机 | 仅 QEMU（`-kernel` + PVH note；BIOS/VBE/PS2/ATA） | UEFI stub、GOP、ACPI、APIC/IOAPIC、SMP 启动、真网卡/键盘 |
-| 长跑 | 1h smoke PASS（60.17min、0 panic）；当前 8h 在跑 | 带负载的 8h（真机）+ 24h（QEMU）；泄漏/CPU 空闲/故障注入 |
+| 长跑 | 1h smoke PASS（60.17min、0 panic）；8h 证据未闭合（21:04 起跑，见 CURRENT） | 带负载的 8h（真机）+ 24h（QEMU）；泄漏/CPU 空闲/故障注入 |
 | 门禁 | `ci-ng` 7 步、ABI check、SDK check；host 5315 checks、run-ng 159/159 + 75 patterns | POSIX/net/TLS/browser/hw/soak 六类新门禁；ABI 1.1 check |
 
 已知缺口（`../../abi/abi-1.0.md` §10、`../../claims/ng-audit-syscall.md` §6、
@@ -333,14 +336,14 @@ LAPIC/IOAPIC → SMP 启动（AP 停泊）→ 真网卡/键盘。**不做**安�
 
 | 里程碑 | 主题 | 包含 WP | 预计 WP | 预计会话 | 出口主线 |
 |---|---|---|---|---|---|
-| **M1** | 内核地基 + 预检 | WP5-0a…0f + S1–S4 | 6 | 14 | ABI 1.1 冻结；fd/fault/FPU/tick 可用 |
+| **M1** | 内核地基 + 预检 | WP5-0a…0g + S1–S4 | 7 | 14 | ABI 1.1 冻结；fd/fault/FPU/tick 可用 |
 | **M2** | POSIX 底座 + 网络核心 | WP5-1a…1d；WP5-2a…2c | 7 | 12 | zlib 跑通；TCP/socket/DHCP/DNS 可用 |
 | **M3** | POSIX 库 + TLS/HTTP | WP5-1e…1g；WP5-3a…3c | 6 | 9 | FreeType/FFmpeg/SDL2；HTTPS 抓取 |
 | **M4** | 浏览器 B0 | WP5-4a…4d；WP5-2d | 5 | 8 | B0 本地语料 + 真实页面 + 滚动 |
 | **M5** | 真实硬件 | WP5-5a…5d | 4 | 8 | 目标机 UEFI/ACPI/SMP/网络/显示 |
 | **M6** | 浸泡与 D1 收口 | WP5-6a…6c | 3 | 5 | 8h 真机 + 24h QEMU；D1 发布 |
 
-### M1：内核地基（WP5-0a…0f + 4 个预检）
+### M1：内核地基（WP5-0a…0g + 4 个预检）
 
 **目标**：把 D1 所有方向共用的内核缺口一次性收掉；用 4 个短预检把最大的
 未知数提前打掉。
@@ -576,7 +579,7 @@ D1 有三个高频冲突文件：`src/ng/main.c`（自检调用）、`src/ng/sys
 
 ## 10. 与其他文档的关系
 
-- `wps.md`：31 个 WP 的编号/范围/允许路径/出口/依赖/会话估算。
+- `wps.md`：32 个 WP 的编号/范围/允许路径/出口/依赖/会话估算。
 - `risks.md`：风险、未知数、回退方案与“先验证什么”。
 - `posix-profile.md`：POSIX → native 的 syscall/errno/结构体/上限映射，
   是 WP5-1a 的设计输入。

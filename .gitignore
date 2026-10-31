@@ -57,3 +57,5 @@ desktop.ini
 keys/*.url
 keys/*.key
 keys/notify.flag
+/obj-ng/
+/dist-ng/

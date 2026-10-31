@@ -5,7 +5,7 @@
 > 路径所有权：只改本 WP “允许路径”；跨路径先改本文件/`../decisions.md` 并说明。
 > 构建：`tools/build-ng.ps1` 是共享单写者文件（见 §0.3），不要多个会话同时改。
 > 编号：WP5-0…WP5-6 是**轨道**；`WP5-0a` 等是**可独立开工/验收的子包**（本文件
-> 的“WP”默认指子包）。总共 **31 个子包**，约 **50–60 个会话**（含 4 个预检）。
+> 的“WP”默认指子包）。总共 **32 个子包**，约 **50–60 个会话**（含 4 个预检）。
 
 ## 0. 通用规则
 
@@ -56,6 +56,7 @@
 | WP5-0d | `SHM_FREE` + peer 身份 + cap 位 | 内核地基 | 0a/0b/0c | 2 |
 | WP5-0e | FPU/SIMD 上下文 | 内核地基 | 0b | 1 |
 | WP5-0f | tick IRQ / HLT idle / 时间 / 熵 | 内核地基 | 0a | 2 |
+| WP5-0g | ring3 抢占（tick 时间片） | 内核地基 | 0f | 1 |
 | WP5-1a | POSIX 文件/进程 syscall | POSIX | 0a/0b/0c | 2 |
 | WP5-1b | newlib 移植 + crt/syscall stubs | POSIX | 1a | 2 |
 | WP5-1c | 内核线程（clone/futex/TLS） | POSIX | 0b/0e/0f/1a | 2 |

@@ -11,61 +11,12 @@
 5. domains/_index.md —— 7 个域的职责/接口/失败/manifest/状态，以及**已知漂移**；
    实现会话按域读对应页面，再读接口的 `../abi/abi-1.0.md`。
 6. d1/d1-plan.md —— D1（可用桌面）的目标拆解、依赖/顺序、M1–M6、范围围栏；
-   再读 d1/wps.md（31 个 WP5 子包）、d1/risks.md（风险/回退）、
+   再读 d1/wps.md（32 个 WP5 子包）、d1/risks.md（风险/回退）、
    d1/posix-profile.md（POSIX→native 映射，WP5-1a 的设计输入）。
 
 ## 当前状态
 
-- main：**代码**冻结在 69ab006（旧 32 位，305/305）；main 顶端 `d62bccb` 是
-  7 域架构基线的设计文档提交，不含功能改动。
-- 开发分支：ng（64 位内核）。阶段 tag：`ng-e1`、`ng-e2`、`ng-e3`、`ng-e4`、
-  **`ng-d0-final`**。
-- 当前阶段：**D0 完成，D1 规划中（8h 浸泡进行中）**。
-  - D0 关闭：tag `ng-d0-final`，HEAD `a44e896`；ABI 1.0 冻结、SDK alpha、
-    1h smoke PASS。
-  - 8h 浸泡：D0 基线的长跑由并行会话在最终 HEAD 上执行中
-    （`obj-ng/soak-final/`，gitignore；**本阶段文档会话不跑 QEMU/构建**）。
-  - D1 计划：`d1/d1-plan.md`（目标拆解/依赖/M1–M6/不做）、`d1/wps.md`
-    （WP5-0…WP5-6，31 个子包）、`d1/risks.md`（风险/回退/“先验证什么”）、
-    `d1/posix-profile.md`（POSIX→native syscall/errno 映射）。
-  - 第一个开工建议：**WP5-0a**（ABI 1.1 + `ENOSYS`），并行跑 **S1**
-    （newlib 交叉构建预检）；两者决定 POSIX/网络/浏览器的编号与底座。
-  - **WP4-1 完成**：native ABI **1.0 冻结**（v1.0.0）——
-    `docs/abi/abi-1.0.md` 定稿 + `docs/abi/abi-1.0.h` 机器可读头；
-    调用号/错误码/四类命名空间/上限/版本策略冻结，15 项冻结前待决项给出
-    “保留/延后/已解决”结论；`tools/abi-check.ps1` 对 ABI 头、SDK 头、
-    `src/ng/syscall.h` 及内核常量做三方比对。
-  - **WP4-2 完成**：外部开发者测试（另一会话提交 `3328b8e`）——
-    `sdk/examples/hello_d0`（480×300 GUI、计数/交互/8s 空闲退出）+
-    `tools/d0-demo.ps1` QEMU/QMP 证据；受限口径：不改仓库能写/能跑，
-    但**没有产品部署路径**（sessiond/LAUNCH 拉起）仍需安装器/包启动。
-  - **WP4-3 完成**：D0 本地发布包 —— `tools/release-ng.ps1` 一条命令跑
-    `abi-check` + `build-ng`，生成 `dist-ng/release/d0/`（ELF、disk.img、
-    SDK 头、示例、ABI 1.0、文档、`RELEASE-NOTES.md`、`SHA256SUMS`）并逐文件
-    校验；只本地，不 push、不签名、不打 tag。说明见 `../release/d0.md`。
-  - **E4 已关闭（4/4）**：WP4-4 1h smoke PASS（60.17min、0 panic、6/6 命令响应）；D0 总出口以
-    `architecture.md` §10 为准。
-- E1/E2/E3 出口（已完成）：
-  - E1：64 位 long mode、页表、trap/syscall、PMM/heap、调度、IPC/句柄、
-    ELF64 + ring3 hello；host 单测；`tools/ci-ng.ps1` 一条命令门禁。
-  - E2：VFS/ramfs、FAT16、display/input、ATA、auth/log/pkg、64 位 shell；
-    parity **100/100**（host 95/95）；旧 32 位 305/305。
-  - E3：L2a displayd、L2b WM、L2c sessiond、SDK alpha + GUI demo；S1
-    故障注入 3 PASS + 1 KNOWN（WM 死循环）；QMP 截图像素证据。
-- 当前门禁：
-  - `tools/ci-ng.ps1`：check-domains / check-deps / unit-ng / build-ng /
-    run-ng / parity-ng / 旧 32 位 `build.ps1 -Test`，全绿输出
-    `=== NG CI PASS ===`；CI 见 `.github/workflows/ng.yml`。
-  - `tools/abi-check.ps1`：ABI 1.0 冻结门禁（29 syscalls / 28 errors /
-    64 constants / 4 struct sizes）。
-  - `tools/sdk-check.ps1`：SDK 头/示例语法 + 237 host checks。
-  - `tools/release-ng.ps1`：D0 发布包 + SHA256 自检。
-- 下一步：D1 按 `d1/d1-plan.md` 执行——先 **WP5-0a + S1**，再按 M1→M6
-  推进（POSIX、网络、TLS/HTTP、浏览器 B0、真机、8h+ 浸泡）；
-  出口清单见 `d1/d1-plan.md` §2。
-- ABI 规范：冻结版 `../abi/abi-1.0.md`；机器头 `../abi/abi-1.0.h`；
-  历史草案 `../abi/abi-1.0-draft.md`（已被取代，仅供追溯）。
-- D0 发布：`../release/d0.md`；本地产物 `dist-ng/release/d0/`（gitignore）。
+见 [../CURRENT.md](../CURRENT.md)（唯一状态源）。
 
 ## 执行规则
 
@@ -85,7 +36,7 @@
 | evolution.md | 迁移计划与工作包 |
 | decisions.md | ADR（含 64 位相关决策） |
 | d1/d1-plan.md | D1 计划：目标拆解/依赖顺序/M1–M6/范围围栏/待确认决策 |
-| d1/wps.md | D1 工作包：WP5-0…WP5-6，31 个子包（范围/允许路径/出口/依赖） |
+| d1/wps.md | D1 工作包：WP5-0…WP5-6，32 个子包（范围/允许路径/出口/依赖） |
 | d1/risks.md | D1 风险、未知数、回退方案与“先验证什么” |
 | d1/posix-profile.md | POSIX Profile 1.0 设计输入：syscall/errno/结构体/flags/上限 |
 | three-layer.md | 历史（已取代） |
