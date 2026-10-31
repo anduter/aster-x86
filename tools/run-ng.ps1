@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP1-6: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP1-7: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
 # 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
@@ -34,8 +34,12 @@
 #   ng: ipc bad handle rejected / ng: ipc close wakes waiter ok
 #   ng: ipc user ptr ok / ng: ipc handle table ok (slots=64 ports=16)
 #   ng: WP1-6 selftest PASS
+# WP1-7 追加（ELF64 加载器 + ring3 hello）：
+#   ng: elf64 header ok / ng: elf64 map ok (segs=3)
+#   ng: ring3 exec ok / <用户态> ng: ring3 hello / ng: ring3 exit ok
+#   ng: WP1-7 selftest PASS
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
-# ipc 统计行。
+# ipc 统计行、ELF 段规划/per-thread 栈/uaccess。
 #
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
@@ -103,7 +107,13 @@ if ($Panic) {
         'ng: ipc close wakes waiter ok',
         'ng: ipc user ptr ok',
         'ng: ipc handle table ok (slots=64 ports=16)',
-        'ng: WP1-6 selftest PASS'
+        'ng: WP1-6 selftest PASS',
+        'ng: elf64 header ok',
+        'ng: elf64 map ok (segs=3)',
+        'ng: ring3 exec ok',
+        'ng: ring3 hello',
+        'ng: ring3 exit ok',
+        'ng: WP1-7 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -111,7 +121,12 @@ if ($Panic) {
         'ng: syscall msr star=0x[0-9a-f]+ lstar=0x[0-9a-f]+ fmask=0x[0-9a-f]+',
         'ng: memmap ok \(usable=[0-9]+ pages\)',
         '(?s)ng: thread A 0.*?ng: thread B 0.*?ng: thread C 0',
-        'ng: ipc stat sends=[0-9]+ recvs=[0-9]+ replies=20 timeouts=[0-9]+ eagains=[0-9]+ bad=[0-9]+ live=0'
+        'ng: ipc stat sends=[0-9]+ recvs=[0-9]+ replies=20 timeouts=[0-9]+ eagains=[0-9]+ bad=[0-9]+ live=0',
+        'ng: elf64 header entry=0x[0-9a-f]+ phnum=[0-9]+ type=2 machine=62',
+        'ng: elf64 bad image rejected \(n=[0-9]+\)',
+        'ng: syscall stack per-thread ok \(probe=0x[0-9a-f]+ rsp0=0x[0-9a-f]+ tss\.rsp0=0x[0-9a-f]+ boot=0x[0-9a-f]+\)',
+        'ng: uaccess ok \(bad ptr EFAULT\)',
+        'ng: elf64 data/bss ok'
     )
     $failPatterns = @(
         'ng: WP1-2 selftest FAIL',
@@ -123,7 +138,10 @@ if ($Panic) {
         'ng: sched .* FAIL',
         'ng: WP1-5 selftest FAIL',
         'ng: ipc .* FAIL',
-        'ng: WP1-6 selftest FAIL'
+        'ng: WP1-6 selftest FAIL',
+        'ng: elf64 .* FAIL',
+        'ng: ring3 .* FAIL',
+        'ng: WP1-7 selftest FAIL'
     )
 }
 
@@ -182,7 +200,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP1-6) ==='
+Write-Host '=== run-ng (WP1-7) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }

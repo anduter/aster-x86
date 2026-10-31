@@ -137,8 +137,24 @@ WP1-2 不做 IDT/#PF（WP1-3），所以"保护生效"用**读回 + 走表断言
    `syscall` 入口用 `SFMASK` 清 `AC`，保证内核总在 `AC=0` 下运行。
 5. `stac/clac` 只在 CPUID 报 SMAP 时保证可用（否则 #UD）；SMAP=off 时执行它们
    也合法，所以封装里不必按 CPUID 分支，但范围校验始终要做。
-6. 现在 `src/ng/io.h` 已提供 `stac()`/`clac()` 两个 inline helper，仅备好接口；
-   本 WP 没有用户页，不执行它们。
+6. `src/ng/io.h` 提供 `stac()`/`clac()` 两个 inline helper；WP1-7 起
+   `src/ng/uaccess.c` 是唯一的用户内存访问封装（IPC 也改走它）。
+
+### 7.1 WP1-7 多地址空间补充
+
+WP1-7 在 paging 之上加了"按 PML4 操作"的一组接口，内核 PML4 的语义不变：
+
+```text
+pg_kernel_pml4() / pg_current_pml4()     当前 CR3 对应的表
+pg_switch_pml4(pml4)                     写 CR3 + 更新 current_pml4（NULL=内核表）
+pg_walk_in / pg_map_in / pg_unmap_in / pg_protect_in(pml4, ...)
+pg_walk / pg_map / ...                   等价于 *_in(pg_kernel_pml4(), ...)
+```
+
+用户地址空间由 `useras.c` 新建 PML4：PML4[0] → 新 PDPT，PDPT[0] 复用内核 PD
+（0..1 GiB 恒等映射，U=0），PDPT[1..511] 归用户页，PML4[1..255] 复制内核项。
+切 CR3 后内核代码/栈/页表页仍走同一份恒等映射；用户页 U=1 且只在用户 AS 里。
+详见 `docs/design/elf-ng.md` §5。
 
 ## 8. 未做（严格按 WP1-2 边界）
 

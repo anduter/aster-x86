@@ -49,6 +49,10 @@ E1 是硬时间盒：6 周内没跑到 ring3，停下来重新评估（增加移
 | WP1-7 | ELF64 加载器 + ring3 hello | src/kernel/user、src/apps | ring3 打印并退出 |
 | WP1-8 | host 单测 64 位化 | tests/ | 原单测子集通过 |
 
+E1 出口状态（2026-10-31）：WP1-1..WP1-7 已完成；`tools/unit-ng.ps1` 的 host
+单测随每个 WP 增量推进（当前 901 checks）；`run-ng` 期望行 39 条全绿，ring3
+由 ELF64 加载器加载 `hello` 并正常退出（见 `docs/claims/ng-WP1-7.md`）。
+
 ### E2
 
 | ID | 内容 | 主要路径 | 出口 |

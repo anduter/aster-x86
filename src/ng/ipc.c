@@ -23,6 +23,7 @@
 #include "io.h"
 #include "paging.h"
 #include "thread.h"
+#include "uaccess.h"
 
 /* x86-64 低半区用户地址上限（canonical lower half）。 */
 #define IPC_USER_VA_MAX 0x00007FFFFFFFFFFFULL
@@ -117,88 +118,18 @@ int ipc_port_close(u32 port)
 /* ------------------------------------------------------------------------- */
 /* 用户指针校验 + copyin/copyout                                              */
 /* ------------------------------------------------------------------------- */
-
-static int user_page_ok(u64 page, int write)
-{
-    u64 pte = pg_walk(page);
-
-    if ((pte & PG_PRESENT) == 0 || (pte & PG_USER) == 0) {
-        return 0;
-    }
-    if (write && (pte & PG_WRITE) == 0) {
-        return 0;
-    }
-    return 1;
-}
-
-static int user_range_ok(u64 va, u64 len, int write)
-{
-    u64 last;
-    u64 first_page;
-    u64 last_page;
-    u64 page;
-
-    if (va == 0 || len == 0) {
-        return 0;
-    }
-    last = va + len - 1;
-    if (last < va || last > IPC_USER_VA_MAX) {
-        return 0;
-    }
-    first_page = va & ~0xFFFULL;
-    last_page = last & ~0xFFFULL;
-    page = first_page;
-    for (;;) {
-        if (!user_page_ok(page, write)) {
-            return 0;
-        }
-        if (page >= last_page) {
-            break;
-        }
-        page += 4096;
-    }
-    return 1;
-}
-
-static void ipc_copy_bytes(void *dst, const void *src, u64 n)
-{
-    u8 *d = (u8 *)dst;
-    const u8 *s = (const u8 *)src;
-    u64 i;
-
-    for (i = 0; i < n; i++) {
-        d[i] = s[i];
-    }
-}
-
+/*
+ * 实现收敛到 WP1-7 的 uaccess.c（同一套页级 U/S 校验 + SMAP 窗口），IPC 这里
+ * 只做错误码翻译：用户指针失败一律 IPC_EFAULT。
+ */
 static int user_copy_in(void *dst, u64 uva, u64 len)
 {
-    if (!user_range_ok(uva, len, 0)) {
-        return IPC_EFAULT;
-    }
-    if (pg_smap_on()) {
-        stac();
-    }
-    ipc_copy_bytes(dst, (const void *)(usize)uva, len);
-    if (pg_smap_on()) {
-        clac();
-    }
-    return IPC_OK;
+    return (copyin(dst, uva, len) == UACCESS_OK) ? IPC_OK : IPC_EFAULT;
 }
 
 static int user_copy_out(u64 uva, const void *src, u64 len)
 {
-    if (!user_range_ok(uva, len, 1)) {
-        return IPC_EFAULT;
-    }
-    if (pg_smap_on()) {
-        stac();
-    }
-    ipc_copy_bytes((void *)(usize)uva, src, len);
-    if (pg_smap_on()) {
-        clac();
-    }
-    return IPC_OK;
+    return (copyout(uva, src, len) == UACCESS_OK) ? IPC_OK : IPC_EFAULT;
 }
 
 /* 句柄/长度参数的高位必须为 0（避免 64 位参数截断成 32 位别名）。 */
@@ -272,7 +203,7 @@ u64 ipc_sys_recv(u64 handle, u64 user_buf, u64 max, u64 timeout)
         return (u64)(i64)IPC_EINVAL;
     }
     cap = (max > (u64)IPC_MSG_MAX) ? IPC_MSG_MAX : (u32)max;
-    if (!user_range_ok(user_buf, (u64)cap, 1)) {
+    if (!uaccess_range_ok(user_buf, (u64)cap, 1)) {
         return (u64)(i64)IPC_EFAULT;
     }
     kbuf = kmalloc((u64)cap);

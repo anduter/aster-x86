@@ -190,7 +190,15 @@ syscall_entry:
     movq %rsp, syscall_user_rsp(%rip)
     movq %rcx, syscall_saved_rip(%rip)
     movq %r11, syscall_saved_flags(%rip)
+    # WP1-7：换成**当前线程**的内核栈（调度器在切换前同步这个全局；它与
+    # TSS.RSP0 总是一致）。还没初始化时退回 isr.S 的静态栈。
+    cmpq $0, syscall_kernel_rsp0(%rip)
+    je 2f
+    movq syscall_kernel_rsp0(%rip), %rsp
+    jmp 3f
+2:
     movq $syscall_stack_top, %rsp
+3:
 
     pushq %r15
     pushq %r14
@@ -255,6 +263,8 @@ syscall_entry:
     .type syscall_ring0_stub, @function
 syscall_ring0_stub:
     movl $0, %eax                         # 调用号 0：write serial
+    xorl %edi, %edi                       # rdi=0 => WP1-3 诊断模式
+    xorl %esi, %esi
     syscall
     ret
     .size syscall_ring0_stub, . - syscall_ring0_stub
@@ -282,6 +292,8 @@ ring3_resume:
     .align 16
     .global user_prog_start
 user_prog_start:
+    xorl %edi, %edi                       # rdi=0 => syscall 0 诊断模式
+    xorl %esi, %esi
     movl $0, %eax                         # syscall 0：write serial
     syscall
     movl $1, %eax                         # syscall 1：exit test

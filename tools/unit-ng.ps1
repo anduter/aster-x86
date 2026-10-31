@@ -1,8 +1,8 @@
 ﻿# =============================================================================
-# unit-ng.ps1 - ng WP1-6 host 单测（64 位化）
+# unit-ng.ps1 - ng WP1-7 host 单测（64 位化）
 #
-# 把 PMM / heap / memmap / 调度器 / IPC 五组“纯逻辑”源码用本机 clang 编译成
-# Windows PE 可执行文件并运行：
+# 把 PMM / heap / memmap / 调度器 / IPC / ELF64 六组“纯逻辑”源码用本机 clang
+# 编译成 Windows PE 可执行文件并运行：
 #   - pmm.c    : bitmap PMM（fake memory = 8 MiB 静态缓冲区）
 #   - heap.c   : first-fit + 合并堆（NG_HOST_TEST 下用 fake 页分配器）
 #   - memmap.c : PVH / multiboot2 内存图解析（合成结构）
@@ -11,6 +11,7 @@
 #   - handle.c : 句柄表（slot + generation / 类型 / 表满），见 test_ipc.c
 #   - ipc_core.c: 端口队列 + 等待队列 + 超时/close 唤醒（fake ipc_env），
 #                见 test_ipc.c
+#   - elf.c    : ELF64 头/段校验 + 逐段加载/回滚（fake 页池，test_elf.c）
 # 这些模块不 include 串口/端口 IO，所以能脱离内核直接跑。
 #
 # 输出必须包含 `N checks, M failures`；M=0 且 N>=20 才算 PASS。
@@ -45,7 +46,7 @@ if (-not $clangCmd -and (Test-Path $mingw)) {
 if (-not $clangCmd) { Fail 'clang not found; add D:\msys64\mingw64\bin to PATH' }
 $clang = $clangCmd.Source
 
-Write-Host '=== unit-ng (WP1-6 host tests) ==='
+Write-Host '=== unit-ng (WP1-7 host tests) ==='
 Write-Host ("clang: {0}" -f $clang)
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
@@ -58,12 +59,14 @@ $sources = @(
     'src/ng/sched.c',
     'src/ng/handle.c',
     'src/ng/ipc_core.c',
+    'src/ng/elf.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
     'tests/unit-ng/test_heap.c',
     'tests/unit-ng/test_memmap.c',
     'tests/unit-ng/test_sched.c',
-    'tests/unit-ng/test_ipc.c'
+    'tests/unit-ng/test_ipc.c',
+    'tests/unit-ng/test_elf.c'
 )
 $srcPaths = @()
 foreach ($s in $sources) { $srcPaths += (Join-Path $Repo $s) }

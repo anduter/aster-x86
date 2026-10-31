@@ -60,6 +60,7 @@ static u64 helper_frame[512] __attribute__((aligned(4096)));
 static u32 pg_tables_allocated; /* 本内核生命周期内从 PMM 拿的页表页数 */
 
 static u64 *kernel_pml4; /* 当前 CR3 指向的 PML4（恒等映射，虚拟 == 物理） */
+static u64 *current_pml4; /* CR3 实际对应的表（WP1-7 用户地址空间切换用） */
 
 /*
  * .data 段里的一个已初始化变量：让 .data 非空，自检能覆盖「已初始化数据页
@@ -304,6 +305,7 @@ static void install_tables(void)
      * 且都在 0..1 GiB 恒等映射内，所以这条指令之后取指/访存都仍然有效。
      */
     write_cr3(pa_of(kernel_pml4));
+    current_pml4 = kernel_pml4;
 
     /* W^X 的 W 侧：CR0.WP=1，让 W=0 的页在 ring0 也真正只读。 */
     write_cr0(read_cr0() | CR0_WP);
@@ -330,17 +332,51 @@ static void install_tables(void)
 /* 走表 + 显式 helper                                                         */
 /* ------------------------------------------------------------------------- */
 
-u64 pg_walk(u64 va)
+/* ------------------------------------------------------------------------- */
+/* 地址空间访问（WP1-7）                                                      */
+/* ------------------------------------------------------------------------- */
+
+u64 *pg_kernel_pml4(void)
+{
+    return kernel_pml4;
+}
+
+u64 *pg_current_pml4(void)
+{
+    return (current_pml4 != NULL) ? current_pml4 : kernel_pml4;
+}
+
+void pg_switch_pml4(u64 *pml4)
+{
+    if (pml4 == NULL) {
+        pml4 = kernel_pml4;
+    }
+    if (pml4 == NULL) {
+        return;
+    }
+    /* 写 CR3 即换地址空间并刷 TLB（未用 PCID，全刷是正确且最便宜的做法）。 */
+    write_cr3(pa_of(pml4));
+    current_pml4 = pml4;
+}
+
+void pg_free_table(void *page)
+{
+    if (page != NULL) {
+        (void)pmm_free_page(pa_of(page));
+    }
+}
+
+u64 pg_walk_in(u64 *pml4, u64 va)
 {
     u64 e;
     u64 *pdpt;
     u64 *pd;
     u64 *pt;
 
-    if (kernel_pml4 == NULL) {
+    if (pml4 == NULL) {
         return 0;
     }
-    e = kernel_pml4[(va >> 39) & 0x1FFu];
+    e = pml4[(va >> 39) & 0x1FFu];
     if ((e & PG_PRESENT) == 0) {
         return 0;
     }
@@ -371,6 +407,11 @@ u64 pg_walk(u64 va)
     return (e & PG_PRESENT) ? e : 0;
 }
 
+u64 pg_walk(u64 va)
+{
+    return pg_walk_in(kernel_pml4, va);
+}
+
 /*
  * 取下一级表的指针。alloc=1 时缺表就建（池耗尽返回 PG_ENOMEM）；
  * 大页（PS=1）不自动拆分，直接 PG_EBIGPAGE。
@@ -399,7 +440,7 @@ static int descend(u64 *entry, int alloc, u64 **next)
     return PG_OK;
 }
 
-int pg_map(u64 va, u64 phys, u64 flags)
+int pg_map_in(u64 *pml4, u64 va, u64 phys, u64 flags)
 {
     int rc;
     u64 *pdpt = NULL;
@@ -410,7 +451,7 @@ int pg_map(u64 va, u64 phys, u64 flags)
     u64 *e2;
     u64 *entry;
 
-    if (kernel_pml4 == NULL) {
+    if (pml4 == NULL) {
         return PG_EINVAL;
     }
     if (((va | phys) & (PAGE_4K - 1)) != 0) {
@@ -420,7 +461,7 @@ int pg_map(u64 va, u64 phys, u64 flags)
         return PG_EINVAL;
     }
 
-    e4 = &kernel_pml4[(va >> 39) & 0x1FFu];
+    e4 = &pml4[(va >> 39) & 0x1FFu];
     rc = descend(e4, 1, &pdpt);
     if (rc != PG_OK) {
         return rc;
@@ -454,14 +495,21 @@ int pg_map(u64 va, u64 phys, u64 flags)
         *e4 |= PG_USER;
         *e3 |= PG_USER;
         *e2 |= PG_USER;
-        write_cr3(read_cr3());
+        if (pml4 == pg_current_pml4()) {
+            write_cr3(read_cr3());
+        }
     }
 
     invlpg(va);
     return PG_OK;
 }
 
-int pg_unmap(u64 va)
+int pg_map(u64 va, u64 phys, u64 flags)
+{
+    return pg_map_in(kernel_pml4, va, phys, flags);
+}
+
+int pg_unmap_in(u64 *pml4, u64 va)
 {
     int rc;
     u64 *pdpt = NULL;
@@ -469,14 +517,14 @@ int pg_unmap(u64 va)
     u64 *pt = NULL;
     u64 *entry;
 
-    if (kernel_pml4 == NULL) {
+    if (pml4 == NULL) {
         return PG_EINVAL;
     }
     if ((va & (PAGE_4K - 1)) != 0) {
         return PG_EINVAL;
     }
 
-    rc = descend(&kernel_pml4[(va >> 39) & 0x1FFu], 0, &pdpt);
+    rc = descend(&pml4[(va >> 39) & 0x1FFu], 0, &pdpt);
     if (rc != PG_OK) {
         return rc;
     }
@@ -501,7 +549,12 @@ int pg_unmap(u64 va)
     return PG_OK;
 }
 
-int pg_protect(u64 va, u64 flags)
+int pg_unmap(u64 va)
+{
+    return pg_unmap_in(kernel_pml4, va);
+}
+
+int pg_protect_in(u64 *pml4, u64 va, u64 flags)
 {
     int rc;
     u64 *pdpt = NULL;
@@ -509,14 +562,14 @@ int pg_protect(u64 va, u64 flags)
     u64 *pt = NULL;
     u64 *entry;
 
-    if (kernel_pml4 == NULL) {
+    if (pml4 == NULL) {
         return PG_EINVAL;
     }
     if ((va & (PAGE_4K - 1)) != 0) {
         return PG_EINVAL;
     }
 
-    rc = descend(&kernel_pml4[(va >> 39) & 0x1FFu], 0, &pdpt);
+    rc = descend(&pml4[(va >> 39) & 0x1FFu], 0, &pdpt);
     if (rc != PG_OK) {
         return rc;
     }
@@ -539,6 +592,11 @@ int pg_protect(u64 va, u64 flags)
     *entry = (*entry & PG_ADDR_MASK) | (flags & ~PG_PRESENT) | PG_PRESENT;
     invlpg(va);
     return PG_OK;
+}
+
+int pg_protect(u64 va, u64 flags)
+{
+    return pg_protect_in(kernel_pml4, va, flags);
 }
 
 u64 pg_cr3(void)

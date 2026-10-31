@@ -115,6 +115,14 @@ u64 gdt_tss_rsp0(void)
     return tss.rsp0;
 }
 
+void gdt_set_rsp0(u64 top)
+{
+    if (top == 0) {
+        return;
+    }
+    tss.rsp0 = top;
+}
+
 u64 gdt_ist1_top(void)
 {
     return tss.ist[0];

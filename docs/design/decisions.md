@@ -217,3 +217,58 @@
   `closed`，会 use-after-free，否决；等待者动态分配——阻塞失败路径无法
   干净回退，否决；超时用毫秒——没有 TSC 频率校准，先 tick。
 
+## ADR-019：ELF64 用「纯校验 + env 回调加载」两层；用户地址空间独立 PML4；copyin/copyout 统一；per-thread TSS.RSP0
+
+- **决策**：WP1-7 的加载器拆成两层。`elf.c` 的 `elf64_check()` 只读镜像字节，
+  产出 `struct elf64_image`（entry/base/end/段表/pages），不 include 页表/PMM/
+  串口；`elf64_load()` 用 `struct elf_env` 的 5 个回调（alloc_page / free_page /
+  page_ptr / map_page / unmap_page）逐段映射。内核对 env 的实现绑到 PMM +
+  用户地址空间；host 单测绑到 fake 页池，因此同一份校验/回滚代码在两边跑。
+  校验是拒绝式的：ELF64/小端/ET_EXEC/EM_X86_64、e_phoff 8 字节对齐且 phdr 表
+  在文件内、1≤phnum≤16、每个 PT_LOAD 的 filesz≤memsz 且文件区间在镜像内、
+  vaddr 4 KiB 对齐、p_align 是 ≥4096 的 2 的幂、段在
+  `[0x40000000, 0x7FFFFFFFFF]` 内、PF_W 与 PF_X 不同时置位（W^X）、段两两不
+  重叠、entry 落在可执行段内。加载时整页清零再拷文件字节（同时覆盖 .bss 与
+  页尾空洞）。用户地址空间用**新建 PML4**：PML4[0] 指向新建 PDPT，PDPT[0] 复用
+  内核 PD（0..1 GiB 恒等映射，U=0），PDPT[1..511] 留给用户页，PML4[1..255]
+  复制内核同名项；切 CR3 用 `pg_switch_pml4()`（同时记录 current_pml4），
+  copyin/copyout 用**当前 CR3** 的 PML4 逐页校验 P/U/W，SMAP=on 时
+  stac/clac 包住拷贝，坏指针返回 `EFAULT`（绝不让内核吃 #PF）。IPC 的用户
+  指针路径改为调用同一份 uaccess。syscall 入口的内核栈从固定静态栈改成全局
+  `syscall_kernel_rsp0`：调度器每次 `switch_context` 前用
+  `syscall_set_thread_stack(next)` 把它和 TSS.RSP0 一起指向 next 的 TCB 栈
+  （boot 线程没有 TCB 栈，回退到 isr.S 静态栈）。syscall 0 扩展为
+  `write(buf,len)`（rdi=0 时保留 WP1-3 诊断语义），syscall 1 记录 rdi 退出码。
+- **理由**：校验与加载分层后，host 单测能覆盖全部拒绝路径（不需要 QEMU），
+  而内核侧只保留"分配/拷贝/映射"这三种必然可能失败的 I/O；env 回调解耦也让
+  retry/回滚可证明（失败时把已映射页 unmap+free，页池回到全空，单测断言）。
+  独立 PML4 而不是共享内核 PDPT：WP1-3 已在 0x40000000 映射过静态用户页，
+  共享 PDPT 会让 ring3 段与旧页表项撞车；新建 PDPT 同时把用户页完全隔离在
+  用户 AS 里。用户窗口限定 <512 GiB（PML4[0]）使 AS 销毁只走自己的子树，
+  绝不会 free 到内核共享表。copyin/copyout 收敛成一份：WP1-6 的 IPC 用户
+  指针校验与 WP1-7 的 syscall write 若各自实现，迟早出现"一处查 U/S、一处
+  漏查"的差异。per-thread RSP0 是 WP1-3/1-6 遗留的硬约束：阻塞式 syscall
+  切走后回到同一栈的前提是"只有一个用户线程"；把 RSP0 跟 TCB 走之后，
+  syscall 入口与 ring3 异常入口天然使用当前线程的内核栈，为进程模型铺路。
+  加载器限制段 ≤256 页（1 MiB）是因为回滚路径按页记录，属于本 WP 的明确
+  上限（hello 只用 3 页）。
+- **影响**：`src/ng/elf.[ch]`、`useras.[ch]`、`uaccess.[ch]`、`elf_selftest.[ch]`、
+  `src/ng/user/hello.S` + `user.ld`、`src/ng/mem.c`（freestanding memcpy/memset）
+  新增；`paging.[ch]` 增加 `pg_*_in()`/`pg_switch_pml4()`/`pg_current_pml4()`；
+  `gdt.[ch]` 增加 `gdt_set_rsp0()`；`syscall.[ch]` 增加 `syscall_run_user()`/
+  `syscall_set_thread_stack()` 与 syscall 0 用户 write；`isr.S` 的 syscall 入口
+  改为装载 `syscall_kernel_rsp0`，ring0/ring3 旧 stub 显式清 rdi/rsi；`sched_arch.c`
+  在切换前同步栈；`ipc.c` 的用户指针改走 `uaccess`；`main.c` 加 WP1-7 自检；
+  `build-ng.ps1` 先构建/校验 `obj-ng/hello.elf` 再 `.incbin` 嵌进内核，C 源
+  21→26 步；`run-ng.ps1` 加 6 条固定行 + 5 条正则；`tools/unit-ng.ps1` 加
+  `elf.c`/`test_elf.c`，host 单测 810→901 checks；`docs/design/elf-ng.md` 记录
+  设计。旧 32 位树完全不改。
+- **替代**：用户程序放 `dist-ng/` 由加载器读文件——先要 FAT/ramfs，超范围，
+  否决（内嵌 ELF 仍是完整 ELF64 加载路径，只是"文件"在内存里）；共享内核
+  PDPT——WP1-3 用户页冲突且隔离性差，否决；每段按 p_offset 直接映射文件页
+  （零拷贝）——内嵌镜像在 .rodata（只读），用户段要可写，做不到；且需求明确
+  要 .bss 清零；把校验写在加载循环里——host 无法脱离页表驱动，拒绝路径也
+  测不全，否决；per-CPU 系统调用栈（syscall 时切到 CPU 栈）——仍是单栈，
+  阻塞式 syscall 并发时一样坏，且 TSS.RSP0 与 syscall 入口要维护两份栈，
+  否决。
+

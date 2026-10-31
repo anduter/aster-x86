@@ -8,6 +8,7 @@
 
 #include "heap.h"
 #include "io.h"
+#include "syscall.h"
 
 extern void switch_context(struct thread_context *old_ctx,
                            struct thread_context *new_ctx);
@@ -36,6 +37,12 @@ void sched_arch_stack_free(void *stack, u64 size)
 
 void sched_arch_switch(thread_t *prev, thread_t *next)
 {
+    /*
+     * WP1-7：per-thread 内核栈。每个线程的 syscall 入口栈 / TSS.RSP0 都取自
+     * 它自己的 TCB（boot 线程没有 TCB 栈，回退到 isr.S 的静态栈）。写的是
+     * .bss/.data，可以在 IF=0 的调度点上安全做。
+     */
+    syscall_set_thread_stack(next);
     switch_context(&prev->ctx, &next->ctx);
 }
 

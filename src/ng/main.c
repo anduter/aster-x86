@@ -1,6 +1,7 @@
 /*
- * ng WP1-3/1-4/1-5/1-6: 64 位 C 入口（内存图/PMM -> 页表 -> GDT/TSS -> IDT ->
- * syscall -> 内存/heap 自检 -> 线程/调度自检 -> IPC/句柄自检）。
+ * ng WP1-3/1-4/1-5/1-6/1-7: 64 位 C 入口（内存图/PMM -> 页表 -> GDT/TSS ->
+ * IDT -> syscall -> 内存/heap 自检 -> 线程/调度自检 -> IPC/句柄自检 ->
+ * ELF64 加载器 + ring3 hello）。
  *
  * 顺序是有依赖的：
  *   1. mem_boot_init()：解析 PVH/multiboot2 内存图、初始化 PMM、保留内核
@@ -12,7 +13,9 @@
  *   6. heap 与“页表池来自 PMM”自检（WP1-4）；
  *   7. 线程/上下文切换/round-robin/exit 回收/sleep-wake 自检（WP1-5，栈从
  *      heap 分配，所以必须排在 WP1-4 之后）；
- *   8. IPC/句柄/端口自检（WP1-6，需要调度器的阻塞/唤醒，排在 WP1-5 之后）。
+ *   8. IPC/句柄/端口自检（WP1-6，需要调度器的阻塞/唤醒，排在 WP1-5 之后）；
+ *   9. ELF64 加载器 + ring3 hello 自检（WP1-7：PMM 页、用户地址空间、CR3
+ *      切换、copyin/copyout、per-thread 内核栈；排在 WP1-6 之后）。
  *
  * ipc_init() 不分配内存，只把端口表/句柄表清零并绑定环境钩子，所以放在
  * 最前面；真正创建端口在自检里（heap 已就绪）。
@@ -20,6 +23,7 @@
  * 想验证 panic 路径：build-ng.ps1 -PanicTest 会在所有正常检查后触发一条
  * 不可恢复的 #UD（普通 build 不定义 NG_PANIC_TEST，行为不变）。
  */
+#include "elf_selftest.h"
 #include "gdt.h"
 #include "ipc.h"
 #include "ipc_selftest.h"
@@ -126,6 +130,24 @@ void kmain(u64 mb_info)
     }
 
     serial_puts("ng: WP1-6 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+
+    /* WP1-7：ELF64 加载器 + ring3 hello。需要 PMM/heap/调度器（per-thread
+     * syscall 内核栈用一个真实线程验证），所以排在最后。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += elf_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP1-7 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP1-7 selftest ");
     if (fails == 0) {
         serial_puts("PASS\r\n");
     } else {

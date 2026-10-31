@@ -1,5 +1,6 @@
 /*
- * ng WP1-4/1-5/1-6 host 单测入口：PMM / heap / memmap / 调度器 / 句柄/IPC。
+ * ng WP1-4/1-5/1-6/1-7 host 单测入口：PMM / heap / memmap / 调度器 /
+ * 句柄/IPC / ELF64 校验与加载。
  *
  * 编译成本机 PE（Windows clang），不链接内核，也不需要 QEMU。
  */
@@ -12,6 +13,7 @@ int test_heap(void);
 int test_memmap(void);
 int test_sched(void);
 int test_ipc(void);
+int test_elf(void);
 
 int ut_checks;
 int ut_failures;
@@ -32,6 +34,7 @@ int main(void)
     test_memmap();
     test_sched();
     test_ipc();
+    test_elf();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);
     return (ut_failures == 0) ? 0 : 1;

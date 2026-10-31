@@ -1,6 +1,6 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP1-6: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
-#               trap/syscall + 线程/调度 + IPC/句柄）
+# build-ng.ps1 - ng WP1-7: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
+#               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello）
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
@@ -12,7 +12,11 @@
 #       src/ng/mem_selftest.c（内存图/PMM/heap/页表池自检）、
 #       src/ng/switch.S + sched_arch.c + sched.c + sched_selftest.c（WP1-5）、
 #       src/ng/handle.c + ipc_core.c + ipc.c + ipc_selftest.c（WP1-6）、
+#       src/ng/elf.c + useras.c + uaccess.c + elf_selftest.c（WP1-7）、
 #       src/ng/main.c（64 位 C 入口）、src/ng/link.ld。
+# 用户程序：src/ng/user/hello.S 用 src/ng/user/user.ld 链到 0x40000000，
+#           生成 obj-ng/hello.elf，再用 .incbin 嵌进内核 .rodata
+#           （ng_user_elf_start..end），内核 ELF64 加载器从内存镜像读取。
 # 输出：dist-ng/aster-ng.elf，对象文件在 obj-ng/。
 #
 # 工具链（WP0-4 已验证）：
@@ -21,7 +25,8 @@
 #
 # 校验：ELF64 / x86_64 / ET_EXEC / 入口地址；PT_LOAD 4 KiB 对齐（按段分页的
 #       前提）；multiboot2 头在前 32 KiB 且 8 字节对齐、checksum 为 0；
-#       PT_NOTE 里有 Xen PVH 入口（QEMU -kernel 用）。
+#       PT_NOTE 里有 Xen PVH 入口（QEMU -kernel 用）；用户 ELF 的
+#       ET_EXEC/EM_X86_64/0x40000000 基址/段权限 W^X。
 #
 # usage: powershell -File tools/build-ng.ps1 [-Repo <root>] [-DistDir dist-ng]
 #                                             [-ObjDir obj-ng] [-PanicTest]
@@ -65,7 +70,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP1-6) ==='
+Write-Host '=== build-ng (WP1-7) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -82,12 +87,112 @@ $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-fno-pic', '-fno-pie', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-c')
 if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
 
+# ---- WP1-7：用户程序 hello.S -> hello.elf（0x40000000）-> .incbin 嵌内核 ----
+# 用户 ELF 不是最终交付物，但它是"内核 ELF64 加载器"的真实输入：先按 0x40000000
+# 链接，再把整个文件嵌进内核 .rodata（ng_user_elf_start..end），避免依赖 FS。
+Write-Host ''
+Write-Host '=== user-elf (WP1-7) ==='
+$userDir = Join-Path $srcDir 'user'
+$userSrc = Join-Path $userDir 'hello.S'
+$userLd = Join-Path $userDir 'user.ld'
+$userObj = Join-Path $objDir 'user_hello.o'
+$userElf = Join-Path $objDir 'hello.elf'
+$userBlobObj = Join-Path $objDir 'user_elf_blob.o'
+$userBlobAsm = Join-Path $objDir 'user_elf_blob.S'
+foreach ($p in @($userSrc, $userLd)) {
+    if (-not (Test-Path -LiteralPath $p)) { Fail ("missing user source: {0}" -f $p) }
+}
+Write-Host ("  hello.S -> {0}" -f 'obj-ng/user_hello.o')
+& $clang @($asmFlags + @($userSrc, '-o', $userObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'user hello.S compile failed' }
+Write-Host ("  link    -> {0}" -f 'obj-ng/hello.elf (base 0x40000000)')
+$userLinkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
+    ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
+    '-o', $userElf, $userObj)
+& $clang @userLinkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'user hello.elf link failed' }
+
+# ---- 校验用户 ELF：ELF64/ET_EXEC/EM_X86_64、入口与段权限 ----
+$ub = [IO.File]::ReadAllBytes($userElf)
+$uProblems = New-Object System.Collections.Generic.List[string]
+$uLoadCount = 0
+$uLoadEnd = 0
+if ($ub.Length -lt 64) { $uProblems.Add('user ELF smaller than ELF64 header') }
+if ($uProblems.Count -eq 0) {
+    if (-not ($ub[0] -eq 0x7F -and $ub[1] -eq 0x45 -and $ub[2] -eq 0x4C -and $ub[3] -eq 0x46)) {
+        $uProblems.Add('user ELF bad magic')
+    }
+    if ($ub[4] -ne 2) { $uProblems.Add(("user ELF class={0}, want 2" -f $ub[4])) }
+    if ($ub[5] -ne 1) { $uProblems.Add(("user ELF data={0}, want 1 (LSB)" -f $ub[5])) }
+    $uType = [BitConverter]::ToUInt16($ub, 16)
+    $uMachine = [BitConverter]::ToUInt16($ub, 18)
+    $uEntry = [BitConverter]::ToUInt64($ub, 24)
+    $uPhOff = [BitConverter]::ToUInt64($ub, 32)
+    $uPhEnt = [BitConverter]::ToUInt16($ub, 54)
+    $uPhNum = [BitConverter]::ToUInt16($ub, 56)
+    if ($uType -ne 2) { $uProblems.Add(("user ELF e_type={0}, want 2 (ET_EXEC)" -f $uType)) }
+    if ($uMachine -ne 62) { $uProblems.Add(("user ELF e_machine={0}, want 62" -f $uMachine)) }
+    if ($uPhEnt -ne 56) { $uProblems.Add(("user ELF e_phentsize={0}, want 56" -f $uPhEnt)) }
+    if ($uPhNum -lt 1) { $uProblems.Add('user ELF has no program headers') }
+    if ($uEntry -lt 0x40000000 -or $uEntry -ge 0x40010000) {
+        $uProblems.Add(("user ELF e_entry=0x{0:x} outside 0x40000000..0x40010000" -f $uEntry))
+    }
+    for ($i = 0; $i -lt $uPhNum; $i++) {
+        $ph = [int]$uPhOff + ($i * $uPhEnt)
+        if ($ph + 56 -gt $ub.Length) { $uProblems.Add('user ELF phdr outside file'); break }
+        if ([BitConverter]::ToUInt32($ub, $ph) -ne 1) { continue }  # PT_LOAD
+        $uLoadCount++
+        $pFlags = [BitConverter]::ToUInt32($ub, $ph + 4)
+        $pVaddr = [BitConverter]::ToUInt64($ub, $ph + 16)
+        $pFilesz = [BitConverter]::ToUInt64($ub, $ph + 32)
+        $pMemsz = [BitConverter]::ToUInt64($ub, $ph + 40)
+        $pAlign = [BitConverter]::ToUInt64($ub, $ph + 48)
+        if (($pVaddr % 4096) -ne 0) { $uProblems.Add(("user PT_LOAD vaddr=0x{0:x} not 4 KiB aligned" -f $pVaddr)) }
+        if ($pAlign -lt 4096) { $uProblems.Add(("user PT_LOAD align=0x{0:x} < 4096" -f $pAlign)) }
+        if ($pFilesz -gt $pMemsz) { $uProblems.Add('user PT_LOAD filesz > memsz') }
+        if (($pFlags -band 3) -eq 3) { $uProblems.Add(("user PT_LOAD 0x{0:x} is W+X (W^X violated)" -f $pVaddr)) }
+        if ($pVaddr -lt 0x40000000) { $uProblems.Add(("user PT_LOAD vaddr=0x{0:x} below base" -f $pVaddr)) }
+        if (($pVaddr + $pMemsz) -gt 0x40010000) {
+            $uProblems.Add(("user PT_LOAD ends 0x{0:x} above 0x40010000" -f ($pVaddr + $pMemsz)))
+        }
+        if (($pVaddr + $pMemsz) -gt $uLoadEnd) { $uLoadEnd = $pVaddr + $pMemsz }
+    }
+    if ($uLoadCount -lt 3) {
+        $uProblems.Add(("user PT_LOAD count {0} < 3 (text/rodata/data+bss)" -f $uLoadCount))
+    }
+}
+if ($uProblems.Count -gt 0) {
+    foreach ($p in $uProblems) { Write-Host ("  ! {0}" -f $p) }
+    Fail 'user ELF verification failed'
+}
+
+# ---- 生成 .incbin 汇编并编译成内核对象 ----
+$incPath = ($userElf -replace '\\', '/')
+$blobText = @"
+/* generated by tools/build-ng.ps1 (WP1-7): embed user ELF into kernel .rodata */
+    .section .rodata
+    .align 16
+    .global ng_user_elf_start
+ng_user_elf_start:
+    .incbin "$incPath"
+    .global ng_user_elf_end
+ng_user_elf_end:
+    .align 16
+"@
+[IO.File]::WriteAllText($userBlobAsm, $blobText, (New-Object Text.UTF8Encoding $false))
+& $clang @($asmFlags + @($userBlobAsm, '-o', $userBlobObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'user ELF embed compile failed' }
+Write-Host ("user-elf: PASS ({0} bytes, {1} PT_LOAD, entry 0x{2:x}, end 0x{3:x})" -f $ub.Length, $uLoadCount, $uEntry, $uLoadEnd)
+Write-Host ''
+
 # WP1-5 additions: switch.S, sched_arch.c, sched.c, sched_selftest.c.
 # WP1-6 additions: handle.c, ipc_core.c, ipc.c, ipc_selftest.c.
+# WP1-7 additions: mem.c（freestanding memcpy/memset）、elf.c、useras.c、
+#                  uaccess.c、elf_selftest.c + user_elf_blob.o。
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'main.c')
 $steps = $asmSources.Count + $cSources.Count + 1
 $step = 0
 $asmObjs = New-Object System.Collections.Generic.List[string]
@@ -118,7 +223,7 @@ Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray()
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + @($userBlobObj)
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

@@ -51,8 +51,26 @@
  */
 int pg_init(void);
 
-/* 走一遍 4 级页表，返回叶项（PD 大页项或 PTE）；未映射返回 0。 */
+/* 走一遍 4 级页表，返回叶项（PD 大页项或 PTE）；未映射返回 0。
+ * 这里固定走**内核** PML4；当前活动地址空间（ring3 进程）用 pg_walk_in。 */
 u64 pg_walk(u64 va);
+
+/*
+ * WP1-7：多地址空间支持。内核 PML4 由 pg_init() 建好；用户地址空间由
+ * useras.c 另建一张 PML4（复制内核恒等映射区），切换走 pg_switch_pml4。
+ *   - pg_walk_in/pg_map_in/... 全部显式接收 PML4，不依赖"当前"；
+ *   - pg_current_pml4() 是 CR3 对应的那张表，copyin/copyout 用它校验用户页。
+ */
+u64 *pg_kernel_pml4(void);
+u64 *pg_current_pml4(void);
+void pg_switch_pml4(u64 *pml4); /* 写 CR3；NULL = 回内核表 */
+u64 pg_walk_in(u64 *pml4, u64 va);
+int pg_map_in(u64 *pml4, u64 va, u64 phys, u64 flags);
+int pg_unmap_in(u64 *pml4, u64 va);
+int pg_protect_in(u64 *pml4, u64 va, u64 flags);
+
+/* 归还一张页表页（as_create 的回滚路径用）。 */
+void pg_free_table(void *page);
 
 /*
  * WP1-4：页表页统一从 PMM 申请（4 KiB、清零、物理地址 == 虚拟地址）。
