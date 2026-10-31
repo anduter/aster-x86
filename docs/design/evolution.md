@@ -47,11 +47,21 @@ E1 是硬时间盒：6 周内没跑到 ring3，停下来重新评估（增加移
 | WP1-5 | 调度/线程/上下文切换 | src/kernel/proc | 两个线程可切换 |
 | WP1-6 | IPC/cap：端口、句柄、cap、close | src/kernel/svc | ping/reply 单测 |
 | WP1-7 | ELF64 加载器 + ring3 hello | src/kernel/user、src/apps | ring3 打印并退出 |
-| WP1-8 | host 单测 64 位化 | tests/ | 原单测子集通过 |
+| WP1-8 | host 单测 64 位化 + ng CI 门禁 | tests/、tools/ci-ng.ps1 | 单测全 PASS；一条命令门禁 |
 
-E1 出口状态（2026-10-31）：WP1-1..WP1-7 已完成；`tools/unit-ng.ps1` 的 host
-单测随每个 WP 增量推进（当前 901 checks）；`run-ng` 期望行 39 条全绿，ring3
-由 ELF64 加载器加载 `hello` 并正常退出（见 `docs/claims/ng-WP1-7.md`）。
+E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP1-8 全部
+完成：
+
+- `tools/unit-ng.ps1` host 单测 **1085 checks, 0 failures**（WP1-7 为 901；
+  WP1-8 补 uaccess 页边界 55、syscall 分发 81、handle/ipc 极端用例 48）；
+- `tools/run-ng.ps1` 39 条期望行 + 11 条正则全绿：ring3 由 ELF64 加载器加载
+  `hello` 并打印 `ng: ring3 hello`、正常退出（见 `docs/claims/ng-WP1-7.md`）；
+- `tools/ci-ng.ps1` 一条命令跑 check-domains / check-deps / unit-ng / build-ng /
+  run-ng / 旧 32 位 `build.ps1 -Test`，全绿输出 `=== NG CI PASS ===`
+  （`-Quick` 跳 QEMU/legacy）；`.github/workflows/ng.yml` 在 ubuntu-latest 上
+  跑 `-Quick` + 非阻塞 QEMU 冒烟；
+- 旧 32 位 **305/305**；check-domains / check-deps 0 违规
+  （见 `docs/claims/ng-WP1-8.md`）。
 
 ### E2
 
@@ -98,6 +108,9 @@ E1 出口状态（2026-10-31）：WP1-1..WP1-7 已完成；`tools/unit-ng.ps1` �
 ## 4. 门禁
 
 - 每个 WP：build + 相关 host 单测 + claims；没有 claims 不算完成。
+- ng 门禁（E1 起）：`tools/ci-ng.ps1` = check-domains + check-deps + unit-ng +
+  build-ng + run-ng + 旧 32 位 `build.ps1 -Test`（`-Quick` 跳 QEMU/legacy）；
+  CI 侧 `.github/workflows/ng.yml`。
 - check-domains：向上依赖必须失败。
 - parity：E2 起 50 项，每个 WP +10，E2 结束 100 项。
 - 故障注入：E3 起杀 shell/compositor/inputd，按 architecture.md 第 3 节断言。

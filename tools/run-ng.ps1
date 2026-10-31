@@ -64,6 +64,10 @@ $ErrorActionPreference = 'Stop'
 if (-not $Repo) { $Repo = Split-Path -Parent $PSScriptRoot }
 $Repo = (Resolve-Path $Repo).Path
 
+# Windows / Linux 都能跑：-ExecutionPolicy、-WindowStyle 与非 Windows 的 QEMU
+# 默认安装路径只在 Windows 上使用（CI 的 ubuntu runner 走 -Quick 时不会到 QEMU）。
+$OnWindows = ($env:OS -eq 'Windows_NT')
+
 # ---- 期望的串口行 ----------------------------------------------------------
 if ($Panic) {
     $required = @(
@@ -166,13 +170,19 @@ if ($ElfPath) {
     if (-not (Test-Path -LiteralPath $ElfPath)) { Fail ("ELF not found: {0}" -f $ElfPath) }
     $elf = (Resolve-Path -LiteralPath $ElfPath).Path
 } else {
-    $elf = Join-Path $Repo 'dist-ng\aster-ng.elf'
+    $elf = Join-Path (Join-Path $Repo 'dist-ng') 'aster-ng.elf'
 }
 
 if (-not (Test-Path -LiteralPath $elf)) {
     Write-Host 'run-ng: kernel not built yet, running build-ng.ps1 first'
     $build = Join-Path $PSScriptRoot 'build-ng.ps1'
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $build -Repo $Repo
+    $psHost = $null
+    try { $psHost = (Get-Process -Id $PID).Path } catch { }
+    if (-not $psHost) { $psHost = 'powershell' }
+    $buildArgs = @('-NoProfile')
+    if ($OnWindows) { $buildArgs += @('-ExecutionPolicy', 'Bypass') }
+    $buildArgs += @('-File', $build, '-Repo', $Repo)
+    & $psHost @buildArgs
     if ($LASTEXITCODE -ne 0) { Fail 'build-ng.ps1 failed' }
     if (-not (Test-Path -LiteralPath $elf)) { Fail 'build-ng.ps1 did not produce the ELF' }
 }
@@ -182,7 +192,7 @@ $qemu = $null
 $qcmd = Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue
 if ($qcmd) {
     $qemu = $qcmd.Source
-} elseif (Test-Path 'D:\Program Files\qemu\qemu-system-x86_64.exe') {
+} elseif ($OnWindows -and (Test-Path 'D:\Program Files\qemu\qemu-system-x86_64.exe')) {
     $qemu = 'D:\Program Files\qemu\qemu-system-x86_64.exe'
 }
 if (-not $qemu) { Fail 'qemu-system-x86_64 not found (PATH or D:\Program Files\qemu)' }
@@ -217,8 +227,15 @@ $qemuArgs = @(
 Write-Host ("args: -kernel <elf> -serial file:<log> -display none -no-reboot -m 256 -cpu {0} (timeout {1}s)" -f $Cpu, $TimeoutSec)
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$p = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru `
-    -RedirectStandardError $errLog -RedirectStandardOutput $outLog -WindowStyle Hidden
+$spArgs = @{
+    FilePath = $qemu
+    ArgumentList = $qemuArgs
+    PassThru = $true
+    RedirectStandardError = $errLog
+    RedirectStandardOutput = $outLog
+}
+if ($OnWindows) { $spArgs['WindowStyle'] = 'Hidden' }
+$p = Start-Process @spArgs
 
 $matched = $false
 $failedEarly = $false

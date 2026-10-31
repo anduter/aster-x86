@@ -6,15 +6,22 @@
 
 1. architecture.md —— 7 大类、域边界、故障等级、manifest、D0/D1/D2。
 2. evolution.md —— ng 分支、E0–E5 阶段、工作包（WP）、门禁、第一周 checklist。
-3. decisions.md —— 12 条 ADR，改架构前先看这里。
+3. decisions.md —— ADR 集合（含 64 位相关决策），改架构前先看这里。
 4. three-layer.md —— 历史迁移记录（已被取代，只看 P1–P4 的事实）。
 
 ## 当前状态
 
-- 基线 HEAD：69ab006（305/305，32 位）。
-- 策略：演进；main 冻结，ng 分支开发。
-- 当前阶段：**E0 准备**。
-- 下一步：WP0-1（tag/branch）、WP0-2（文档/所有权）、WP0-3（check-domains）、WP0-4（64 位工具链）。
+- main：冻结在 69ab006（旧 32 位，305/305）。
+- 开发分支：ng（64 位内核）。
+- 当前阶段：**E1 完成（WP1-1..WP1-8），待打 tag `ng-e1`**。
+- 门禁：`tools/ci-ng.ps1` 一条命令跑 check-domains / check-deps / unit-ng /
+  build-ng / run-ng / 旧 32 位 `build.ps1 -Test`，全绿输出
+  `=== NG CI PASS ===`（`-Quick` 跳 QEMU/legacy）；CI 见
+  `.github/workflows/ng.yml`。
+- 出口证据：ring3 `ng: ring3 hello`；host 单测 **1085 checks, 0 failures**；
+  旧 32 位 305/305；check-domains / check-deps 0 违规
+  （`docs/claims/ng-WP1-8.md`）。
+- 下一步：打 tag `ng-e1` → E2 / WP2-1（VFS/ramfs 移植）。
 
 ## 执行规则
 
@@ -30,6 +37,11 @@
 |---|---|
 | architecture.md | 长期架构口径 |
 | evolution.md | 迁移计划与工作包 |
-| decisions.md | ADR |
+| decisions.md | ADR（含 64 位相关决策） |
 | three-layer.md | 历史（已取代） |
-| domains/ | 每域一页（待 WP0-2 创建） |
+| memory-ng.md / paging-ng.md | WP1-2/1-4 内存与页表 |
+| trap-syscall-ng.md | WP1-3 trap / syscall |
+| sched-ng.md | WP1-5 线程与调度 |
+| ipc-ng.md | WP1-6 句柄 / 端口 / IPC |
+| elf-ng.md | WP1-7 ELF64 加载器 / 用户地址空间 / uaccess |
+| domains/ | 每域一页 |

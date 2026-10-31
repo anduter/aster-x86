@@ -1,0 +1,88 @@
+name: ng
+
+# ng 分支（64 位内核）E1 门禁。
+#
+# 托管 ubuntu-latest runner 上能跑的部分：
+#   - 域/模块边界（check-domains / check-deps）
+#   - host 单测（tools/unit-ng.ps1，1085 checks）
+#   - 64 位内核构建（tools/build-ng.ps1：ELF64 + multiboot2 + PVH + 用户 ELF）
+#   - QEMU 冒烟（tools/run-ng.ps1，39 条期望行 + 11 条正则，含 `ng: ring3 hello`）
+#
+# 一条命令就是 `./tools/ci-ng.ps1 -Quick`（Windows PS5.1 / ubuntu pwsh 通用，
+# 仓库根自动取脚本上级目录，不写死盘符）。-Quick 跳过 QEMU 与旧 32 位 legacy；
+# QEMU 单独一步跑，失败只记录日志（托管 runner 无 KVM，走 TCG），本地/Windows
+# 上 `tools/ci-ng.ps1` 全量模式才把 run-ng 当门禁。
+#
+# 旧 32 位 `build.ps1 -Test` 依赖 vendored i686-elf 工具链（Windows-only，
+# 约 3.5 GB 且 gitignored），托管 Linux runner 不跑；见 tools/ci-ng.ps1
+# 的 legacy 分支与 docs/claims/ng-WP1-8.md。
+
+on:
+  push:
+    branches: [ng]
+  pull_request:
+    branches: [ng]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ng-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    name: ng quick gate (unit + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (clang / lld / qemu)
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld qemu-system-x86
+          clang --version
+          ld.lld --version
+          qemu-system-x86_64 --version | head -1
+
+      - name: Ensure PowerShell (pwsh)
+        shell: bash
+        run: |
+          if command -v pwsh >/dev/null 2>&1; then
+            echo "pwsh already present"
+          else
+            sudo apt-get install -y powershell
+          fi
+          pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+      - name: tools/ci-ng.ps1 -Quick (static + unit-ng + build-ng)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./tools/ci-ng.ps1 -Quick
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: tools/run-ng.ps1 (QEMU smoke; TCG, non-blocking)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./tools/run-ng.ps1 -TimeoutSec 90 -SerialLog serial-ng.log
+          exit $LASTEXITCODE
+
+      - name: Upload ng artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ng-artifacts
+          path: |
+            dist-ng/**
+            obj-ng/**
+            serial-ng.log
+          if-no-files-found: ignore
+          retention-days: 7

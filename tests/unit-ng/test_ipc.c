@@ -853,6 +853,127 @@ static void t_waiter_reuse(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* 13. 极端值：最大消息 / max=0 / depth 上限 / 空 payload / stale 句柄        */
+/* ------------------------------------------------------------------------- */
+
+static void t_extremes(void)
+{
+    struct ipc_core c;
+    struct ipc_port *p;
+    struct handle_table t;
+    void *out = NULL;
+    u32 h = 0;
+    u32 h2 = 0;
+    u32 q = 0;
+    u32 len;
+    u32 out_len;
+    u32 i;
+    u32 ok;
+    u32 type;
+
+    core_init(&c);
+
+    /* (1) 最大消息：16 字节头 + 4096 字节 payload = IPC_MSG_MAX，整条往返。 */
+    CHECK(ipc_core_port_create(&c, 1, 0, &h) == IPC_OK);
+    len = build(sbuf, 0x77, 0, IPC_PAYLOAD_MAX, 0x40);
+    CHECK(len == IPC_MSG_MAX);
+    CHECK(ipc_core_send(&c, h, sbuf, len, 0, IPC_TIMEOUT_NOW) == IPC_OK);
+    p = find_port(&c, h);
+    CHECK(p != NULL && p->count == 1);
+    memset(rbuf, 0, sizeof(rbuf));
+    CHECK(ipc_core_recv(&c, h, rbuf, sizeof(rbuf), 0, IPC_TIMEOUT_NOW,
+                        &out_len) == (int)len);
+    CHECK(out_len == len);
+    CHECK(((struct ipc_msg_hdr *)rbuf)->len == IPC_PAYLOAD_MAX);
+    CHECK(payload_is(rbuf, IPC_PAYLOAD_MAX, 0x40));
+
+    /* (2) hdr.len = PAYLOAD_MAX+1（总长正好 IPC_MSG_MAX）：EMSGSIZE，队列不变。 */
+    memset(sbuf2, 0, IPC_MSG_MAX);
+    ((struct ipc_msg_hdr *)sbuf2)->type = 1;
+    ((struct ipc_msg_hdr *)sbuf2)->len = IPC_PAYLOAD_MAX + 1;
+    CHECK(ipc_core_send(&c, h, sbuf2, IPC_MSG_MAX, 0, IPC_TIMEOUT_NOW) ==
+          IPC_EMSGSIZE);
+    CHECK(p != NULL && p->count == 0);
+
+    /* (3) recv max=0 / buf=NULL：只返回总长，一个字节都不写。 */
+    len = build(sbuf, 0x78, 0, 8, 0x60);
+    CHECK(ipc_core_send(&c, h, sbuf, len, 0, IPC_TIMEOUT_NOW) == IPC_OK);
+    memset(rbuf, 0xEE, 16);
+    out_len = 0xFFFF;
+    CHECK(ipc_core_recv(&c, h, NULL, 0, 0, IPC_TIMEOUT_NOW, &out_len) ==
+          (int)len);
+    CHECK(out_len == len);
+    CHECK(rbuf[0] == 0xEE);
+    CHECK(ipc_core_send(&c, h, sbuf, len, 0, IPC_TIMEOUT_NOW) == IPC_OK);
+    out_len = 0;
+    CHECK(ipc_core_recv(&c, h, rbuf, 0, 0, IPC_TIMEOUT_NOW, &out_len) ==
+          (int)len);
+    CHECK(out_len == len && rbuf[0] == 0xEE);
+
+    /* (4) depth=IPC_DEPTH_MAX：填满 64 条后第 65 条非阻塞 EAGAIN，随后全排空。 */
+    CHECK(ipc_core_port_create(&c, IPC_DEPTH_MAX, 0, &q) == IPC_OK);
+    p = find_port(&c, q);
+    len = build(sbuf, 0x79, 0, 4, 0x70);
+    ok = 0;
+    for (i = 0; i < IPC_DEPTH_MAX; i++) {
+        if (ipc_core_send(&c, q, sbuf, len, 0, IPC_TIMEOUT_NOW) == IPC_OK) {
+            ok++;
+        }
+    }
+    CHECK(ok == IPC_DEPTH_MAX);
+    CHECK(p != NULL && p->count == IPC_DEPTH_MAX && p->depth == IPC_DEPTH_MAX);
+    CHECK(ipc_core_send(&c, q, sbuf, len, 0, IPC_TIMEOUT_NOW) == IPC_EAGAIN);
+    CHECK(p != NULL && p->count == IPC_DEPTH_MAX);
+    ok = 0;
+    for (i = 0; i < IPC_DEPTH_MAX; i++) {
+        if (ipc_core_recv(&c, q, rbuf, sizeof(rbuf), 0, IPC_TIMEOUT_NOW,
+                          NULL) == (int)len) {
+            ok++;
+        }
+    }
+    CHECK(ok == IPC_DEPTH_MAX);
+    CHECK(p != NULL && p->count == 0);
+
+    /* (5) 零 payload 的 reply：len 只有 16 字节头，也要走通 ticket 往返。 */
+    CHECK(ipc_core_port_create(&c, 0, 0, &h2) == IPC_OK);
+    len = build(sbuf, 0x7A, q, 0, 0x80);
+    CHECK(len == IPC_HDR_SIZE);
+    CHECK(ipc_core_send(&c, h2, sbuf, len, 0, IPC_TIMEOUT_NOW) == IPC_OK);
+    CHECK(ipc_core_recv(&c, h2, rbuf, sizeof(rbuf), 0, IPC_TIMEOUT_NOW,
+                        &out_len) == (int)len);
+    CHECK(out_len == IPC_HDR_SIZE && ((struct ipc_msg_hdr *)rbuf)->len == 0);
+    len = build(sbuf2, 0x7B, h2, 0, 0x90);
+    CHECK(ipc_core_reply(&c, q, sbuf2, len, 0, IPC_TIMEOUT_NOW) == IPC_OK);
+    CHECK(ipc_core_recv(&c, q, rbuf, sizeof(rbuf), 0, IPC_TIMEOUT_NOW,
+                        &out_len) == (int)len);
+    CHECK(((struct ipc_msg_hdr *)rbuf)->type == 0x7B);
+    CHECK(((struct ipc_msg_hdr *)rbuf)->len == 0);
+
+    CHECK(ipc_core_close(&c, h, 0) == IPC_OK);
+    CHECK(ipc_core_close(&c, h2, 0) == IPC_OK);
+    CHECK(ipc_core_close(&c, q, 0) == IPC_OK);
+
+    /* (6) 句柄表：槽位越界 / 0 / 槽位复用后的旧 generation 都必须 EBADF。 */
+    handle_table_init(&t);
+    CHECK(handle_alloc(&t, HANDLE_TYPE_PORT, &marker, &h) == HANDLE_OK);
+    CHECK(handle_lookup(&t, 0, HANDLE_TYPE_PORT, &out) == HANDLE_EBADF);
+    CHECK(handle_lookup(&t, handle_make(1, HANDLE_MAX), HANDLE_TYPE_PORT,
+                        &out) == HANDLE_EBADF);
+    CHECK(t.bad_lookups == 2);
+    type = handle_gen_of(h);
+    CHECK(handle_lookup(&t, handle_make(type + 1, handle_slot_of(h)),
+                        HANDLE_TYPE_PORT, &out) == HANDLE_EBADF);
+    /* 关掉再分配：同槽位、新 generation；旧句柄失效、新句柄可用。 */
+    CHECK(handle_close(&t, h, NULL, NULL) == HANDLE_OK);
+    CHECK(handle_alloc(&t, HANDLE_TYPE_PORT, &marker, &h2) == HANDLE_OK);
+    CHECK(handle_slot_of(h2) == handle_slot_of(h));
+    CHECK(handle_gen_of(h2) == handle_gen_of(h) + 1);
+    CHECK(handle_lookup(&t, h, HANDLE_TYPE_PORT, &out) == HANDLE_EBADF);
+    CHECK(handle_lookup(&t, h2, HANDLE_TYPE_PORT, &out) == HANDLE_OK);
+    CHECK(handle_live(&t) == 1);
+}
+
+/* ------------------------------------------------------------------------- */
 /* 入口                                                                       */
 /* ------------------------------------------------------------------------- */
 
@@ -870,5 +991,6 @@ int test_ipc(void)
     t_permissions();
     t_reply();
     t_waiter_reuse();
+    t_extremes();
     return 0;
 }
