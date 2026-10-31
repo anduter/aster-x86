@@ -19,7 +19,7 @@
 | E0 准备 | tag/branch/docs/CI/域检查/工具链 | 1 周 | ng 可构建；check-domains 生效 |
 | E1 64 位核心 | boot、long mode、页表、trap、syscall、PMM/heap、调度、IPC、ELF64 | **6 周（硬上限）** | ring3 hello + host 单测 |
 | E2 服务/驱动移植 | VFS/ramfs、FAT16、fb/input/blk、auth/log/pkg、shell | 8 周 | 64 位 shell + 100 项 parity |
-| E3 桌面会话 S1 | display server、shell/WM、session manager、SDK alpha、demo | 8 周 | 杀 shell 应用不死 |
+| E3 桌面会话 S1 | display server、shell/WM、session manager、SDK alpha、demo | 8 周 | ✅ 杀 shell 应用不死（tag ng-e3；WM 死循环为已知限制） |
 | E4 D0 收口 | 故障注入、外部开发者测试、ABI 冻结、文档/发布 | 4 周 | D0 出口（见 architecture.md） |
 | E5 D1 | POSIX Profile、TLS/HTTP、浏览器 B0、真实硬件、8h 浸泡 | 按 D1 计划 | D1 出口 |
 
