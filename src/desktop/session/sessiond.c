@@ -255,6 +255,7 @@ static u64 g_restart_at;      /* 退避到期时间（TSC） */
 static u32 g_restart_pending; /* 重启后等新 WM REGISTER（打印 restart ready） */
 static u32 g_status_dirty;
 static u32 g_registry_prints;
+static u32 g_clamp_prints;
 static u32 g_token_printed;
 static u32 g_last_apps;
 static u32 g_last_windows;
@@ -419,8 +420,10 @@ static void s_focus_surface(u32 surface_id, u32 token)
     (void)s_send_ds(&m, g_disp_port);
 }
 
-/* 回收一个窗口（客户端已经死了/退出了；会话管理器有权清理）。 */
-static void s_destroy_surface(u32 surface_id)
+/* 回收一个窗口（客户端已经死了/退出了；会话管理器有权清理）。
+ * v3：带上窗口自己的 role_token —— displayd 的 DESTROY 现在做归属校验，
+ * 不再接受"知道 id 就能销毁"。 */
+static void s_destroy_surface(u32 surface_id, u32 token)
 {
     struct ds_msg m;
 
@@ -431,6 +434,7 @@ static void s_destroy_surface(u32 surface_id)
     m.type = DS_MSG_DESTROY;
     m.seq = ++g_seq;
     m.u.destroy.surface_id = surface_id;
+    m.u.destroy.token = token;
     (void)s_send_ds(&m, g_disp_port);
 }
 
@@ -645,7 +649,44 @@ static void s_startup(void)
 /* 消息处理                                                                   */
 /* ------------------------------------------------------------------------- */
 
-static void s_handle_register(const struct session_msg *m)
+/*
+ * v3 审计加固：会话请求除了 role_token，还要求来自**该会话项登记过的端口**。
+ * 令牌经 argv 下发、也可能从 displayd 的 LIST 里被读到；只靠令牌的话，
+ * 偷到令牌的客户端就能替别人 REGISTER/HEARTBEAT/EXIT/LAUNCH/KILL。端口
+ * 绑定让"只偷到令牌"不够用（还要知道受害者的端口 ticket）。
+ *
+ * 局限：内核的 IPC `from` 只是端口 ticket，且发送方可以把它填成任意存活
+ * 端口（syscall 审计会话的发现）；真正的 peer 身份校验需要内核在 syscall
+ * 边界填 from，不在本会话范围。这里做的是协议层的最低限度加固。
+ */
+static int s_channel_ok(const struct session_entry *e, u32 from)
+{
+    if (e == NULL || from == 0) {
+        return 0;
+    }
+    if (e->port != 0) {
+        return (from == e->port) ? 1 : 0;
+    }
+    return 1; /* 首次 REGISTER：端口在本处理函数里绑定 */
+}
+
+static void s_channel_reject(const char *what, u32 from)
+{
+    g_tab.rejects++;
+    if (g_reject_prints < S_MAX_PRINTS) {
+        g_reject_prints++;
+        s_put("ng: session channel reject ok (");
+        s_put(what);
+        s_put(" from=");
+        s_puthex(from);
+        s_put(" n=");
+        s_putdec((u32)g_tab.rejects);
+        s_put(")\r\n");
+    }
+    g_status_dirty = 1;
+}
+
+static void s_handle_register(const struct session_msg *m, u32 from)
 {
     char title[DS_TITLE_MAX];
     struct session_entry *e;
@@ -664,6 +705,15 @@ static void s_handle_register(const struct session_msg *m)
             s_put(")\r\n");
         }
         g_status_dirty = 1;
+        return;
+    }
+    if (!s_channel_ok(e, from)) {
+        s_channel_reject("register", from);
+        return;
+    }
+    /* 上报的回复端口必须就是发送端口：否则 port=0 会让后面的通道绑定失效。 */
+    if (m->u.reg.port == 0 || m->u.reg.port != from) {
+        s_channel_reject("register-port", from);
         return;
     }
     rc = session_register_window(&g_tab, m->u.reg.token, m->u.reg.port,
@@ -716,12 +766,16 @@ static void s_handle_register(const struct session_msg *m)
     g_status_dirty = 1;
 }
 
-static void s_handle_heartbeat(const struct session_msg *m)
+static void s_handle_heartbeat(const struct session_msg *m, u32 from)
 {
     struct session_entry *e = session_by_token(&g_tab, m->u.hb.token);
 
     if (e == NULL) {
         g_tab.rejects++;
+        return;
+    }
+    if (!s_channel_ok(e, from)) {
+        s_channel_reject("heartbeat", from);
         return;
     }
     (void)session_heartbeat(&g_tab, m->u.hb.token, s_now());
@@ -730,7 +784,7 @@ static void s_handle_heartbeat(const struct session_msg *m)
     }
 }
 
-static void s_handle_launch(const struct session_msg *m)
+static void s_handle_launch(const struct session_msg *m, u32 from)
 {
     char path[SESSION_PATH_MAX];
     char arg[SESSION_ARG_MAX];
@@ -741,6 +795,7 @@ static void s_handle_launch(const struct session_msg *m)
     u32 token = 0;
     int slot;
     struct session_entry *e;
+    struct session_entry *req;
 
     session_path_get(m->u.launch.path, path, (u32)sizeof(path));
     session_arg_get(m->u.launch.arg, arg, (u32)sizeof(arg));
@@ -756,6 +811,11 @@ static void s_handle_launch(const struct session_msg *m)
             s_put(")\r\n");
         }
         g_status_dirty = 1;
+        return;
+    }
+    req = session_by_token(&g_tab, m->u.launch.token);
+    if (!s_channel_ok(req, from)) {
+        s_channel_reject("launch", from);
         return;
     }
     if (path[0] == '\0') {
@@ -813,7 +873,7 @@ static void s_reap_entry(struct session_entry *e, const char *why)
     int status = -1;
 
     if (surface != 0) {
-        s_destroy_surface(surface);
+        s_destroy_surface(surface, e->token);
         e->surface_id = 0;
     }
     if (pid != 0) {
@@ -842,12 +902,16 @@ static void s_reap_entry(struct session_entry *e, const char *why)
     g_status_dirty = 1;
 }
 
-static void s_handle_exit(const struct session_msg *m)
+static void s_handle_exit(const struct session_msg *m, u32 from)
 {
     struct session_entry *e = session_by_token(&g_tab, m->u.exit.token);
 
     if (e == NULL) {
         g_tab.rejects++;
+        return;
+    }
+    if (!s_channel_ok(e, from)) {
+        s_channel_reject("exit", from);
         return;
     }
     if (e->role == SESSION_ROLE_APP) {
@@ -859,9 +923,10 @@ static void s_handle_exit(const struct session_msg *m)
     }
 }
 
-static void s_handle_kill(const struct session_msg *m)
+static void s_handle_kill(const struct session_msg *m, u32 from)
 {
     struct session_entry *e;
+    struct session_entry *req;
 
     if (session_kill_allowed(&g_tab, m->u.kill.token) != DS_OK) {
         if (g_reject_prints < S_MAX_PRINTS) {
@@ -872,6 +937,11 @@ static void s_handle_kill(const struct session_msg *m)
             s_putdec((u32)g_tab.rejects);
             s_put(")\r\n");
         }
+        return;
+    }
+    req = session_by_token(&g_tab, m->u.kill.token);
+    if (!s_channel_ok(req, from)) {
+        s_channel_reject("kill", from);
         return;
     }
     e = session_by_pid(&g_tab, m->u.kill.pid);
@@ -898,6 +968,12 @@ static void s_handle_lookup(const struct session_msg *m, u32 from)
     if (e != NULL) {
         session_entry_fill(&r.u.entry.info, e->pid, e->token, e->surface_id,
                            e->state, e->role, e->title);
+        /*
+         * v3 审计修复：role_token 是能力凭证，只在签发时经 argv 交给它的
+         * 属主进程。LOOKUP 谁都能调，以前会把 WM/别的应用的令牌一起回出去
+         * （拿到 WM 令牌就能 LAUNCH/KILL）。查询回复不导出令牌。
+         */
+        r.u.entry.info.token = 0;
         r.u.entry.found = 1;
     }
     (void)s_reply_sess(from, &r);
@@ -923,6 +999,8 @@ static void s_handle_list(const struct session_msg *m, u32 from)
         }
         session_entry_fill(&r.u.list_reply.entries[n], e->pid, e->token,
                            e->surface_id, e->state, e->role, e->title);
+        /* 同上：注册表快照不导出 role_token（只有计数/身份/窗口是公开的）。 */
+        r.u.list_reply.entries[n].token = 0;
         n++;
     }
     r.u.list_reply.count = n;
@@ -933,19 +1011,19 @@ static void s_handle_msg(int type, const struct session_msg *m, u32 from)
 {
     switch (type) {
     case SESSION_MSG_REGISTER:
-        s_handle_register(m);
+        s_handle_register(m, from);
         break;
     case SESSION_MSG_HEARTBEAT:
-        s_handle_heartbeat(m);
+        s_handle_heartbeat(m, from);
         break;
     case SESSION_MSG_LAUNCH:
-        s_handle_launch(m);
+        s_handle_launch(m, from);
         break;
     case SESSION_MSG_EXIT:
-        s_handle_exit(m);
+        s_handle_exit(m, from);
         break;
     case SESSION_MSG_KILL:
-        s_handle_kill(m);
+        s_handle_kill(m, from);
         break;
     case SESSION_MSG_LOOKUP:
         s_handle_lookup(m, from);
@@ -970,9 +1048,25 @@ static void s_on_list(const struct ds_msg *m)
     u32 mismatch;
     u32 apps;
     u32 windows;
+    u32 count = m->u.list_reply.count;
 
-    mismatch = session_sync_list(&g_tab, m->u.list_reply.entries,
-                                 m->u.list_reply.count, &bound);
+    /*
+     * 审计修复：count 来自 IPC 消息（body 里就是一个 u32），解码器不会校验
+     * 它 <= entries[] 容量。以前直接传给 session_sync_list()，一个伪造的
+     * LIST_REPLY（count=0xFFFFFFFF）就能让它越界读栈/崩溃。
+     */
+    if (count > DS_LIST_MAX) {
+        if (g_clamp_prints < S_MAX_PRINTS) {
+            g_clamp_prints++;
+            s_put("ng: session registry count clamp ok (n=");
+            s_putdec(count);
+            s_put(" max=");
+            s_putdec(DS_LIST_MAX);
+            s_put(")\r\n");
+        }
+        count = DS_LIST_MAX;
+    }
+    mismatch = session_sync_list(&g_tab, m->u.list_reply.entries, count, &bound);
     apps = session_apps(&g_tab);
     windows = session_windows(&g_tab);
     if (mismatch == 0 && bound > 0) {
@@ -1053,7 +1147,7 @@ static void s_wm_died(void)
         u32 slot = (u32)(e - g_tab.e);
 
         if (surface != 0) {
-            s_destroy_surface(surface);
+            s_destroy_surface(surface, e->token);
         }
         if (pid != 0) {
             int status = -1;

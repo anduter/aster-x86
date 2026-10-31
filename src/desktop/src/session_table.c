@@ -450,6 +450,14 @@ u32 session_sync_list(struct session_table *t,
     if (list == NULL) {
         n = 0;
     }
+    /*
+     * 防御：n 通常是 displayd LIST_REPLY 的 count（IPC body 里的 u32）。
+     * 即使调用方忘了校验，也不能越过 entries[] 的容量（审计发现：
+     * sessiond 以前把消息里的 count 原样传进来 -> 越界读）。
+     */
+    if (n > DS_LIST_MAX) {
+        n = DS_LIST_MAX;
+    }
     /* 1. 会话表里每个有窗口的 running 项都要在 LIST 里。 */
     for (i = 0; i < SESSION_MAX_ENTRIES; i++) {
         struct session_entry *e = &t->e[i];

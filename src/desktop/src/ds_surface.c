@@ -382,6 +382,50 @@ int ds_table_destroy(struct ds_table *t, u32 id)
     return DS_OK;
 }
 
+/* v3 DESTROY 归属规则（见 ds_surface.h 的注释）。 */
+int ds_surface_can_destroy(const struct ds_surface *s, u32 token, u32 wm_token,
+                           u32 from)
+{
+    if (s == NULL || s->used == 0) {
+        return 0;
+    }
+    if (token != 0) {
+        if (s->token != 0 && token == s->token) {
+            return 1;
+        }
+        if (wm_token != 0 && token == wm_token) {
+            return 1;
+        }
+        return 0;
+    }
+    /* token == 0：只允许旧客户端销毁"没有归属令牌"的窗口，且必须来自
+     * 创建它的那个客户端端口（demo 的 scratch surface 走这条路径）。 */
+    if (s->token == 0 && s->client_ticket != 0 && from == s->client_ticket) {
+        return 1;
+    }
+    return 0;
+}
+
+int ds_table_destroy_checked(struct ds_table *t, u32 id, u32 token,
+                             u32 wm_token, u32 from)
+{
+    struct ds_surface *s;
+
+    if (t == NULL) {
+        return DS_EINVAL;
+    }
+    s = ds_table_find(t, id);
+    if (s == NULL) {
+        t->rejects++;
+        return DS_ENOENT;
+    }
+    if (!ds_surface_can_destroy(s, token, wm_token, from)) {
+        t->rejects++;
+        return DS_EPERM;
+    }
+    return ds_table_destroy(t, id);
+}
+
 /* ------------------------------------------------------------------------- */
 /* 几何                                                                       */
 /* ------------------------------------------------------------------------- */

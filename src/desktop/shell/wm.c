@@ -904,6 +904,8 @@ static void wm_register_hotkey(void)
     m.seq = ++g_seq;
     m.u.register_hotkey.surface_id = g_self_id;
     m.u.register_hotkey.key = DS_HOTKEY_ANY;
+    /* v3：热键通道属于 WM —— displayd 用这个令牌拒绝后来者的抢占。 */
+    m.u.register_hotkey.token = g_token;
     if (w_send_msg(&m) != 0) {
         w_put("ng: wm FAIL (hotkey send)\r\n");
         return;

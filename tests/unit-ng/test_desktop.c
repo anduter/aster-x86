@@ -383,7 +383,94 @@ static void t_table_lifecycle(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* C. 合成器                                                                  */
+/* C. v3 审计加固：DESTROY 归属 + 热键令牌                                    */
+/* ------------------------------------------------------------------------- */
+
+static void t_destroy_auth_proto(void)
+{
+    u8 buf[DS_MSG_MAX];
+    struct ds_msg m;
+    struct ds_msg d;
+    int n;
+
+    memset(&m, 0, sizeof(m));
+    m.type = DS_MSG_DESTROY;
+    m.u.destroy.surface_id = 5;
+    m.u.destroy.token = 0x0001A101u;
+    n = ds_msg_encode(&m, buf, sizeof(buf));
+    CHECK(n == (int)ds_msg_size(DS_MSG_DESTROY));
+    CHECK(ds_msg_decode(buf, (u32)n, &d) == DS_OK);
+    CHECK(d.u.destroy.surface_id == 5);
+    CHECK(d.u.destroy.token == 0x0001A101u);
+
+    memset(&m, 0, sizeof(m));
+    m.type = DS_MSG_REGISTER_HOTKEY;
+    m.u.register_hotkey.surface_id = 2;
+    m.u.register_hotkey.key = DS_HOTKEY_ANY;
+    m.u.register_hotkey.token = 0x0001B001u;
+    n = ds_msg_encode(&m, buf, sizeof(buf));
+    CHECK(n == (int)ds_msg_size(DS_MSG_REGISTER_HOTKEY));
+    CHECK(ds_msg_decode(buf, (u32)n, &d) == DS_OK);
+    CHECK(d.u.register_hotkey.surface_id == 2);
+    CHECK(d.u.register_hotkey.token == 0x0001B001u);
+
+    /* 热键令牌策略：没有 WM 面板时保持 v2 行为；有 WM 时只认 WM 令牌。 */
+    CHECK(ds_hotkey_token_ok(0, 0) == 1);
+    CHECK(ds_hotkey_token_ok(0, 0x1234u) == 1);
+    CHECK(ds_hotkey_token_ok(0x0001B001u, 0x0001B001u) == 1);
+    CHECK(ds_hotkey_token_ok(0x0001B001u, 0) == 0);
+    CHECK(ds_hotkey_token_ok(0x0001B001u, 0x0001B002u) == 0);
+}
+
+static void t_table_destroy_auth(void)
+{
+    struct ds_table t;
+    u32 a = 0;
+    u32 b = 0;
+    u32 c = 0;
+
+    ds_table_init(&t, TBL_W, TBL_H);
+
+    /* A：v1/v2 风格 surface（没有令牌，client_ticket = 0x10001）。 */
+    CHECK(ds_table_create(&t, 8, 8, 7, 0x10001, 0x20001, 1,
+                          (u64)(usize)px_a, &a) == DS_OK);
+    /* B：应用令牌。 */
+    CHECK(ds_table_create_ex(&t, 8, 8, 7, 0x10002, 0x20002, 1,
+                             (u64)(usize)px_b, "B", -1, -1, 0x0002A101u,
+                             &b) == DS_OK);
+    /* C：WM 令牌。 */
+    CHECK(ds_table_create_ex(&t, 8, 8, 7, 0x10003, 0x20003, 1,
+                             (u64)(usize)px_a, "C", -1, -1, 0x0001B001u,
+                             &c) == DS_OK);
+
+    /* 无令牌窗口：别人的 from 不能销毁；创建者端口可以。 */
+    CHECK(ds_table_destroy_checked(&t, a, 0, 0, 0x10002) == DS_EPERM);
+    CHECK(ds_table_find(&t, a) != NULL);
+    CHECK(ds_table_destroy_checked(&t, a, 0, 0, 0x10001) == DS_OK);
+    CHECK(ds_table_find(&t, a) == NULL);
+
+    /* 有令牌窗口：自己的令牌可以；别人的令牌/0 不行。 */
+    CHECK(ds_table_destroy_checked(&t, b, 0, 0, 0x10002) == DS_EPERM);
+    CHECK(ds_table_destroy_checked(&t, b, 0x0001B001u, 0x0001B001u,
+                                   0x10003) == DS_OK);
+
+    /* WM 令牌可以销毁任意窗口；APP 令牌冒充 WM 不行。 */
+    CHECK(ds_table_destroy_checked(&t, c, 0x0002A101u, 0x0001B001u,
+                                   0x10001) == DS_EPERM);
+    CHECK(ds_table_find(&t, c) != NULL);
+    CHECK(ds_table_destroy_checked(&t, c, 0x0001B001u, 0x0001B001u,
+                                   0x10001) == DS_OK);
+    CHECK(ds_table_find(&t, c) == NULL);
+
+    /* 坏 id / NULL / 空表。 */
+    CHECK(ds_table_destroy_checked(&t, 999, 1, 0, 1) == DS_ENOENT);
+    CHECK(ds_table_destroy_checked(NULL, 1, 1, 0, 1) == DS_EINVAL);
+    CHECK(ds_surface_can_destroy(NULL, 1, 0, 1) == 0);
+    CHECK(t.rejects > 0);
+}
+
+/* ------------------------------------------------------------------------- */
+/* D. 合成器                                                                  */
 /* ------------------------------------------------------------------------- */
 
 #define SCR_W 48u
@@ -553,7 +640,7 @@ static void t_cursor(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* D. 绘制 / 字模                                                             */
+/* E. 绘制 / 字模                                                             */
 /* ------------------------------------------------------------------------- */
 
 static u32 dbuf[16 * 16];
@@ -630,6 +717,8 @@ int test_desktop(void)
     t_protocol_reject();
     t_table_create();
     t_table_lifecycle();
+    t_destroy_auth_proto();
+    t_table_destroy_auth();
     t_composite_zorder();
     t_composite_alpha();
     t_cursor();

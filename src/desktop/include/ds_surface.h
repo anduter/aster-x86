@@ -112,6 +112,21 @@ int ds_table_commit(struct ds_table *t, u32 id, const struct ds_rect *r,
 int ds_table_focus(struct ds_table *t, u32 id);
 int ds_table_destroy(struct ds_table *t, u32 id);
 
+/*
+ * v3：带归属校验的 DESTROY（display 协议 v3 的 ds_destroy_body.token）。
+ * 允许的请求者（任一即可）：
+ *   - 令牌等于 surface 自己的 role_token（窗口应用销毁自己的窗口）；
+ *   - 令牌等于 wm_token（WM 清理任意窗口）；
+ *   - token == 0 且 surface 没有令牌、且 from == client_ticket（v1/v2 旧客户端，
+ *     或 demo 的 scratch surface）。
+ * 其余（含 token=0 去销毁有令牌的窗口）返回 DS_EPERM 且不改变表；
+ * id 不存在返回 DS_ENOENT。失败也计入 t->rejects。
+ */
+int ds_surface_can_destroy(const struct ds_surface *s, u32 token, u32 wm_token,
+                           u32 from);
+int ds_table_destroy_checked(struct ds_table *t, u32 id, u32 token,
+                             u32 wm_token, u32 from);
+
 /* ---- 纯几何 helper -------------------------------------------------------- */
 int ds_rect_empty(const struct ds_rect *r);
 u32 ds_rect_area(const struct ds_rect *r);

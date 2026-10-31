@@ -230,7 +230,12 @@ static int proc_build_argv(struct user_as *as, const char *const *argv,
     u32 i;
     u32 total = 0;
 
-    while (argv != NULL && argv[argc] != NULL && argc < PROC_MAX_ARGS) {
+    /*
+     * 最多 PROC_MAX_ARGS 项；没有 NULL 终结符时按"正好满 8 项"接受（argc 是
+     * 权威计数）。条件先判上界再读 argv[argc]；调用方仍必须把哨兵槽
+     * （argv[PROC_MAX_ARGS]）初始化 —— proc_copy_argv 现在会清 9 个槽。
+     */
+    while (argv != NULL && argc < PROC_MAX_ARGS && argv[argc] != NULL) {
         u32 n = proc_strlen(argv[argc]);
 
         if (n >= PROC_ARG_MAX) {
@@ -873,6 +878,8 @@ static int proc_copy_argv(u64 uargv, char argbuf[][PROC_ARG_MAX], u32 max_args,
     for (i = 0; i < PROC_MAX_ARGS; i++) {
         argv_out[i] = NULL;
     }
+    /* 哨兵槽也要清：满 8 项（无 NULL 终结符）时上游会读 argv[8]。 */
+    argv_out[PROC_MAX_ARGS] = NULL;
     if (uargv == 0) {
         return 0;
     }
@@ -913,6 +920,15 @@ u64 proc_sys_spawn(u64 upath, u64 uargv, u64 upid)
     int len;
 
     if (upath == 0 || upid == 0) {
+        return (u64)(i64)PROC_EFAULT;
+    }
+    /*
+     * 先校验 &pid 再 spawn：proc_spawn 只有成功/失败两种返回，失败时没有
+     * 进程可回收；如果等 spawn 成功后才 copyout，坏指针会让已创建的子进程
+     * 变成无人 wait 的孤儿（旧行为的回归点）。spawn 内部没有调度点，父进程
+     * 的 AS 不会在预校验与 copyout 之间变化。
+     */
+    if (uaccess_range_ok(upid, 4, 1) == 0) {
         return (u64)(i64)PROC_EFAULT;
     }
     len = copyin_str(path, upath, PROC_PATH_MAX);

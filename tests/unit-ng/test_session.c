@@ -627,6 +627,42 @@ static void t_sync(void)
     CHECK(session_sync_list(&t, list, 2, NULL) == 0);
 }
 
+static void t_sync_count_clamp(void)
+{
+    struct session_table t;
+    struct ds_list_entry many[99];
+    u32 wm_tok = 0;
+    u32 app_tok = 0;
+    u32 bound = 0;
+    u32 i;
+
+    session_table_init(&t);
+    (void)session_alloc(&t, 17, SESSION_ROLE_WM, 1, &wm_tok);
+    (void)session_alloc(&t, 18, SESSION_ROLE_APP, 1, &app_tok);
+    (void)session_register_window(&t, wm_tok, 0, 1, "Aster Panel", 1);
+    (void)session_register_window(&t, app_tok, 0, 2, "Demo", 1);
+
+    memset(many, 0, sizeof(many));
+    build_list(&many[0], 99, 1, 17, wm_tok);
+    build_list(&many[1], 99, 2, 18, app_tok);
+    /* 尾部放一堆"外来令牌"：如果 count 没被钳到 DS_LIST_MAX，就会越界读
+     * 这些 entry 并把 token_fail 抬上去（审计发现：IPC body 的 count 是
+     * 攻击者可控的 u32）。 */
+    for (i = DS_LIST_MAX; i < 99u; i++) {
+        build_list(&many[i], 99, 100u + i, 999u, 0xDEAD0000u | i);
+    }
+    CHECK(session_sync_list(&t, many, 99, &bound) == 0);
+    CHECK(bound == 2);
+    CHECK(t.token_fail == 0);
+    CHECK(t.registry_ok == 1);
+
+    /* 边界再确认：恰好 8 条、0 条都正常。 */
+    CHECK(session_sync_list(&t, many, DS_LIST_MAX, &bound) == 0);
+    CHECK(bound == 2);
+    CHECK(session_sync_list(&t, many, 0, &bound) == 0);
+    CHECK(bound == 0);
+}
+
 static void t_retire_ring(void)
 {
     struct session_table t;
@@ -737,6 +773,7 @@ int test_session(void)
     t_table_alloc();
     t_table_lifecycle();
     t_sync();
+    t_sync_count_clamp();
     t_retire_ring();
     t_backoff();
     t_status_text();

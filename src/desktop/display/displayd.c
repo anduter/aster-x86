@@ -168,6 +168,8 @@ static u32 g_hotkey_client;  /* REGISTER_HOTKEY 的客户端 ticket（0 = 没注
 static u32 g_hotkey_surface; /* 注册者的 surface id（INPUT 副本里的 surface_id） */
 static u32 g_hotkey_key;     /* DS_HOTKEY_ANY = 所有键 */
 static u32 g_hotkey_prints;  /* 热键转发证据行计数 */
+static u32 g_hotkey_rejects; /* v3：热键令牌不匹配的拒绝次数 */
+static u32 g_destroy_rejects; /* v3：DESTROY 归属校验拒绝次数 */
 static u32 g_last_list_n = 0xFFFFFFFFu;     /* LIST 证据行去重 */
 static u32 g_last_list_focus = 0xFFFFFFFFu;
 /*
@@ -194,35 +196,41 @@ static struct ds_screen g_screen;
 /* 状态文件（内核自检读；每次状态变化重写一遍）                               */
 /* ------------------------------------------------------------------------- */
 
-static void d_status_append(char *buf, u32 *len, const char *s)
+/*
+ * 状态文本是 k=v 行，**所有值都可能来自外部消息**（WM_STATUS / SESSION_STATUS
+ * 的字段是客户端给的 u32）。最坏情况（全部 10 位十进制）约 573 字节，所以
+ * 缓冲区留 1024，并且追加函数必须按 cap 截断：以前用 512 字节缓冲 + 无界
+ * 追加，伪造一个全 0xFFFFFFFF 的 SESSION_STATUS 就能栈溢出。
+ */
+static void d_status_append(char *buf, u32 cap, u32 *len, const char *s)
 {
-    while (s != NULL && *s != '\0') {
+    while (s != NULL && *s != '\0' && *len + 1u < cap) {
         buf[(*len)++] = *s++;
     }
 }
 
-static void d_status_append_u32(char *buf, u32 *len, u32 v)
+static void d_status_append_u32(char *buf, u32 cap, u32 *len, u32 v)
 {
     char num[12];
     u32 n = d_u32str(v, num);
     u32 i;
 
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n && *len + 1u < cap; i++) {
         buf[(*len)++] = num[i];
     }
 }
 
 static void d_status_write(void)
 {
-    char buf[512];
+    char buf[1024];
     char hex[10];
     u32 len = 0;
     u32 mapped = 0;
     u32 i;
     int fd;
 
-    d_status_append(buf, &len, "up=1 port=1 surface=");
-    d_status_append_u32(buf, &len, ds_table_count(&g_table));
+    d_status_append(buf, (u32)sizeof(buf), &len, "up=1 port=1 surface=");
+    d_status_append_u32(buf, (u32)sizeof(buf), &len, ds_table_count(&g_table));
     for (i = 0; i < ds_table_count(&g_table); i++) {
         struct ds_surface *s = ds_table_at(&g_table, i);
 
@@ -230,16 +238,17 @@ static void d_status_write(void)
             mapped++;
         }
     }
-    d_status_append(buf, &len, " mapped=");
-    d_status_append_u32(buf, &len, mapped);
-    d_status_append(buf, &len, " commits=");
-    d_status_append_u32(buf, &len, g_commits);
-    d_status_append(buf, &len, " focus=");
-    d_status_append_u32(buf, &len, ds_table_focus_id(&g_table));
-    d_status_append(buf, &len, " input=");
-    d_status_append_u32(buf, &len, g_inputs);
-    d_status_append(buf, &len, " hotkey=");
-    d_status_append_u32(buf, &len, (g_hotkey_client != 0) ? 1u : 0u);
+    d_status_append(buf, (u32)sizeof(buf), &len, " mapped=");
+    d_status_append_u32(buf, (u32)sizeof(buf), &len, mapped);
+    d_status_append(buf, (u32)sizeof(buf), &len, " commits=");
+    d_status_append_u32(buf, (u32)sizeof(buf), &len, g_commits);
+    d_status_append(buf, (u32)sizeof(buf), &len, " focus=");
+    d_status_append_u32(buf, (u32)sizeof(buf), &len, ds_table_focus_id(&g_table));
+    d_status_append(buf, (u32)sizeof(buf), &len, " input=");
+    d_status_append_u32(buf, (u32)sizeof(buf), &len, g_inputs);
+    d_status_append(buf, (u32)sizeof(buf), &len, " hotkey=");
+    d_status_append_u32(buf, (u32)sizeof(buf), &len,
+                        (g_hotkey_client != 0) ? 1u : 0u);
     /* WP3-3：带 role_token 的 surface 数（会话/令牌证据）。 */
     {
         u32 tok = 0;
@@ -251,68 +260,71 @@ static void d_status_write(void)
                 tok++;
             }
         }
-        d_status_append(buf, &len, " tok=");
-        d_status_append_u32(buf, &len, tok);
+        d_status_append(buf, (u32)sizeof(buf), &len, " tok=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, tok);
     }
     /* WP3-2：WM 的自治计数（内核 wp32 自检读同一份状态文件）。 */
-    d_status_append(buf, &len, " wm=");
-    d_status_append_u32(buf, &len, (g_wm_seen != 0) ? 1u : 0u);
+    d_status_append(buf, (u32)sizeof(buf), &len, " wm=");
+    d_status_append_u32(buf, (u32)sizeof(buf), &len,
+                        (g_wm_seen != 0) ? 1u : 0u);
     if (g_wm_seen != 0) {
-        d_status_append(buf, &len, " wmtasks=");
-        d_status_append_u32(buf, &len, g_wm_tasks);
-        d_status_append(buf, &len, " wmfocus=");
-        d_status_append_u32(buf, &len, g_wm_focus);
-        d_status_append(buf, &len, " wmswitch=");
-        d_status_append_u32(buf, &len, g_wm_switch);
-        d_status_append(buf, &len, " wmlast=");
-        d_status_append_u32(buf, &len, g_wm_lastswitch);
-        d_status_append(buf, &len, " wmlaunch=");
-        d_status_append_u32(buf, &len, g_wm_launch);
-        d_status_append(buf, &len, " wmlastpid=");
-        d_status_append_u32(buf, &len, g_wm_lastpid);
+        d_status_append(buf, (u32)sizeof(buf), &len, " wmtasks=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_wm_tasks);
+        d_status_append(buf, (u32)sizeof(buf), &len, " wmfocus=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_wm_focus);
+        d_status_append(buf, (u32)sizeof(buf), &len, " wmswitch=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_wm_switch);
+        d_status_append(buf, (u32)sizeof(buf), &len, " wmlast=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_wm_lastswitch);
+        d_status_append(buf, (u32)sizeof(buf), &len, " wmlaunch=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_wm_launch);
+        d_status_append(buf, (u32)sizeof(buf), &len, " wmlastpid=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_wm_lastpid);
     }
-    d_status_append(buf, &len, " px=0x");
+    d_status_append(buf, (u32)sizeof(buf), &len, " px=0x");
     (void)d_hexstr(g_px, hex);
     for (i = 0; hex[i] != '\0'; i++) {
-        buf[len++] = hex[i];
+        if (len + 1u < (u32)sizeof(buf)) {
+            buf[len++] = hex[i];
+        }
     }
     /*
      * WP3-3：会话状态（k=v；前缀 s 避免和显示/WM 字段冲突）。只有 sessiond
      * 报过 SESSION_STATUS 才写，wp31/wp32 的旧状态行保持原样。
      */
     if (g_sess_seen != 0) {
-        d_status_append(buf, &len, " sess=1 spid=");
-        d_status_append_u32(buf, &len, g_sess.pid);
-        d_status_append(buf, &len, " sdpid=");
-        d_status_append_u32(buf, &len, g_sess.dpid);
-        d_status_append(buf, &len, " sprocs=");
-        d_status_append_u32(buf, &len, g_sess.procs);
-        d_status_append(buf, &len, " sapps=");
-        d_status_append_u32(buf, &len, g_sess.apps);
-        d_status_append(buf, &len, " swindows=");
-        d_status_append_u32(buf, &len, g_sess.windows);
-        d_status_append(buf, &len, " stokens=");
-        d_status_append_u32(buf, &len, g_sess.tokens);
-        d_status_append(buf, &len, " slaunches=");
-        d_status_append_u32(buf, &len, g_sess.launches);
-        d_status_append(buf, &len, " skills=");
-        d_status_append_u32(buf, &len, g_sess.kills);
-        d_status_append(buf, &len, " sexits=");
-        d_status_append_u32(buf, &len, g_sess.exits);
-        d_status_append(buf, &len, " sreaps=");
-        d_status_append_u32(buf, &len, g_sess.reaps);
-        d_status_append(buf, &len, " srestarts=");
-        d_status_append_u32(buf, &len, g_sess.restarts);
-        d_status_append(buf, &len, " swmpid=");
-        d_status_append_u32(buf, &len, g_sess.wmpid);
-        d_status_append(buf, &len, " swmstate=");
-        d_status_append_u32(buf, &len, g_sess.wmstate);
-        d_status_append(buf, &len, " sapppid=");
-        d_status_append_u32(buf, &len, g_sess.apppid);
-        d_status_append(buf, &len, " stokenfail=");
-        d_status_append_u32(buf, &len, g_sess.tokenfail);
-        d_status_append(buf, &len, " sregistry=");
-        d_status_append_u32(buf, &len, g_sess.registry);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sess=1 spid=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.pid);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sdpid=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.dpid);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sprocs=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.procs);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sapps=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.apps);
+        d_status_append(buf, (u32)sizeof(buf), &len, " swindows=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.windows);
+        d_status_append(buf, (u32)sizeof(buf), &len, " stokens=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.tokens);
+        d_status_append(buf, (u32)sizeof(buf), &len, " slaunches=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.launches);
+        d_status_append(buf, (u32)sizeof(buf), &len, " skills=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.kills);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sexits=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.exits);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sreaps=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.reaps);
+        d_status_append(buf, (u32)sizeof(buf), &len, " srestarts=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.restarts);
+        d_status_append(buf, (u32)sizeof(buf), &len, " swmpid=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.wmpid);
+        d_status_append(buf, (u32)sizeof(buf), &len, " swmstate=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.wmstate);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sapppid=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.apppid);
+        d_status_append(buf, (u32)sizeof(buf), &len, " stokenfail=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.tokenfail);
+        d_status_append(buf, (u32)sizeof(buf), &len, " sregistry=");
+        d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.registry);
     }
     buf[len++] = '\n';
     buf[len] = '\0';
@@ -562,6 +574,16 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
         d_put("ng: surface create FAIL (geom)\r\n");
         return;
     }
+    /*
+     * v3 审计修复：非 0 令牌必须是合法形态（role/seq/nonce 位域）；否则
+     * 会话注册表同步会把它当成"外来令牌"，而且坏令牌还能绕过后面的归属
+     * 比较。0 仍然表示旧客户端（v1/v2 / 直连模式）。
+     */
+    if (token != 0 && session_token_valid(token) == 0) {
+        d_reply_status(from, DS_MSG_CREATE_REPLY, DS_EINVAL, m->seq);
+        d_put("ng: surface create FAIL (token)\r\n");
+        return;
+    }
     pages64 = ((u64)w * (u64)h * 4ULL + (u64)DS_SHM_PAGE_SIZE - 1ULL) /
               (u64)DS_SHM_PAGE_SIZE;
     if (pages64 == 0 || pages64 > (u64)DS_SHM_PAGES_MAX) {
@@ -665,6 +687,22 @@ static void d_handle_list(const struct ds_msg *m, u32 from)
 /* WP3-2：WM 注册全局热键（key = DS_HOTKEY_ANY 表示所有键先给 WM 一份）。 */
 static void d_handle_register_hotkey(const struct ds_msg *m, u32 from)
 {
+    /*
+     * v3：请求者令牌（v2 的 reserved 字段）。会话模式下热键通道属于 WM：
+     * 已经见过 WM 面板后，只接受 WM 的令牌 —— 否则任何客户端都能把全局
+     * 按键副本抢走，WM 的 Tab/1..9 就失灵了。
+     */
+    u32 token = (m->version >= 3u) ? m->u.register_hotkey.token : 0u;
+
+    if (!ds_hotkey_token_ok(g_wm_token, token)) {
+        g_hotkey_rejects++;
+        d_put("ng: hotkey reject ok (token=");
+        d_puthex(token);
+        d_put(" n=");
+        d_putdec(g_hotkey_rejects);
+        d_put(")\r\n");
+        return;
+    }
     g_hotkey_client = from;
     g_hotkey_surface = m->u.register_hotkey.surface_id;
     g_hotkey_key = m->u.register_hotkey.key;
@@ -789,14 +827,34 @@ static void d_handle_focus(const struct ds_msg *m)
     d_status_write();
 }
 
-static void d_handle_destroy(const struct ds_msg *m)
+static void d_handle_destroy(const struct ds_msg *m, u32 from)
 {
-    struct ds_surface *sf = ds_table_find(&g_table, m->u.destroy.surface_id);
+    u32 id = m->u.destroy.surface_id;
+    u32 token = (m->version >= 3u) ? m->u.destroy.token : 0u;
+    struct ds_surface *sf = ds_table_find(&g_table, id);
+    int rc;
 
+    /*
+     * v3 归属校验：只有窗口自己的令牌、WM 的令牌，或（token=0 的旧客户端）
+     * 创建者端口能销毁。以前任何客户端按 id 就能销毁任何窗口（含 WM 面板），
+     * 既能 DoS 别的应用，也能把 g_wm_token 清掉。
+     */
+    rc = ds_table_destroy_checked(&g_table, id, token, g_wm_token, from);
+    if (rc != DS_OK) {
+        g_destroy_rejects++;
+        d_put("ng: destroy reject ok (id=");
+        d_putdec(id);
+        d_put(" token=");
+        d_puthex(token);
+        d_put(" n=");
+        d_putdec(g_destroy_rejects);
+        d_put(")\r\n");
+        d_status_write();
+        return;
+    }
     if (sf != NULL && sf->token != 0 && sf->token == g_wm_token) {
         g_wm_token = 0; /* WM 面板没了：它的跨窗口权限也失效 */
     }
-    (void)ds_table_destroy(&g_table, m->u.destroy.surface_id);
     g_last_list_n = 0xFFFFFFFFu;
     d_status_write();
 }
@@ -827,7 +885,7 @@ static void d_handle_msg(int type, const struct ds_msg *m, u32 from)
         d_handle_focus(m);
         break;
     case DS_MSG_DESTROY:
-        d_handle_destroy(m);
+        d_handle_destroy(m, from);
         break;
     case DS_MSG_LIST:
         d_handle_list(m, from);

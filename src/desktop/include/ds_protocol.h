@@ -185,7 +185,7 @@ struct ds_commit_body {
 
 struct ds_destroy_body {
     u32 surface_id;
-    u32 reserved;
+    u32 token; /* v3：请求者令牌（v1/v2 的 reserved 必须 0） */
 };
 
 struct ds_focus_body {
@@ -233,7 +233,7 @@ struct ds_register_hotkey_body {
     u32 surface_id; /* 注册者的 surface（INPUT 副本里的 surface_id） */
     u32 key;        /* DS_HOTKEY_ANY 或某个 ASCII */
     u32 flags;      /* 保留，必须 0 */
-    u32 reserved;
+    u32 token;      /* v3：请求者 role_token；v2 的 reserved 必须 0 */
 };
 
 /*
@@ -350,6 +350,14 @@ int ds_msg_decode(const void *buf, u32 len, struct ds_msg *out);
 
 /* 取 body 长度时只允许已知类型，且 body 与常量表一致。 */
 int ds_msg_status_ok(const struct ds_msg *m);
+
+/*
+ * v3：REGISTER_HOTKEY 的令牌校验（纯函数，host 单测覆盖）。
+ *   - 还没有 WM 面板（wm_token == 0）：接受任意令牌（v2 直连模式 / 启动早期）；
+ *   - 已经有 WM 面板：只接受 WM 自己的令牌（防止后来者抢占全局热键通道）。
+ * 返回 1 = 允许，0 = 拒绝。
+ */
+int ds_hotkey_token_ok(u32 wm_token, u32 token);
 
 /* ---- 标题打包（4 个 u32 = 16 字节，NUL padding） ------------------------- */
 void ds_title_set(u32 out[DS_TITLE_WORDS], const char *s);

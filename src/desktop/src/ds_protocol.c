@@ -326,3 +326,13 @@ int ds_msg_status_ok(const struct ds_msg *m)
 {
     return (m != NULL && m->status == 0) ? 1 : 0;
 }
+
+int ds_hotkey_token_ok(u32 wm_token, u32 token)
+{
+    /* 没有 WM 面板时（v2 直连 / 启动早期）保持旧行为。 */
+    if (wm_token == 0) {
+        return 1;
+    }
+    /* 会话模式下热键通道属于 WM：其它令牌（含 0）一律拒绝。 */
+    return (token == wm_token) ? 1 : 0;
+}
