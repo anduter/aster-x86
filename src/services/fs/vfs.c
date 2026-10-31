@@ -654,6 +654,33 @@ static struct vfs_fd *fd_lookup(struct vfs_ctx *c, int fd)
     return &c->fds[slot];
 }
 
+/*
+ * 回滚一个已分配但未返回给用户的 fd（O_TRUNC/retain 失败路径用）。
+ * 递增 generation 让任何泄漏的整数句柄失效。
+ */
+static void fd_release_slot(struct vfs_ctx *c, int fd)
+{
+    u32 slot = vfs_fd_slot_of(fd);
+    u32 next;
+
+    if (c == NULL || slot >= VFS_FD_MAX || c->fds[slot].used == 0) {
+        return;
+    }
+    next = (c->fds[slot].gen + 1u) & VFS_GEN_MASK;
+    if (next == 0) {
+        next = 1;
+    }
+    c->fds[slot].gen = next;
+    c->fds[slot].used = 0;
+    c->fds[slot].node = NULL;
+    c->fds[slot].flags = 0;
+    c->fds[slot].offset = 0;
+    if (c->live > 0) {
+        c->live--;
+    }
+    c->closes++;
+}
+
 static int fd_alloc(struct vfs_ctx *c, struct vfs_node *node, u32 flags,
                     int *out_fd)
 {
@@ -776,9 +803,25 @@ int vfs_umount(const char *path)
 /* 打开 / 读 / 写 / 关闭                                                     */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * 回滚 vfs_open 的 O_CREAT 副作用：fd 分配/截断/retain 失败时，新建的节点
+ * 不能留给用户（open 返回了错误，文件却存在）。
+ */
+static void vfs_drop_created(struct vfs_node *dir, const char *name, u32 len)
+{
+    if (dir == NULL || name == NULL || dir->ops == NULL ||
+        dir->ops->unlink == NULL) {
+        return;
+    }
+    (void)dir->ops->unlink(dir->fs_ctx, dir, name, len);
+}
+
 int vfs_open(struct vfs_ctx *c, const char *path, u32 flags, u32 mode)
 {
     struct vfs_node *node = NULL;
+    struct vfs_node *created_dir = NULL;
+    char created_name[VFS_NAME_MAX];
+    u32 created_len = 0;
     u32 acc;
     int created = 0;
     int rc;
@@ -818,6 +861,9 @@ int vfs_open(struct vfs_ctx *c, const char *path, u32 flags, u32 mode)
             return rc;
         }
         created = 1;
+        created_dir = dir;
+        created_len = str_len(name);
+        mem_copy(created_name, name, (u64)created_len + 1u);
     } else if (rc != VFS_OK) {
         return rc;
     }
@@ -858,27 +904,44 @@ int vfs_open(struct vfs_ctx *c, const char *path, u32 flags, u32 mode)
             return rc;
         }
     }
+    /*
+     * 先分配 fd，再做有副作用的操作（O_TRUNC / retain）：
+     *   - fd 表满时 open() 返回 EMFILE，且必须**不截断**已有文件；
+     *   - O_CREAT 新建后任何后续失败都要回滚 unlink（失败的 open 不留文件）。
+     */
+    rc = fd_alloc(c, node, flags, &fd);
+    if (rc != VFS_OK) {
+        if (created != 0) {
+            vfs_drop_created(created_dir, created_name, created_len);
+        }
+        return rc;
+    }
     if ((flags & VFS_O_TRUNC) != 0 && node->type == VFS_NODE_FILE) {
         if (node->ops == NULL || node->ops->truncate == NULL) {
+            fd_release_slot(c, fd);
+            if (created != 0) {
+                vfs_drop_created(created_dir, created_name, created_len);
+            }
             return VFS_EINVAL;
         }
         rc = node->ops->truncate(node->fs_ctx, node, 0);
         if (rc != VFS_OK) {
+            fd_release_slot(c, fd);
+            if (created != 0) {
+                vfs_drop_created(created_dir, created_name, created_len);
+            }
             return rc;
         }
     }
     if (node->ops != NULL && node->ops->retain != NULL) {
         rc = node->ops->retain(node->fs_ctx, node);
         if (rc != VFS_OK) {
+            fd_release_slot(c, fd);
+            if (created != 0) {
+                vfs_drop_created(created_dir, created_name, created_len);
+            }
             return rc;
         }
-    }
-    rc = fd_alloc(c, node, flags, &fd);
-    if (rc != VFS_OK) {
-        if (node->ops != NULL && node->ops->release != NULL) {
-            node->ops->release(node->fs_ctx, node);
-        }
-        return rc;
     }
     return fd;
 }

@@ -500,6 +500,51 @@ static void t_fd_table(void)
     }
 }
 
+/* 6b. open 失败不留副作用：fd 表满时不能截断已有文件 / 不能创建新文件。 */
+static void t_open_side_effects(void)
+{
+    struct vfs_stat st;
+    int fds[VFS_FD_MAX];
+    int fd;
+    u32 i;
+
+    env_reset();
+    put_file(&g_ctx, "/keep", "hello", 5);
+    put_file(&g_ctx, "/victim", "hello", 5);
+
+    for (i = 0; i < VFS_FD_MAX; i++) {
+        fds[i] = vfs_open(&g_ctx, "/keep", VFS_O_RDONLY, 0);
+        CHECK(fds[i] > 0);
+    }
+    CHECK(vfs_fd_live(&g_ctx) == VFS_FD_MAX);
+
+    /* O_TRUNC 的 open 在 fd 分配失败时不能截断文件。 */
+    CHECK(vfs_open(&g_ctx, "/victim", VFS_O_RDWR | VFS_O_TRUNC, 0) ==
+          VFS_EMFILE);
+    CHECK(vfs_stat(&g_ctx, "/victim", &st) == VFS_OK && st.size == 5);
+
+    /* O_CREAT 的 open 在 fd 分配失败时不能留下新文件。 */
+    CHECK(vfs_open(&g_ctx, "/newfile", VFS_O_CREAT | VFS_O_RDWR, 0644) ==
+          VFS_EMFILE);
+    CHECK(vfs_stat(&g_ctx, "/newfile", &st) == VFS_ENOENT);
+
+    for (i = 0; i < VFS_FD_MAX; i++) {
+        CHECK(vfs_close(&g_ctx, fds[i]) == VFS_OK);
+    }
+    CHECK(vfs_fd_live(&g_ctx) == 0);
+    CHECK(g_ctx.fds[0].used == 0 && g_ctx.fds[VFS_FD_MAX - 1].used == 0);
+
+    /* 表空后同样的 open 成功；victim 此前未被破坏。 */
+    fd = vfs_open(&g_ctx, "/victim", VFS_O_RDWR | VFS_O_TRUNC, 0);
+    CHECK(fd > 0);
+    CHECK(vfs_close(&g_ctx, fd) == VFS_OK);
+    CHECK(vfs_stat(&g_ctx, "/victim", &st) == VFS_OK && st.size == 0);
+    fd = vfs_open(&g_ctx, "/newfile", VFS_O_CREAT | VFS_O_RDWR, 0644);
+    CHECK(fd > 0);
+    CHECK(vfs_close(&g_ctx, fd) == VFS_OK);
+    CHECK(vfs_stat(&g_ctx, "/newfile", &st) == VFS_OK);
+}
+
 /* ------------------------------------------------------------------------- */
 /* 7. 权限                                                                   */
 /* ------------------------------------------------------------------------- */
@@ -606,6 +651,7 @@ int test_vfs(void)
     t_data();
     t_symlink();
     t_fd_table();
+    t_open_side_effects();
     t_perm();
     t_dir();
     return 0;
