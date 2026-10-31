@@ -1,5 +1,5 @@
 /*
- * ng WP1-4/1-5 host 单测入口：PMM / heap / memmap / 调度器状态机。
+ * ng WP1-4/1-5/1-6 host 单测入口：PMM / heap / memmap / 调度器 / 句柄/IPC。
  *
  * 编译成本机 PE（Windows clang），不链接内核，也不需要 QEMU。
  */
@@ -11,6 +11,7 @@ int test_pmm(void);
 int test_heap(void);
 int test_memmap(void);
 int test_sched(void);
+int test_ipc(void);
 
 int ut_checks;
 int ut_failures;
@@ -30,6 +31,7 @@ int main(void)
     test_heap();
     test_memmap();
     test_sched();
+    test_ipc();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);
     return (ut_failures == 0) ? 0 : 1;

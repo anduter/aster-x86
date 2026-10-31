@@ -19,6 +19,7 @@
 #include "syscall.h"
 
 #include "io.h"
+#include "ipc.h"
 #include "paging.h"
 #include "serial.h"
 
@@ -141,17 +142,33 @@ void syscall_dispatch(struct syscall_frame *f)
     }
 
     switch (f->rax) {
-    case 0:
+    case NG_SYS_WRITE:
         serial_puts(syscall_from_ring3 ? "ng: syscall write (ring3)\r\n"
                                        : "ng: syscall write (ring0)\r\n");
         f->rax = 0;
         break;
-    case 1:
+    case NG_SYS_EXIT:
         serial_puts("ng: syscall exit test\r\n");
         f->rax = 0;
         if (syscall_from_ring3) {
             syscall_want_exit = 1;
         }
+        break;
+    /* WP1-6：IPC / 句柄。用户指针与长度在 ipc_sys_*() 里校验。 */
+    case NG_SYS_PORT_CREATE:
+        f->rax = ipc_sys_create(f->rdi);
+        break;
+    case NG_SYS_PORT_SEND:
+        f->rax = ipc_sys_send(f->rdi, f->rsi, f->rdx, f->r10);
+        break;
+    case NG_SYS_PORT_RECV:
+        f->rax = ipc_sys_recv(f->rdi, f->rsi, f->rdx, f->r10);
+        break;
+    case NG_SYS_PORT_REPLY:
+        f->rax = ipc_sys_reply(f->rdi, f->rsi, f->rdx, f->r10);
+        break;
+    case NG_SYS_PORT_CLOSE:
+        f->rax = ipc_sys_close(f->rdi);
         break;
     default:
         f->rax = (u64)-1;

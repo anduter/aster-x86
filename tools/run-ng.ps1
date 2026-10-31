@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP1-5: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP1-6: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
 # 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
@@ -28,7 +28,14 @@
 #   ng: sched create ok (3) / ng: sched order ok (ABCABCABC)
 #   ng: sched switch ok (rounds>=6) / ng: sched exit reap ok
 #   ng: sched sleep/wake ok / ng: WP1-5 selftest PASS
-# 以及 4 条正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数。
+# WP1-6 追加（IPC/句柄/端口）：
+#   ng: ipc ping/pong ok (n=20) / ng: ipc ticket ok
+#   ng: ipc queue full ok / ng: ipc timeout ok
+#   ng: ipc bad handle rejected / ng: ipc close wakes waiter ok
+#   ng: ipc user ptr ok / ng: ipc handle table ok (slots=64 ports=16)
+#   ng: WP1-6 selftest PASS
+# 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
+# ipc 统计行。
 #
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
@@ -87,14 +94,24 @@ if ($Panic) {
         'ng: sched switch ok (rounds>=6)',
         'ng: sched exit reap ok',
         'ng: sched sleep/wake ok',
-        'ng: WP1-5 selftest PASS'
+        'ng: WP1-5 selftest PASS',
+        'ng: ipc ping/pong ok (n=20)',
+        'ng: ipc ticket ok',
+        'ng: ipc queue full ok',
+        'ng: ipc timeout ok',
+        'ng: ipc bad handle rejected',
+        'ng: ipc close wakes waiter ok',
+        'ng: ipc user ptr ok',
+        'ng: ipc handle table ok (slots=64 ports=16)',
+        'ng: WP1-6 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
         'ng: tss rsp0=0x[0-9a-f]+ ist1=0x[0-9a-f]+ idt8\.ist=1',
         'ng: syscall msr star=0x[0-9a-f]+ lstar=0x[0-9a-f]+ fmask=0x[0-9a-f]+',
         'ng: memmap ok \(usable=[0-9]+ pages\)',
-        '(?s)ng: thread A 0.*?ng: thread B 0.*?ng: thread C 0'
+        '(?s)ng: thread A 0.*?ng: thread B 0.*?ng: thread C 0',
+        'ng: ipc stat sends=[0-9]+ recvs=[0-9]+ replies=20 timeouts=[0-9]+ eagains=[0-9]+ bad=[0-9]+ live=0'
     )
     $failPatterns = @(
         'ng: WP1-2 selftest FAIL',
@@ -104,7 +121,9 @@ if ($Panic) {
         'ng: heap .* FAIL',
         'ng: WP1-4 selftest FAIL',
         'ng: sched .* FAIL',
-        'ng: WP1-5 selftest FAIL'
+        'ng: WP1-5 selftest FAIL',
+        'ng: ipc .* FAIL',
+        'ng: WP1-6 selftest FAIL'
     )
 }
 
@@ -163,7 +182,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP1-5) ==='
+Write-Host '=== run-ng (WP1-6) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }

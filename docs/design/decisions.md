@@ -180,3 +180,40 @@
   用 `iretq` 构造首帧——要伪造 SS/RSP/RFLAGS 三件套且容易对错齐，`jmp +
   call` trampoline 只依赖 C ABI，否决；守护页——需拆 2 MiB 映射，超出
   WP1-5 范围，先 canary。
+
+## ADR-018：IPC 用「句柄表(ticket) + 有界端口队列 + 静态等待者池」；阻塞走 `thread_sleep/thread_wake`，close 延迟回收
+
+- **决策**：WP1-6 的控制面 IPC 由三层组成：`handle.[ch]` 的句柄表（64 槽，
+  `handle = (generation<<16)|slot`，类型 PORT/THREAD/FILE，close 递增
+  generation 跳过 0）、`ipc_core.c` 的端口状态机（16 个端口，`depth` 默认 16
+  上限 64，消息头固定 16B `{type,len,from,flags}` + payload ≤4KiB，FIFO 环形
+  队列）、`ipc.c` 的内核胶水（`struct ipc_env` 6 个钩子：TSC/`thread_sleep`/
+  `thread_wake`/kmalloc/kfree/tid，加上用户指针页级 U/S 校验与 SMAP
+  `stac/clac` copyin/out）。**ticket 与端口句柄同构**：`(port_generation<<16)|
+  slot` 就是 `port_create` 的返回值，客户端把它放进消息头 `from` 交给服务端，
+  `reply(ticket)` 解析后再交叉校验 `port->slot/gen`。阻塞用静态等待者池
+  （12 条，recv/send 两条 FIFO 链，`notified` 位保证分醒不同等待者），
+  `thread_sleep` 阻塞、`thread_wake` 显式唤醒；超时单位是 TSC tick（0=非阻塞
+  `EAGAIN`，~0=永久，其余 `ETIMEDOUT`）。close 先失效句柄、清队列、唤醒全部
+  等待者（`ECANCELED`）；有等待者时端口延迟到等待者退出后的下一次 IPC 操作
+  才回收。syscall 号 10–14 定义在 `src/ng/syscall.h`，用户指针先 `pg_walk`
+  校验 P/U（recv 还要 W）再拷贝。
+- **理由**：单进程 + 单句柄表下，ticket=句柄是最少系统调用、最少状态的方案，
+  generation 已经能挡住 close 后旧 ticket；`reply` 的 slot/gen 交叉校验为将来
+  跨进程 cap 表留了挂点。静态等待者池让阻塞路径零分配（分配失败可回退），
+  池满返回 `EAGAIN` 而不是死等；延迟回收避免“唤醒别人后立刻 free 别人还在
+  读的端口对象”。超时复用 WP1-5 的 TSC deadline，不引入频率校准。单核、
+  IF=0、显式调度点下无锁是安全的，与调度器/堆现状一致。
+- **影响**：`src/ng/handle.[ch]`、`ipc.[ch]`、`ipc_core.c`、`ipc_selftest.[ch]`
+  新增；`syscall.[ch]` 加 10–14；`main.c` 加 `ipc_init()` 与 WP1-6 自检；
+  `build-ng.ps1` 17→21 步；`run-ng.ps1` 加 9 条固定行 + ipc 统计正则 + 失败
+  模式；`tools/unit-ng.ps1` 加 `handle.c`/`ipc_core.c`/`test_ipc.c`，host 单测
+  390→810 checks；`docs/design/ipc-ng.md` 记录设计。旧 32 位树完全不改。
+- **替代**：让内核自动填 `from`（每线程默认回复端口）——新增进程级概念，
+  超出 WP1-6，先由发送方填、内核校验存活；ticket 用独立命名空间
+  `(port_slot<<16)|port_gen`——客户端拿到 ticket 还需要额外系统调用，
+  单进程下没有收益；同时保留句柄表 slot 与端口槽两套编号——多一层映射且
+  自检/单测更难构造，否决；close 立即 `free(ring)`——被唤醒的等待者还要读
+  `closed`，会 use-after-free，否决；等待者动态分配——阻塞失败路径无法
+  干净回退，否决；超时用毫秒——没有 TSC 频率校准，先 tick。
+

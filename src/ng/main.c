@@ -1,6 +1,6 @@
 /*
- * ng WP1-3/1-4/1-5: 64 位 C 入口（内存图/PMM -> 页表 -> GDT/TSS -> IDT ->
- * syscall -> 内存/heap 自检 -> 线程/调度自检）。
+ * ng WP1-3/1-4/1-5/1-6: 64 位 C 入口（内存图/PMM -> 页表 -> GDT/TSS -> IDT ->
+ * syscall -> 内存/heap 自检 -> 线程/调度自检 -> IPC/句柄自检）。
  *
  * 顺序是有依赖的：
  *   1. mem_boot_init()：解析 PVH/multiboot2 内存图、初始化 PMM、保留内核
@@ -11,12 +11,18 @@
  *   5. 受控异常与 syscall（ring0、ring3）自检（WP1-3）；
  *   6. heap 与“页表池来自 PMM”自检（WP1-4）；
  *   7. 线程/上下文切换/round-robin/exit 回收/sleep-wake 自检（WP1-5，栈从
- *      heap 分配，所以必须排在 WP1-4 之后）。
+ *      heap 分配，所以必须排在 WP1-4 之后）；
+ *   8. IPC/句柄/端口自检（WP1-6，需要调度器的阻塞/唤醒，排在 WP1-5 之后）。
+ *
+ * ipc_init() 不分配内存，只把端口表/句柄表清零并绑定环境钩子，所以放在
+ * 最前面；真正创建端口在自检里（heap 已就绪）。
  *
  * 想验证 panic 路径：build-ng.ps1 -PanicTest 会在所有正常检查后触发一条
  * 不可恢复的 #UD（普通 build 不定义 NG_PANIC_TEST，行为不变）。
  */
 #include "gdt.h"
+#include "ipc.h"
+#include "ipc_selftest.h"
 #include "mem_selftest.h"
 #include "paging.h"
 #include "sched_selftest.h"
@@ -33,6 +39,7 @@ void kmain(u64 mb_info)
 
     serial_init();
     serial_puts("ng: hello 64-bit\r\n");
+    ipc_init();
 
     /* WP1-4 前半：内存图 + PMM。必须在建页表之前（页表页从 PMM 来）。 */
     mem_fails = mem_boot_init(mb_info);
@@ -101,6 +108,24 @@ void kmain(u64 mb_info)
     }
 
     serial_puts("ng: WP1-5 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+
+    /* WP1-6：句柄表 + 端口 + 阻塞/超时/close 唤醒 + 用户指针校验。
+     * 需要 WP1-5 的调度器（阻塞用 thread_sleep，唤醒用 thread_wake）。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += ipc_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP1-6 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP1-6 selftest ");
     if (fails == 0) {
         serial_puts("PASS\r\n");
     } else {
