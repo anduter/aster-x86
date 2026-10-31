@@ -75,9 +75,10 @@ E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP
 | WP2-6 | shell 移植 | src/apps | 64 位 shell 可交互 |
 | WP2-7 | parity 套件 100 项 | tests/ | 100 项通过 |
 
-E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5 完成**（tag 待 E2
-收口时打）。`src/services/fs` 成为第一个真正落地的 L1 服务域；`src/drivers`
-成为第一个 L1D 设备域；`src/services/{auth,log,pkg}` 补齐 L1 认证/日志/包最小集：
+E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5、WP2-6 完成**（tag
+待 E2 收口时打）。`src/services/fs` 成为第一个真正落地的 L1 服务域；
+`src/drivers` 成为第一个 L1D 设备域；`src/services/{auth,log,pkg}` 补齐 L1
+认证/日志/包最小集；`src/apps/shell` 成为第一个独立编译的 L3 应用：
 
 - VFS 核心（挂载/节点/路径/fd/权限，负 errno）+ ramfs（节点/目录项/页链，
   1 MiB/文件）+ syscall 20..27（用户指针经 uaccess）+ ring3 demo
@@ -130,15 +131,34 @@ E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5 完成**（t
     (uid=0)` / `ng: auth login alice ok (uid=1000)` / `ng: auth bad password
     rejected` / `ng: log ring ok (bytes=...)` / `ng: dmesg syscall ok` /
     `ng: pkg list ok (n=1)` / `ng: pkg verify ok` / `ng: WP2-5 selftest PASS`；
+- **WP2-6 用户态 shell（`src/apps/shell/shell.c`，L3，独立 ELF64）**：`ng> `
+  提示符 + `readkey` 行编辑（可打印/Backspace/Enter/Ctrl-L 清屏/Ctrl-C 丢弃/
+  Ctrl-U 删行/Ctrl-D 退出）；命令 `help`、`ls [path]`、`cat <file>`、
+  `echo <text> [> path]`、`mkdir`、`rm`、`cd`、`pwd`、`stat`、`dmesg [-n N]`、
+  `log <tag> <msg>`、`pkg list|verify`、`login`、`clear`、`exit [code]`；
+  未知命令/缺参/文件不存在打印带 errno 文本的友好错误并把状态置 1（`exit`
+  无参时返回该状态），不 panic；文件操作全部走 syscall 20..27（先把 shell 自己
+  的 cwd 解析成绝对路径）、auth 31、log 32/33、pkg 34/35、输入 30；
+  `tools/build-ng.ps1` 把 shell.c 编译成 22760 字节 ELF64（3 PT_LOAD，base
+  0x40000000）嵌入内核，启动在 ring3 hello 之后拉起交互 shell
+  （`-Smoke` 跳过 shell 只跑 hello）；`tools/run-ng.ps1` 经 QMP
+  `input-send-event` 逐字符注入
+  `help -> ls / -> cat /etc/passwd -> echo hi > /tmp/s.txt -> cat /tmp/s.txt ->
+  dmesg -n 3 -> pkg list -> exit` 并校验
+  `ng: shell ready` / `ls|cat|write|dmesg|pkg|exit ok` /
+  `ng: shell exit (code=0 ...)` / `ng: shell session file ok (s.txt=3)` /
+  `ng: WP2-6 selftest PASS`；顺带修正 `isr.S` ring3 返回未恢复 callee-saved
+  寄存器（shell 的 rbx 指向用户栈导致 `*out` 写 #PF）的 WP1-7 潜在缺陷；
 - host 单测 1085 → 1438（WP2-1）→ 1824（WP2-2）→ 2290（WP2-3，+466）→
-  2522（WP2-4 +232）→ **2791 checks**（WP2-5 +269，含 SHA-256 标准向量/1M
-  字节、auth 登录/锁定、log 精确 64 KiB 溢出、pkg 清单解析/哈希/篡改）；
+  2522（WP2-4 +232）→ 2791（WP2-5 +269）→ **3108 checks**（WP2-6 +317，
+  tokenizer/cwd 解析/重定向/行编辑/15 个命令/错误分支/ls 截断/fd 泄漏）；
   旧 32 位 305/305；
 - 设计/限制见 `docs/design/vfs-ng.md`、`fat16-ng.md`、`display-input-ng.md`、
-  `block-ng.md`、`auth-log-pkg-ng.md`，证据见 `docs/claims/ng-WP2-1.md`、
-  `ng-WP2-2.md`、`ng-WP2-3.md`、`ng-WP2-4.md`、`ng-WP2-5.md`。
-  auth/log/pkg 完成；下一步 shell（WP2-6）与 parity（WP2-7）；fb/输入不做
-  IRQ/鼠标（E3/C 之后）。
+  `block-ng.md`、`auth-log-pkg-ng.md`、`shell-ng.md`，证据见
+  `docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、`ng-WP2-3.md`、`ng-WP2-4.md`、
+  `ng-WP2-5.md`、`ng-WP2-6.md`。64 位 shell 完成；下一步 parity 套件
+  （WP2-7）与 E2 收口（tag `ng-e2`）；fb/输入不做 IRQ/鼠标（E3/C 之后），
+  shell 的 TTY/屏幕输出留给 E3 display server。
 
 ### E3
 

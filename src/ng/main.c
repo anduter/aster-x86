@@ -22,7 +22,9 @@
  *      挂到 /mnt/disk；ring3 demo 读 HELLO.TXT / 写 DISK.TXT，所以排在
  *      WP1-7 之前）；
  *  12. ELF64 加载器 + ring3 hello（WP1-7：PMM 页、用户地址空间、CR3
- *      切换、copyin/copyout、per-thread 内核栈；排在 WP1-6/2-1 之后）。
+ *      切换、copyin/copyout、per-thread 内核栈；排在 WP1-6/2-1 之后）；
+ *  13. 用户态 shell（WP2-6：wp26_selftest 加载嵌入的 shell ELF，切 CR3 进
+ *      ring3，交互到 exit/Ctrl-D；`build-ng.ps1 -Smoke` 跳过它）。
  *
  * ipc_init() 不分配内存，只把端口表/句柄表清零并绑定环境钩子，所以放在
  * 最前面；真正创建端口在自检里（heap 已就绪）。
@@ -47,6 +49,7 @@
 #include "wp23.h"
 #include "wp24.h"
 #include "wp25.h"
+#include "wp26.h"
 
 /* WP2-5：把每个 WP 的 PASS/FAIL 写进 64 KiB log 环（启动关键路径证据）。 */
 static void log_wp(const char *wp, int fails)
@@ -294,6 +297,31 @@ void kmain(u64 mb_info)
         serial_puts(")\r\n");
     }
     log_wp("WP1-7", fails);
+
+    /* WP2-6：用户态 shell（L3）。默认启动顺序：所有自检 -> ring3 hello ->
+     * shell（交互，直到 exit/Ctrl-D）。`build-ng.ps1 -Smoke` 编出的内核跳过
+     * shell，只保留 ring3 hello 冒烟路径（run-ng -Smoke）。 */
+#if defined(NG_SMOKE_MODE)
+    serial_puts("ng: shell skipped (smoke mode)\r\n");
+    (void)log_write("selftest", "WP2-6 skipped (smoke mode)");
+#else
+    if (mem_fails == 0 && fails == 0) {
+        fails += wp26_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP2-6 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP2-6 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+    log_wp("WP2-6", fails);
+#endif
 
     for (;;) {
         /* idle 点轮询 PS/2：没有 IRQ 时也不会把键盘字节丢在控制器里。 */

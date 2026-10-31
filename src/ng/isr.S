@@ -271,9 +271,22 @@ syscall_ring0_stub:
 
 # ---- 进 ring3：保存内核恢复点，构造 iretq 帧 ------------------------------
 #   rdi = 用户 RIP，rsi = 用户 RSP
+#
+# WP2-6 修正：ring3 期间内核的 callee-saved 寄存器（rbx/rbp/r12..r15）必须
+# 保持不变 —— syscall 返回路径会把**用户**的寄存器值弹回来，如果直接把控制
+# 权交回 ring3_enter 的调用者，C 代码会拿用户态的 rbx/rbp 当自己的局部变量
+# （shell 退出时 rbx 指向用户栈，syscall_run_user 写 *out 就 #PF）。
+# 这里在保存 kernel_resume_rsp 之前把这些寄存器压到内核栈，ring3_resume 再
+# 弹回去，syscall_run_user 看到的寄存器与调用前一致。
     .global ring3_enter
     .type ring3_enter, @function
 ring3_enter:
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
     movq %rsp, kernel_resume_rsp(%rip)
     leaq ring3_resume(%rip), %rax
     movq %rax, kernel_resume_rip(%rip)
@@ -284,6 +297,12 @@ ring3_enter:
     pushq %rdi                            # RIP
     iretq
 ring3_resume:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
     ret
     .size ring3_enter, . - ring3_enter
 

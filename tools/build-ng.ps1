@@ -1,10 +1,10 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP2-5: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
+# build-ng.ps1 - ng WP2-6: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
 #               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello
 #               + VFS/ramfs（L1 服务域）+ FAT16（L1，RAM 盘镜像）+
 #               PCI/VBE/帧缓冲控制台 + PS/2 键盘（L1D 设备域）+
 #               ATA PIO 块设备 + 真实磁盘镜像上的 FAT16（L1D/L0，WP2-4）+
-#               auth/log/pkg（L1，WP2-5））
+#               auth/log/pkg（L1，WP2-5）+ 用户态 shell（L3，WP2-6））
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
@@ -23,7 +23,8 @@
 #       src/ng/ata_blk.c + src/ng/wp24_selftest.c（WP2-4：ATA -> blk_env 适配
 #         + PCI PIIX3/真盘挂载自检）、src/drivers/block/ata.c（L1D：ATA PIO）、
 #       src/ng/svc_syscall.c + src/ng/wp25_selftest.c（WP2-5：31..35 胶水 +
-#         auth/log/pkg 自检）、
+#         auth/log/pkg 自检）、src/ng/wp26_selftest.c（WP2-6：加载/运行用户态
+#         shell + 会话证据）、src/apps/shell/shell.c（L3：64 位 shell）、
 #       src/services/fs/vfs.c + ramfs.c + fat16.c（L1：VFS/ramfs/FAT16）、
 #       src/services/auth/{sha256,auth}.c + log/log.c + pkg/pkg.c（L1：
 #         SHA-256 / 用户登录 / 64KB log 环 / 包清单与校验）、
@@ -33,6 +34,9 @@
 # 用户程序：src/ng/user/hello.S 用 src/ng/user/user.ld 链到 0x40000000，
 #           生成 obj-ng/hello.elf，再用 .incbin 嵌进内核 .rodata
 #           （ng_user_elf_start..end），内核 ELF64 加载器从内存镜像读取。
+#           WP2-6 的 shell（src/apps/shell/shell.c）同样链到 0x40000000，
+#           生成 obj-ng/shell.elf 并以 ng_shell_elf_start..end 嵌入；默认启动
+#           在 WP1-7 ring3 hello 之后加载 shell，`-Smoke` 编出的内核跳过它。
 # FAT16 镜像：tools/mkfat-ng.ps1 生成 obj-ng/fat16.img（1.44MB），同样用
 #           .incbin 嵌进 .rodata（ng_fat16_img_start..end），启动时由
 #           src/ng/fat_ramdisk.c 复制到 PMM RAM 盘再挂到 /mnt/fat。
@@ -52,13 +56,15 @@
 #
 # usage: powershell -File tools/build-ng.ps1 [-Repo <root>] [-DistDir dist-ng]
 #                                             [-ObjDir obj-ng] [-PanicTest]
+#                                             [-Smoke]
 # 退出码：0 = PASS；1 = FAIL。
 # =============================================================================
 param(
     [string]$Repo = '',
     [string]$DistDir = 'dist-ng',
     [string]$ObjDir = 'obj-ng',
-    [switch]$PanicTest
+    [switch]$PanicTest,
+    [switch]$Smoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,6 +102,7 @@ Write-Host '=== build-ng (WP2-5) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
+if ($Smoke) { Write-Host 'mode:  smoke build (-DNG_SMOKE_MODE=1: 跳过 WP2-6 shell，只跑 ring3 hello)' }
 
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
@@ -115,6 +122,13 @@ $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-I', (Join-Path $Repo 'src/drivers/include'),
     '-c')
 if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
+if ($Smoke) { $cFlags += '-DNG_SMOKE_MODE=1' }
+
+# 用户程序（src/apps/shell/shell.c）的编译选项：ring3、无 libc、无 SSE。
+$userCFlags = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
+    '-fno-stack-protector', '-fcf-protection=none', '-mno-sse',
+    '-mgeneral-regs-only', '-fno-builtin', '-fno-pic', '-fno-pie', '-std=c11',
+    '-O2', '-Wall', '-Wextra', '-Werror', '-c')
 
 # ---- WP1-7：用户程序 hello.S -> hello.elf（0x40000000）-> .incbin 嵌内核 ----
 # 用户 ELF 不是最终交付物，但它是"内核 ELF64 加载器"的真实输入：先按 0x40000000
@@ -212,6 +226,98 @@ ng_user_elf_end:
 & $clang @($asmFlags + @($userBlobAsm, '-o', $userBlobObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) { Fail 'user ELF embed compile failed' }
 Write-Host ("user-elf: PASS ({0} bytes, {1} PT_LOAD, entry 0x{2:x}, end 0x{3:x})" -f $ub.Length, $uLoadCount, $uEntry, $uLoadEnd)
+Write-Host ''
+
+# ---- WP2-6：用户态 shell（src/apps/shell/shell.c）-> ELF64 -> .incbin ------
+# shell 是独立 ELF64（L3 应用），链接到 0x40000000；内核用 WP1-7 的加载器
+# 从嵌入镜像加载。校验项与 hello 相同：ELF64/ET_EXEC/EM_X86_64、段 4 KiB
+# 对齐且 W^X、入口在 [0x40000000,0x40010000)、总大小不超过 64 KiB 窗口。
+Write-Host '=== user-shell (WP2-6) ==='
+$shellSrc = Join-Path $Repo 'src/apps/shell/shell.c'
+$shellObj = Join-Path $objDir 'user_shell.o'
+$shellElf = Join-Path $objDir 'shell.elf'
+$shellBlobObj = Join-Path $objDir 'shell_elf_blob.o'
+$shellBlobAsm = Join-Path $objDir 'shell_elf_blob.S'
+if (-not (Test-Path -LiteralPath $shellSrc)) { Fail ("missing shell source: {0}" -f $shellSrc) }
+Write-Host ("  shell.c -> {0}" -f 'obj-ng/user_shell.o')
+& $clang @($userCFlags + @($shellSrc, '-o', $shellObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'user shell.c compile failed' }
+Write-Host ("  link    -> {0}" -f 'obj-ng/shell.elf (base 0x40000000)')
+$shellLinkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
+    ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
+    '-o', $shellElf, $shellObj)
+& $clang @shellLinkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'user shell.elf link failed' }
+
+$sb = [IO.File]::ReadAllBytes($shellElf)
+$sProblems = New-Object System.Collections.Generic.List[string]
+$sLoadCount = 0
+$sLoadEnd = 0
+$sEntry = 0
+if ($sb.Length -lt 64) {
+    $sProblems.Add('shell ELF smaller than ELF64 header')
+} elseif (-not ($sb[0] -eq 0x7F -and $sb[1] -eq 0x45 -and $sb[2] -eq 0x4C -and $sb[3] -eq 0x46)) {
+    $sProblems.Add('shell ELF bad magic')
+} else {
+    if ($sb[4] -ne 2) { $sProblems.Add(("shell ELF class={0}, want 2" -f $sb[4])) }
+    if ($sb[5] -ne 1) { $sProblems.Add(("shell ELF data={0}, want 1 (LSB)" -f $sb[5])) }
+    $sType = [BitConverter]::ToUInt16($sb, 16)
+    $sMachine = [BitConverter]::ToUInt16($sb, 18)
+    $sEntry = [BitConverter]::ToUInt64($sb, 24)
+    $sPhOff = [BitConverter]::ToUInt64($sb, 32)
+    $sPhEnt = [BitConverter]::ToUInt16($sb, 54)
+    $sPhNum = [BitConverter]::ToUInt16($sb, 56)
+    if ($sType -ne 2) { $sProblems.Add(("shell ELF e_type={0}, want 2 (ET_EXEC)" -f $sType)) }
+    if ($sMachine -ne 62) { $sProblems.Add(("shell ELF e_machine={0}, want 62" -f $sMachine)) }
+    if ($sPhEnt -ne 56) { $sProblems.Add(("shell ELF e_phentsize={0}, want 56" -f $sPhEnt)) }
+    if ($sPhNum -lt 1) { $sProblems.Add('shell ELF has no program headers') }
+    if ($sEntry -lt 0x40000000 -or $sEntry -ge 0x40010000) {
+        $sProblems.Add(("shell ELF e_entry=0x{0:x} outside 0x40000000..0x40010000" -f $sEntry))
+    }
+    for ($i = 0; $i -lt $sPhNum; $i++) {
+        $ph = [int]$sPhOff + ($i * $sPhEnt)
+        if ($ph + 56 -gt $sb.Length) { $sProblems.Add('shell ELF phdr outside file'); break }
+        if ([BitConverter]::ToUInt32($sb, $ph) -ne 1) { continue }  # PT_LOAD
+        $sLoadCount++
+        $pFlags = [BitConverter]::ToUInt32($sb, $ph + 4)
+        $pVaddr = [BitConverter]::ToUInt64($sb, $ph + 16)
+        $pFilesz = [BitConverter]::ToUInt64($sb, $ph + 32)
+        $pMemsz = [BitConverter]::ToUInt64($sb, $ph + 40)
+        $pAlign = [BitConverter]::ToUInt64($sb, $ph + 48)
+        if (($pVaddr % 4096) -ne 0) { $sProblems.Add(("shell PT_LOAD vaddr=0x{0:x} not 4 KiB aligned" -f $pVaddr)) }
+        if ($pAlign -lt 4096) { $sProblems.Add(("shell PT_LOAD align=0x{0:x} < 4096" -f $pAlign)) }
+        if ($pFilesz -gt $pMemsz) { $sProblems.Add('shell PT_LOAD filesz > memsz') }
+        if (($pFlags -band 3) -eq 3) { $sProblems.Add(("shell PT_LOAD 0x{0:x} is W+X (W^X violated)" -f $pVaddr)) }
+        if ($pVaddr -lt 0x40000000) { $sProblems.Add(("shell PT_LOAD vaddr=0x{0:x} below base" -f $pVaddr)) }
+        if (($pVaddr + $pMemsz) -gt 0x40010000) {
+            $sProblems.Add(("shell PT_LOAD ends 0x{0:x} above 0x40010000" -f ($pVaddr + $pMemsz)))
+        }
+        if (($pVaddr + $pMemsz) -gt $sLoadEnd) { $sLoadEnd = $pVaddr + $pMemsz }
+    }
+    if ($sLoadCount -lt 3) {
+        $sProblems.Add(("shell PT_LOAD count {0} < 3 (text/rodata/data+bss)" -f $sLoadCount))
+    }
+}
+if ($sProblems.Count -gt 0) {
+    foreach ($p in $sProblems) { Write-Host ("  ! {0}" -f $p) }
+    Fail 'user shell ELF verification failed'
+}
+$shellInc = ($shellElf -replace '\\', '/')
+$shellBlobText = @"
+/* generated by tools/build-ng.ps1 (WP2-6): embed user shell ELF into .rodata */
+    .section .rodata
+    .align 16
+    .global ng_shell_elf_start
+ng_shell_elf_start:
+    .incbin "$shellInc"
+    .global ng_shell_elf_end
+ng_shell_elf_end:
+    .align 16
+"@
+[IO.File]::WriteAllText($shellBlobAsm, $shellBlobText, (New-Object Text.UTF8Encoding $false))
+& $clang @($asmFlags + @($shellBlobAsm, '-o', $shellBlobObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'shell ELF embed compile failed' }
+Write-Host ("user-shell: PASS ({0} bytes, {1} PT_LOAD, entry 0x{2:x}, end 0x{3:x})" -f $sb.Length, $sLoadCount, $sEntry, $sLoadEnd)
 Write-Host ''
 
 # ---- WP2-2：FAT16 测试镜像 -> .incbin 嵌内核 .rodata ----------------------
@@ -313,7 +419,7 @@ Write-Host ''
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'main.c')
 # L1 服务域源码（相对仓库根；-I src/ng 与各 src/services/*/include 已加）。
 $serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',
@@ -378,7 +484,7 @@ Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($userBlobObj, $fatBlobObj)
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($userBlobObj, $shellBlobObj, $fatBlobObj)
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

@@ -1,9 +1,20 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP2-4: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP2-6: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
 # 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
 #                      -display none -no-reboot -m 256 -cpu max -vga std
+#
+# WP2-6 追加（用户态 shell）：
+#   - 内核在 WP1-7 ring3 hello 之后加载并运行 src/apps/shell/shell.c；
+#   - 看到用户态 `ng: shell ready` 后，经 QMP `input-send-event` 逐字符注入
+#     `help` -> `ls /` -> `cat /etc/passwd` -> `echo hi > /tmp/s.txt` ->
+#     `cat /tmp/s.txt` -> `dmesg -n 3` -> `pkg list` -> `exit`，每个字符 25ms，
+#     每步等到对应 `ng: shell <cmd> ok` 再发下一条（'>' 用 shift+dot）；
+#   - 期望 shell 证据行 + 内核会话证据（/tmp/s.txt 内容、pkg list 计数）；
+#   - `-Smoke`（配合 tools/build-ng.ps1 -Smoke）：内核跳过 shell，只期望
+#     `ng: shell skipped (smoke mode)` 与 ring3 hello 路径；
+#   - `-NoQmp`：不注入，shell 停在 readkey；不要求 WP2-6 的交互行。
 #
 # WP2-4 追加：
 #   - `-drive file=dist-ng/disk.img,format=raw,if=ide`：8MB FAT16 磁盘镜像挂到
@@ -75,6 +86,15 @@
 #   ng: log ring ok (bytes=...) / ng: dmesg syscall ok /
 #   ng: pkg list ok (n=1) / ng: pkg verify ok / ng: WP2-5 selftest PASS
 #   <用户态> ng: ring3 auth ok / ng: ring3 pkg ok / ng: ring3 svc ok
+# WP2-6 追加（用户态 shell，QMP 注入；-NoQmp 时跳过本节）：
+#   ng: shell elf ok / ng: shell load ok / ng: shell launch ok
+#   <用户态> ng: shell ready
+#   ng: shell ls ok / cat ok / write ok / dmesg ok / pkg ok / exit ok
+#   ng: shell exit (code=0 syscalls=... writes=... fs=...)
+#   ng: shell session ok (exit=0 rsp=ok) /
+#   ng: shell session file ok (s.txt=3) / ng: shell session pkg ok (lists=+1)
+#   ng: WP2-6 selftest PASS
+#   -Smoke 模式：ng: shell skipped (smoke mode) 替代以上全部。
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
 # ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数、
 # FAT16 簇数/链边界/坏 BPB 计数、ATA 型号/扇区数、磁盘 FAT16 簇数。
@@ -95,7 +115,7 @@
 #                                           [-DiskImg <disk.img>]
 #                                           [-TimeoutSec 20] [-SerialLog <path>]
 #                                           [-Cpu max] [-Panic] [-Fallback]
-#                                           [-NoQmp] [-Vga std]
+#                                           [-NoQmp] [-Smoke] [-Vga std]
 # 退出码：0 = PASS；1 = FAIL（缺 QEMU / 启动失败 / 超时 / 期望行缺失）。
 # =============================================================================
 param(
@@ -108,6 +128,7 @@ param(
     [switch]$Panic,
     [switch]$Fallback,
     [switch]$NoQmp,
+    [switch]$Smoke,
     [string]$Vga = ''
 )
 
@@ -287,6 +308,37 @@ if ($Panic) {
         )
     }
 
+    # WP2-6：用户态 shell。默认内核在自检后拉起 shell，run-ng 经 QMP 逐字符
+    # 注入命令序列；-Smoke 内核跳过 shell（只跑 ring3 hello）；-NoQmp 不注入，
+    # 因此也不要求 WP2-6 的交互行（shell 会停在 readkey 等键，脚本命中前面的
+    # 期望行后主动结束 QEMU）。
+    if ($Smoke) {
+        $required += @('ng: shell skipped (smoke mode)')
+    } elseif (-not $NoQmp) {
+        $required += @(
+            'ng: shell elf ok',
+            'ng: shell load ok',
+            'ng: shell launch ok',
+            'ng: shell ready',
+            'ng: shell ls ok',
+            'ng: shell cat ok',
+            'ng: shell write ok',
+            'ng: shell dmesg ok',
+            'ng: shell pkg ok',
+            'ng: shell exit ok',
+            'ng: shell session ok (exit=0 rsp=ok)',
+            'ng: shell session file ok (s.txt=3)',
+            'ng: shell session pkg ok',
+            'ng: WP2-6 selftest PASS'
+        )
+        $patterns += @(
+            'ng: shell elf ok \(size=[0-9]+ entry=0x[0-9a-f]+ segs=[0-9]+\)',
+            'ng: shell load ok \(base=0x[0-9a-f]+ end=0x[0-9a-f]+ pages=[0-9]+\)',
+            'ng: shell exit \(code=0 syscalls=[0-9]+ writes=[0-9]+ fs=[0-9]+\)',
+            'ng: shell session pkg ok \(lists=\+[0-9]+\)'
+        )
+    }
+
     $failPatterns = @(
         'ng: WP1-2 selftest FAIL',
         'ng: WP1-3 selftest FAIL',
@@ -322,7 +374,9 @@ if ($Panic) {
         'ng: fb .* FAIL',
         'ng: kbd .* FAIL',
         'ng: input .* FAIL',
-        'ng: vga text fallback FAIL'
+        'ng: vga text fallback FAIL',
+        'ng: shell .* FAIL',
+        'ng: WP2-6 selftest FAIL'
     )
 }
 
@@ -395,9 +449,10 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP2-5) ==='
+Write-Host '=== run-ng (WP2-6) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("disk: {0} ({1} bytes, ide)" -f $disk, (Get-Item -LiteralPath $disk).Length)
+Write-Host ("shell: {0}" -f $(if ($Smoke) { 'skipped (-Smoke)' } elseif ($NoQmp) { 'no QMP injection (-NoQmp)' } else { 'QMP command script' }))
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }
 
@@ -467,6 +522,96 @@ function Send-QmpKey($Qmp, [string]$Key) {
     return $false
 }
 
+# ---- WP2-6：QMP 注入 shell 命令序列 ----------------------------------------
+# QMP input-send-event 一次可以带多个事件；普通字符是 down+up，'>' 是
+# shift down + '.' down/up + shift up（PS/2 驱动按 shift 状态给出 '>'）。
+$ShellSpecialKeys = @{
+    ' ' = 'spc'; '/' = 'slash'; '.' = 'dot'; '-' = 'minus'; '=' = 'equal'
+}
+
+function Send-QmpKeys($Qmp, $Specs) {
+    if (-not $Qmp) { return $false }
+    $parts = @()
+    foreach ($s in $Specs) {
+        $down = $(if ($s.down) { 'true' } else { 'false' })
+        $parts += ('{"type":"key","data":{"down":' + $down +
+            ',"key":{"type":"qcode","data":"' + $s.key + '"}}}')
+    }
+    $cmd = '{"execute":"input-send-event","arguments":{"events":[' + ($parts -join ',') + ']}}'
+    try {
+        $Qmp.Writer.WriteLine($cmd)
+        $resp = $Qmp.Reader.ReadLine()
+        if ($resp -and ($resp -match '"return"')) { return $true }
+        Write-Host ("run-ng: QMP input-send-event response: {0}" -f $resp)
+    } catch {
+        return $false
+    }
+    return $false
+}
+
+function Send-ShellCommand($Qmp, [string]$Cmd) {
+    if (-not $Qmp) { return $false }
+    foreach ($ch in $Cmd.ToCharArray()) {
+        $ok = $false
+        if ($ch -eq '>') {
+            $ok = Send-QmpKeys $Qmp @(
+                @{ key = 'shift'; down = $true }, @{ key = 'dot'; down = $true },
+                @{ key = 'dot'; down = $false }, @{ key = 'shift'; down = $false })
+        } else {
+            $key = $ShellSpecialKeys["$ch"]
+            if (-not $key) { $key = "$ch" }
+            $ok = Send-QmpKeys $Qmp @(
+                @{ key = $key; down = $true }, @{ key = $key; down = $false })
+        }
+        if (-not $ok) { return $false }
+        Start-Sleep -Milliseconds 25
+    }
+    return (Send-QmpKeys $Qmp @(@{ key = 'ret'; down = $true }, @{ key = 'ret'; down = $false }))
+}
+
+function Wait-SerialCount([string]$Needle, [int]$Want, [int]$TimeoutMs) {
+    $w = [Diagnostics.Stopwatch]::StartNew()
+    while ($w.Elapsed.TotalMilliseconds -lt $TimeoutMs) {
+        if (Test-Path -LiteralPath $SerialLog) {
+            $t = Get-Content -LiteralPath $SerialLog -Raw -ErrorAction SilentlyContinue
+            if ($t) {
+                $n = ([regex]::Matches($t, [regex]::Escape($Needle))).Count
+                if ($n -ge $Want) { return $true }
+            }
+        }
+        Start-Sleep -Milliseconds 40
+    }
+    return $false
+}
+
+# 命令序列与 WP2-6 出口一致：help / ls / cat / echo 重定向 / cat / dmesg /
+# pkg list / exit；每步等到对应证据行再发下一条，避免按键在环里堆太多。
+function Send-ShellScript($Qmp) {
+    $steps = @(
+        @{ cmd = 'help';                 expect = '';                     count = 0 },
+        @{ cmd = 'ls /';                 expect = 'ng: shell ls ok';      count = 1 },
+        @{ cmd = 'cat /etc/passwd';      expect = 'ng: shell cat ok';     count = 1 },
+        @{ cmd = 'echo hi > /tmp/s.txt'; expect = 'ng: shell write ok';   count = 1 },
+        @{ cmd = 'cat /tmp/s.txt';       expect = 'ng: shell cat ok';     count = 2 },
+        @{ cmd = 'dmesg -n 3';           expect = 'ng: shell dmesg ok';   count = 1 },
+        @{ cmd = 'pkg list';             expect = 'ng: shell pkg ok';     count = 1 },
+        @{ cmd = 'exit';                 expect = 'ng: shell exit ok';    count = 1 }
+    )
+    foreach ($step in $steps) {
+        if (-not (Send-ShellCommand $Qmp $step.cmd)) {
+            Write-Host ("run-ng: WARN QMP typing failed at '{0}'" -f $step.cmd)
+            return $false
+        }
+        if ($step.expect) {
+            if (-not (Wait-SerialCount $step.expect $step.count 3000)) {
+                Write-Host ("run-ng: WARN '{0}' produced no '{1}'" -f $step.cmd, $step.expect)
+            }
+        } else {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    return $true
+}
 # -kernel 之后是 ELF；-serial file: 让脚本可轮询；headless、不自动重启、256 MiB；
 # -drive if=ide 把 8MB FAT16 镜像挂到 PIIX3 IDE 主盘（legacy 0x1F0/0x3F6）。
 $qemuArgs = @(
@@ -497,6 +642,7 @@ $p = Start-Process @spArgs
 
 $qmp = $null
 $injected = $false
+$shellTyped = $false
 if ($qmpPort -gt 0) {
     $qmp = Connect-Qmp -Port $qmpPort
     if ($qmp) {
@@ -526,6 +672,13 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
                     Write-Host 'run-ng: WARN QMP sendkey failed; readkey uses timeout path'
                     $injected = $true
                 }
+            }
+            # WP2-6：shell 已 ready -> 逐字符注入整条命令序列（一次会话只做一次）。
+            if (-not $Smoke -and -not $NoQmp -and $qmp -and -not $shellTyped -and
+                $text.Contains('ng: shell ready')) {
+                $shellTyped = $true
+                Write-Host 'run-ng: QMP typing WP2-6 shell commands'
+                $null = Send-ShellScript $qmp
             }
             if (Test-Serial $text) { $matched = $true; break }
         }

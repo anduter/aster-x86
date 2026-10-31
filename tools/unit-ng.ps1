@@ -32,6 +32,10 @@
 #                src/ng/svc_syscall.c : WP2-5 的 SHA-256/登录/64KB log 环/
 #                包清单校验与 31..35 胶水（test_auth/test_log/test_pkg +
 #                test_syscall 的 SVC 分发用例）
+#   - src/apps/shell/shell.c : WP2-6 的用户态 shell（命令 tokenizer/重定向、
+#                cwd 解析、行编辑、15 个内建命令、错误分支；-DNG_HOST_TEST 把
+#                sh_sys() 换成 test_shell.c 的 sh_host_syscall()，后端直接跑
+#                真实的 VFS/ramfs + auth/log/pkg）
 # 这些模块不 include 串口/端口 IO，所以能脱离内核直接跑。
 #
 # 输出必须包含 `N checks, M failures`；M=0 且 N>=20 才算 PASS。
@@ -100,6 +104,7 @@ $sources = @(
     'src/drivers/video/font8x16.c',
     'src/drivers/video/vga_text.c',
     'src/drivers/input/ps2.c',
+    'src/apps/shell/shell.c',
     'tests/unit-ng/fake_ng_env.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
@@ -116,7 +121,8 @@ $sources = @(
     'tests/unit-ng/test_drivers.c',
     'tests/unit-ng/test_auth.c',
     'tests/unit-ng/test_log.c',
-    'tests/unit-ng/test_pkg.c'
+    'tests/unit-ng/test_pkg.c',
+    'tests/unit-ng/test_shell.c'
 )
 $srcPaths = @()
 foreach ($s in $sources) { $srcPaths += (Join-Path $Repo $s) }
