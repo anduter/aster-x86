@@ -30,6 +30,7 @@
 #include "serial.h"
 #include "thread.h"
 #include "uaccess.h"
+#include "wp23.h"
 
 #define MSR_EFER 0xC0000080u
 #define MSR_STAR 0xC0000081u
@@ -300,6 +301,10 @@ void syscall_dispatch(struct syscall_frame *f)
             ring3_fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_unlink(f->rdi);
+        break;
+    /* WP2-3：非阻塞 readkey。无键返回 -EAGAIN，用户态自己决定重试/超时。 */
+    case NG_SYS_READKEY:
+        f->rax = ng_input_readkey();
         break;
     default:
         f->rax = (u64)-1;

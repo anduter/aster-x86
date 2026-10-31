@@ -1,7 +1,8 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP2-2: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
+# build-ng.ps1 - ng WP2-3: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
 #               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello
-#               + VFS/ramfs（L1 服务域）+ FAT16（L1，RAM 盘镜像））
+#               + VFS/ramfs（L1 服务域）+ FAT16（L1，RAM 盘镜像）+
+#               PCI/VBE/帧缓冲控制台 + PS/2 键盘（L1D 设备域））
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
@@ -16,7 +17,10 @@
 #       src/ng/elf.c + useras.c + uaccess.c + elf_selftest.c（WP1-7）、
 #       src/ng/fs_syscall.c（20..27 的用户指针胶水）+ src/ng/fs_selftest.c
 #       （WP2-1）、src/ng/fat16_selftest.c + src/ng/fat_ramdisk.c（WP2-2）、
+#       src/ng/wp23_selftest.c（WP2-3：PCI/VBE/fb/PS2 接线 + 自检）、
 #       src/services/fs/vfs.c + ramfs.c + fat16.c（L1：VFS/ramfs/FAT16）、
+#       src/drivers/pci/pci.c + video/vbe.c + video/fb.c + video/font8x16.c
+#         + video/vga_text.c + input/ps2.c（L1D：PCI/VBE/帧缓冲/PS2）、
 #       src/ng/main.c（64 位 C 入口）、src/ng/link.ld。
 # 用户程序：src/ng/user/hello.S 用 src/ng/user/user.ld 链到 0x40000000，
 #           生成 obj-ng/hello.elf，再用 .incbin 嵌进内核 .rodata
@@ -77,7 +81,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP2-2) ==='
+Write-Host '=== build-ng (WP2-3) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -94,6 +98,7 @@ $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-fno-pic', '-fno-pie', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
     '-I', $srcDir,
     '-I', (Join-Path $Repo 'src/services/fs/include'),
+    '-I', (Join-Path $Repo 'src/drivers/include'),
     '-c')
 if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
 
@@ -253,13 +258,19 @@ Write-Host ''
 #                  （src/services/fs，L1 服务域；只依赖 types.h 与 fs_env）。
 # WP2-2 additions: fat_ramdisk.c、fat16_selftest.c（src/ng）+ fat16.c
 #                  （src/services/fs，L1；只依赖 types.h/vfs.h/blk.h）。
+# WP2-3 additions: wp23_selftest.c（src/ng 接线）+ src/drivers/{pci,video,input}
+#                  （L1D；只依赖 types.h / 自己的头，端口 IO 由内核注入）。
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'main.c')
 # L1 服务域源码（相对仓库根；-I src/ng 与 -I src/services/fs/include 已加）。
 $serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c', 'src/services/fs/fat16.c')
-$steps = $asmSources.Count + $cSources.Count + $serviceSources.Count + 1
+# L1D 设备域源码（相对仓库根；-I src/drivers/include 已加）。
+$driverSources = @('src/drivers/pci/pci.c', 'src/drivers/video/vbe.c',
+    'src/drivers/video/fb.c', 'src/drivers/video/font8x16.c',
+    'src/drivers/video/vga_text.c', 'src/drivers/input/ps2.c')
+$steps = $asmSources.Count + $cSources.Count + $serviceSources.Count + $driverSources.Count + 1
 $step = 0
 $asmObjs = New-Object System.Collections.Generic.List[string]
 
@@ -295,13 +306,25 @@ foreach ($rel in $serviceSources) {
     $serviceObjs.Add($obj)
 }
 
+# ---- L1D 设备域（src/drivers）-----------------------------------------------
+$driverObjs = New-Object System.Collections.Generic.List[string]
+foreach ($rel in $driverSources) {
+    $step++
+    $leaf = [IO.Path]::GetFileName($rel)
+    Write-Host ("  [{0}/{1}] {2}" -f $step, $steps, $rel)
+    $obj = Join-Path $objDir ([IO.Path]::GetFileNameWithoutExtension($rel) + '.o')
+    & $clang @($cFlags + @((Join-Path $Repo $rel), '-o', $obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0} compile failed" -f $leaf) }
+    $driverObjs.Add($obj)
+}
+
 # ---- 链接 ------------------------------------------------------------------
 $step++
 Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + @($userBlobObj, $fatBlobObj)
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($userBlobObj, $fatBlobObj)
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

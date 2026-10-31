@@ -67,6 +67,12 @@ void fake_ipc_set_ret(u64 ret);
 u32 fake_ipc_count(void);
 const struct fake_ipc_call *fake_ipc_get(u32 i);
 
+/* ---- fake readkey（WP2-3：syscall 30 胶水）--------------------------------- */
+/* 默认返回 NG_EAGAIN；fake_input_set_readkey 设定下一次（以及之后）的返回值。 */
+void fake_input_reset(void);
+void fake_input_set_readkey(u64 value);
+u32 fake_input_readkey_calls(void);
+
 /* ---- fake FS 数据页池（WP2-1：ramfs 的 fs_env） --------------------------- */
 /* 8 个 4 KiB 页；page_alloc 返回清零页，page_free 归还。fake_fs_reset 全归还。 */
 #include "ramfs.h"

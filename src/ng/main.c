@@ -40,6 +40,7 @@
 #include "syscall.h"
 #include "trap.h"
 #include "types.h"
+#include "wp23.h"
 
 void kmain(u64 mb_info)
 {
@@ -180,6 +181,25 @@ void kmain(u64 mb_info)
         serial_puts(")\r\n");
     }
 
+    /* WP2-3：PCI/VBE/帧缓冲控制台 + PS/2 键盘。显示不可用时回退 VGA 文本；
+     * 键盘/输入自检独立于显示。ring3 demo 的 readkey 依赖它，所以排在
+     * WP1-7 之前。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += wp23_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP2-3 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP2-3 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+
     /* WP1-7：ELF64 加载器 + ring3 hello。需要 PMM/heap/调度器（per-thread
      * syscall 内核栈用一个真实线程验证），所以排在最后。 */
     if (mem_fails == 0 && fails == 0) {
@@ -199,6 +219,8 @@ void kmain(u64 mb_info)
     }
 
     for (;;) {
+        /* idle 点轮询 PS/2：没有 IRQ 时也不会把键盘字节丢在控制器里。 */
+        ng_input_poll();
         __asm__ volatile("hlt");
     }
 }

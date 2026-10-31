@@ -22,6 +22,9 @@
 #                页链（tests/unit-ng/test_vfs.c；fake 页池 8 页）
 #   - src/ng/fs_syscall.c : 20..27 的 syscall 胶水（路径 copyin_str、缓冲
 #                copyin/copyout，见 test_syscall.c 的 FS 分发用例）
+#   - src/drivers/{pci,video,input} : WP2-3 的 L1D 驱动（PCI 地址/BAR、Bochs VBE
+#                寄存器、8x16 字体、帧缓冲绘制/读回、VGA 文本、PS/2 scancode/
+#                环形缓冲），端口 IO 全部注入 fake ops（tests/unit-ng/test_drivers.c）
 # 这些模块不 include 串口/端口 IO，所以能脱离内核直接跑。
 #
 # 输出必须包含 `N checks, M failures`；M=0 且 N>=20 才算 PASS。
@@ -77,6 +80,12 @@ $sources = @(
     'src/services/fs/vfs.c',
     'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',
+    'src/drivers/pci/pci.c',
+    'src/drivers/video/vbe.c',
+    'src/drivers/video/fb.c',
+    'src/drivers/video/font8x16.c',
+    'src/drivers/video/vga_text.c',
+    'src/drivers/input/ps2.c',
     'tests/unit-ng/fake_ng_env.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
@@ -88,7 +97,8 @@ $sources = @(
     'tests/unit-ng/test_uaccess.c',
     'tests/unit-ng/test_syscall.c',
     'tests/unit-ng/test_vfs.c',
-    'tests/unit-ng/test_fat16.c'
+    'tests/unit-ng/test_fat16.c',
+    'tests/unit-ng/test_drivers.c'
 )
 $srcPaths = @()
 foreach ($s in $sources) { $srcPaths += (Join-Path $Repo $s) }
@@ -98,6 +108,7 @@ $ccArgs = @(
     '-DNG_HOST_TEST=1',
     '-I', (Join-Path $Repo 'src/ng'),
     '-I', (Join-Path $Repo 'src/services/fs/include'),
+    '-I', (Join-Path $Repo 'src/drivers/include'),
     '-I', (Join-Path $Repo 'tests/unit-ng'),
     '-o', $exe
 ) + $srcPaths

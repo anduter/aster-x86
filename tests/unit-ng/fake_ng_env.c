@@ -10,6 +10,7 @@
 #include "ipc.h"
 #include "paging.h"
 #include "serial.h"
+#include "wp23.h"
 
 /* ------------------------------------------------------------------------- */
 /* fake 4 KiB 页表                                                           */
@@ -358,6 +359,35 @@ u64 ipc_sys_reply(u64 ticket, u64 user_msg, u64 len, u64 timeout)
 u64 ipc_sys_close(u64 handle)
 {
     return fake_ipc_record(FAKE_IPC_CLOSE, handle, 0, 0, 0);
+}
+
+/* ------------------------------------------------------------------------- */
+/* fake readkey（WP2-3：syscall 30 的分发只在 host 上验证“透传 + 返回值”）    */
+/* ------------------------------------------------------------------------- */
+
+static u64 freadkey_value = (u64)(i64)NG_EAGAIN;
+static u32 freadkey_calls;
+
+void fake_input_reset(void)
+{
+    freadkey_value = (u64)(i64)NG_EAGAIN;
+    freadkey_calls = 0;
+}
+
+void fake_input_set_readkey(u64 value)
+{
+    freadkey_value = value;
+}
+
+u32 fake_input_readkey_calls(void)
+{
+    return freadkey_calls;
+}
+
+u64 ng_input_readkey(void)
+{
+    freadkey_calls++;
+    return freadkey_value;
 }
 
 /* ------------------------------------------------------------------------- */

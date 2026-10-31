@@ -30,6 +30,8 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
  *  25  listdir(path, struct vfs_dirent*, max) -> 条数 / -err    （WP2-1）
  *  26  mkdir(path, mode)                   -> 0 / -err          （WP2-1）
  *  27  unlink(path)                        -> 0 / -err          （WP2-1）
+ *  30  readkey()                           -> (flags<<24)|(ascii<<16)|scancode
+ *                                             / -EAGAIN          （WP2-3）
  * 其中 msg/buf/path/stat 是用户指针（内核做 U/S 页校验 + SMAP copyin/copyout）；
  * timeout 单位是 TSC tick（0 = 非阻塞，~0 = 永久）。
  */
@@ -48,6 +50,7 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
 #define NG_SYS_LISTDIR 25u
 #define NG_SYS_MKDIR 26u
 #define NG_SYS_UNLINK 27u
+#define NG_SYS_READKEY 30u
 
 /* ring3 一次执行的统计（syscall_run_user 填）。 */
 struct ring3_result {

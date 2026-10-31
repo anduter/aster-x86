@@ -1,9 +1,17 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP2-2: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP2-3: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
 # 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
-#                      -display none -no-reboot -m 256 -cpu max
+#                      -display none -no-reboot -m 256 -cpu max -vga std
+#
+# WP2-3 追加：
+#   - `-vga std`（PCI 1234:1111 + Bochs VBE 1280x800x32）；
+#   - QMP（TCP 随机端口）注入 `sendkey a`：脚本看到用户态
+#     `ng: ring3 input ready` 后发送，验证 syscall 30 真拿到硬件键；
+#     QMP 不可用时用户程序走 timeout 分支，仍然 PASS（-NoQmp 强制跳过）；
+#   - `-Fallback`：QEMU `-vga none`，期望 VGA 文本 0xB8000 降级行，用于验证
+#     “显示不可用但系统可用”的路径。
 #
 # 用 file: 串口而不是 stdio：脚本要在 QEMU 不退出（内核 hlt 循环）的情况下
 # 轮询串口内容，命中所有期望行后主动结束 QEMU。
@@ -52,6 +60,13 @@
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
 # ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数、
 # FAT16 簇数/链边界/坏 BPB 计数。
+# WP2-3 追加（std 模式）：
+#   ng: pci vga found / ng: vbe mode 1280x800x32 ok /
+#   ng: fb draw ok (readback) / ng: kbd init ok / ng: input event ok /
+#   ng: WP2-3 selftest PASS；用户态 ng: ring3 input ready ->
+#   ng: ring3 input ok (key=a|key=other|timeout)
+# Fallback 模式（-Fallback，QEMU -vga none）：
+#   ng: pci vga missing / ng: vga text fallback ok (0xB8000) 替代 VBE/fb 行。
 #
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
@@ -60,7 +75,8 @@
 #
 # usage: powershell -File tools/run-ng.ps1 [-Repo <root>] [-ElfPath <elf>]
 #                                           [-TimeoutSec 20] [-SerialLog <path>]
-#                                           [-Cpu max] [-Panic]
+#                                           [-Cpu max] [-Panic] [-Fallback]
+#                                           [-NoQmp] [-Vga std]
 # 退出码：0 = PASS；1 = FAIL（缺 QEMU / 启动失败 / 超时 / 期望行缺失）。
 # =============================================================================
 param(
@@ -69,7 +85,10 @@ param(
     [int]$TimeoutSec = 20,
     [string]$SerialLog = '',
     [string]$Cpu = 'max',
-    [switch]$Panic
+    [switch]$Panic,
+    [switch]$Fallback,
+    [switch]$NoQmp,
+    [string]$Vga = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,6 +98,10 @@ $Repo = (Resolve-Path $Repo).Path
 # Windows / Linux 都能跑：-ExecutionPolicy、-WindowStyle 与非 Windows 的 QEMU
 # 默认安装路径只在 Windows 上使用（CI 的 ubuntu runner 走 -Quick 时不会到 QEMU）。
 $OnWindows = ($env:OS -eq 'Windows_NT')
+
+# 显示设备：-Fallback 用 -vga none（验证 VGA 文本降级），否则用 stdvga。
+$useVga = $Vga
+if (-not $useVga) { $useVga = $(if ($Fallback) { 'none' } else { 'std' }) }
 
 # ---- 期望的串口行 ----------------------------------------------------------
 if ($Panic) {
@@ -176,6 +199,43 @@ if ($Panic) {
         'ng: fat16 chain edge ok \(n=[0-9]+\)',
         'ng: fat16 bad bpb rejected \(n=[0-9]+\)'
     )
+
+    # WP2-3：显示/输入证据行。stdvga 与 -vga none 降级路径各取一套。
+    if ($Fallback) {
+        $required += @(
+            'ng: pci vga missing',
+            'ng: vga text fallback ok',
+            'ng: kbd init ok',
+            'ng: input event ok',
+            'ng: ring3 input ready',
+            'ng: ring3 input ok',
+            'ng: WP2-3 selftest PASS'
+        )
+        $patterns += @(
+            'ng: vbe unavailable .*vga text fallback'
+        )
+    } else {
+        $required += @(
+            'ng: pci vga found',
+            'ng: vbe mode 1280x800x32 ok',
+            'ng: fb draw ok (readback)',
+            'ng: kbd init ok',
+            'ng: input event ok',
+            'ng: ring3 input ready',
+            'ng: ring3 input ok',
+            'ng: WP2-3 selftest PASS'
+        )
+        $patterns += @(
+            'ng: pci vga 1234:1111 cmd=0x[0-9a-f]+ bar0=0x[0-9a-f]+ size=[0-9]+',
+            'ng: vbe id=0x[0-9a-f]+ mem=[0-9]+',
+            'ng: vbe pitch=[0-9]+ virt=1280x800',
+            'ng: lfb map ok \(base=0x[0-9a-f]+ pages=[0-9]+\)',
+            'ng: lfb pte=0x[0-9a-f]+ \(pcd/pwt\)',
+            'ng: fb console cols=[0-9]+ rows=[0-9]+',
+            'ng: ring3 input ok \((key=a|key=other|timeout)\)'
+        )
+    }
+
     $failPatterns = @(
         'ng: WP1-2 selftest FAIL',
         'ng: WP1-3 selftest FAIL',
@@ -196,7 +256,15 @@ if ($Panic) {
         'ng: fs .* FAIL',
         'ng: WP2-1 selftest FAIL',
         'ng: fat16 .* FAIL',
-        'ng: WP2-2 selftest FAIL'
+        'ng: WP2-2 selftest FAIL',
+        'ng: WP2-3 selftest FAIL',
+        'ng: pci vga .* FAIL',
+        'ng: vbe .* FAIL',
+        'ng: lfb .* FAIL',
+        'ng: fb .* FAIL',
+        'ng: kbd .* FAIL',
+        'ng: input .* FAIL',
+        'ng: vga text fallback FAIL'
     )
 }
 
@@ -261,10 +329,76 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP2-2) ==='
+Write-Host '=== run-ng (WP2-3) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }
+
+# ---- QMP：随机 TCP 端口，用于 sendkey 注入 --------------------------------
+$qmpPort = 0
+if (-not $NoQmp) {
+    try {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $qmpPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $listener.Stop()
+    } catch {
+        Write-Host 'run-ng: WARN cannot reserve a QMP port; keyboard uses timeout path'
+        $qmpPort = 0
+    }
+}
+
+function Connect-Qmp([int]$Port) {
+    for ($i = 0; $i -lt 40; $i++) {
+        try {
+            $client = [Net.Sockets.TcpClient]::new()
+            $client.Connect('127.0.0.1', $Port)
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 2000
+            $reader = New-Object IO.StreamReader($stream)
+            $writer = New-Object IO.StreamWriter($stream)
+            $writer.AutoFlush = $true
+            $null = $reader.ReadLine()  # QMP greeting
+            $writer.WriteLine('{"execute":"qmp_capabilities"}')
+            $null = $reader.ReadLine()
+            return @{ Client = $client; Reader = $reader; Writer = $writer }
+        } catch {
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    return $null
+}
+
+function Send-QmpKey($Qmp, [string]$Key) {
+    if (-not $Qmp) { return $false }
+    # QEMU 11 的 QMP 已经没有 sendkey（CommandNotFound）；用 input-send-event
+    # 直接发 qcode 的按下/释放，失败再退到 HMP 的 sendkey。
+    $events = ('{{"execute":"input-send-event","arguments":{{"events":[' +
+        '{{"type":"key","data":{{"down":true,"key":{{"type":"qcode","data":"{0}"}}}}}},' +
+        '{{"type":"key","data":{{"down":false,"key":{{"type":"qcode","data":"{0}"}}}}}}' +
+        ']}}}}') -f $Key
+    try {
+        $Qmp.Writer.WriteLine($events)
+        $resp = $Qmp.Reader.ReadLine()
+        if ($resp -and ($resp -match '"return"')) {
+            return $true
+        }
+        Write-Host ("run-ng: QMP input-send-event response: {0}" -f $resp)
+    } catch {
+        return $false
+    }
+    try {
+        $Qmp.Writer.WriteLine(('{{"execute":"human-monitor-command","arguments":{{"command-line":"sendkey {0}"}}}}' -f $Key))
+        $resp = $Qmp.Reader.ReadLine()
+        if ($resp -and ($resp -match '"return"')) {
+            return $true
+        }
+        Write-Host ("run-ng: QMP hmp sendkey response: {0}" -f $resp)
+    } catch {
+        return $false
+    }
+    return $false
+}
 
 # -kernel 之后是 ELF；-serial file: 让脚本可轮询；headless、不自动重启、256 MiB
 $qemuArgs = @(
@@ -273,9 +407,13 @@ $qemuArgs = @(
     '-display', 'none',
     '-no-reboot',
     '-m', '256',
-    '-cpu', $Cpu
+    '-cpu', $Cpu,
+    '-vga', $useVga
 )
-Write-Host ("args: -kernel <elf> -serial file:<log> -display none -no-reboot -m 256 -cpu {0} (timeout {1}s)" -f $Cpu, $TimeoutSec)
+if ($qmpPort -gt 0) {
+    $qemuArgs += @('-qmp', ("tcp:127.0.0.1:{0},server=on,wait=off" -f $qmpPort))
+}
+Write-Host ("args: -kernel <elf> -serial file:<log> -display none -no-reboot -m 256 -cpu {0} -vga {1} (timeout {2}s, qmp {3})" -f $Cpu, $useVga, $TimeoutSec, $(if ($qmpPort) { $qmpPort } else { 'off' }))
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $spArgs = @{
@@ -288,6 +426,17 @@ $spArgs = @{
 if ($OnWindows) { $spArgs['WindowStyle'] = 'Hidden' }
 $p = Start-Process @spArgs
 
+$qmp = $null
+$injected = $false
+if ($qmpPort -gt 0) {
+    $qmp = Connect-Qmp -Port $qmpPort
+    if ($qmp) {
+        Write-Host 'run-ng: QMP connected (sendkey injection armed)'
+    } else {
+        Write-Host 'run-ng: WARN QMP connect failed; readkey uses timeout path'
+    }
+}
+
 $matched = $false
 $failedEarly = $false
 while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
@@ -299,6 +448,16 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
                 if ($text -match $fp) { $failedEarly = $true; break }
             }
             if ($failedEarly) { break }
+            # 用户程序已开始轮询 readkey：注入 'a'（只发一次）。
+            if (-not $injected -and $qmp -and $text.Contains('ng: ring3 input ready')) {
+                if (Send-QmpKey $qmp 'a') {
+                    $injected = $true
+                    Write-Host 'run-ng: QMP sendkey a -> ring3 readkey'
+                } else {
+                    Write-Host 'run-ng: WARN QMP sendkey failed; readkey uses timeout path'
+                    $injected = $true
+                }
+            }
             if (Test-Serial $text) { $matched = $true; break }
         }
     }
@@ -311,6 +470,10 @@ $exitedEarly = $p.HasExited
 if (-not $exitedEarly) {
     try { $p.Kill() } catch { }
     $p.WaitForExit(3000) | Out-Null
+}
+if ($qmp) {
+    try { $qmp.Client.Close() } catch { }
+    $qmp = $null
 }
 
 $serialText = ''

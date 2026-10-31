@@ -13,15 +13,15 @@
 
 - main：冻结在 69ab006（旧 32 位，305/305）。
 - 开发分支：ng（64 位内核）。
-- 当前阶段：**E2 进行中，WP2-1（VFS/ramfs）+ WP2-2（FAT16）完成**。
+- 当前阶段：**E2 进行中，WP2-1（VFS/ramfs）+ WP2-2（FAT16）+ WP2-3（显示/输入）完成**。
 - 门禁：`tools/ci-ng.ps1` 一条命令跑 check-domains / check-deps / unit-ng /
   build-ng / run-ng / 旧 32 位 `build.ps1 -Test`，全绿输出
   `=== NG CI PASS ===`（`-Quick` 跳 QEMU/legacy）；CI 见
   `.github/workflows/ng.yml`。
-- 出口证据：ring3 `ng: ring3 hello` + VFS/FAT demo；host 单测
-  **1824 checks, 0 failures**；旧 32 位 305/305；check-domains /
-  check-deps 0 违规（`docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`）。
-- 下一步：E2 / WP2-3（fb/输入）或 WP2-4（块设备），见 evolution.md。
+- 出口证据：ring3 `ng: ring3 hello` + VFS/FAT demo + `ng: ring3 input ok`；
+  host 单测 **2290 checks, 0 failures**；旧 32 位 305/305；check-domains /
+  check-deps 0 违规（`docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、`ng-WP2-3.md`）。
+- 下一步：E2 / WP2-4（块设备）或 WP2-5/2-6（auth/log/pkg、shell），见 evolution.md。
 
 ## 执行规则
 
@@ -46,4 +46,5 @@
 | elf-ng.md | WP1-7 ELF64 加载器 / 用户地址空间 / uaccess |
 | vfs-ng.md | WP2-1 VFS / ramfs / syscall 20..27 |
 | fat16-ng.md | WP2-2 块设备抽象 / FAT16 / 镜像与 RAM 盘 |
+| display-input-ng.md | WP2-3 PCI/VBE/帧缓冲控制台 / VGA 文本兜底 / PS/2 / readkey |
 | domains/ | 每域一页 |

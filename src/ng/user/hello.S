@@ -233,6 +233,32 @@ _start:
     jne .Lfail
     PRINT_MSG fat_msg_unlink, fat_msg_unlink_len
 
+    # ---- WP2-3：readkey（30）非阻塞轮询 -----------------------------------
+    # 先打印 ready，run-ng 用 QMP input-send-event 注入 'a'；没有注入时走超时分支。
+    # 返回 (flags<<24)|(ascii<<16)|scancode；-EAGAIN(-11) 继续重试。
+    PRINT_MSG input_ready_msg, input_ready_msg_len
+    movl $5000000, %r8d
+.Lkey_wait:
+    movl $30, %eax
+    syscall
+    cmpq $-11, %rax
+    jne .Lkey_got
+    decl %r8d
+    jnz .Lkey_wait
+    PRINT_MSG input_timeout_msg, input_timeout_msg_len
+    jmp .Linput_done
+.Lkey_got:
+    movq %rax, %rdx
+    shrq $16, %rdx
+    andl $0xFF, %edx
+    cmpl $97, %edx              # 'a'
+    jne .Lkey_other
+    PRINT_MSG input_key_msg, input_key_msg_len
+    jmp .Linput_done
+.Lkey_other:
+    PRINT_MSG input_other_msg, input_other_msg_len
+.Linput_done:
+
     PRINT_MSG fs_msg_demo, fs_msg_demo_len
 
     # exit(0)
@@ -286,6 +312,18 @@ fat_msg_stat:
 fat_msg_unlink:
     .ascii "ng: fs fat unlink ok\r\n"
     .set fat_msg_unlink_len, . - fat_msg_unlink
+input_ready_msg:
+    .ascii "ng: ring3 input ready\r\n"
+    .set input_ready_msg_len, . - input_ready_msg
+input_key_msg:
+    .ascii "ng: ring3 input ok (key=a)\r\n"
+    .set input_key_msg_len, . - input_key_msg
+input_other_msg:
+    .ascii "ng: ring3 input ok (key=other)\r\n"
+    .set input_other_msg_len, . - input_other_msg
+input_timeout_msg:
+    .ascii "ng: ring3 input ok (timeout)\r\n"
+    .set input_timeout_msg_len, . - input_timeout_msg
 fs_hello:
     .ascii "hello"
     .set fs_hello_len, . - fs_hello

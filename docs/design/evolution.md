@@ -75,8 +75,9 @@ E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP
 | WP2-6 | shell 移植 | src/apps | 64 位 shell 可交互 |
 | WP2-7 | parity 套件 100 项 | tests/ | 100 项通过 |
 
-E2 进度（2026-10-31）：**WP2-1、WP2-2 完成**（tag 待 E2 收口时打）。
-`src/services/fs` 成为第一个真正落地的 L1 服务域：
+E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3 完成**（tag 待 E2 收口时打）。
+`src/services/fs` 成为第一个真正落地的 L1 服务域；`src/drivers` 成为第一个
+L1D 设备域：
 
 - VFS 核心（挂载/节点/路径/fd/权限，负 errno）+ ramfs（节点/目录项/页链，
   1 MiB/文件）+ syscall 20..27（用户指针经 uaccess）+ ring3 demo
@@ -88,17 +89,26 @@ E2 进度（2026-10-31）：**WP2-1、WP2-2 完成**（tag 待 E2 收口时打�
   unlink/rename/truncate/readdir；1.44MB 镜像由 `tools/mkfat-ng.ps1` 生成，
   以 `.fat16` PT_LOAD 嵌在 2 MiB（PMM 保留）并在启动时复制到 RAM 盘，
   挂到 `/mnt/fat`；
+- WP2-3 显示/输入（`src/drivers/**`，L1D）：PCI mechanism #1 定位 QEMU
+  stdvga `1234:1111`、BAR0 探测/映射；Bochs VBE 1280×800×32（回退
+  1024×768×32）；LFB 以 PCD/PWT/NX 恒等映射进内核 PML4；8×16 内嵌字模的
+  帧缓冲控制台 + 棋盘/文字/像素读回自检；`-vga none` 回退 VGA 文本 0xB8000；
+  PS/2 set 1 键盘 + 128 项事件环 + 非阻塞 syscall 30 `readkey`；ring3 demo
+  经 run-ng QMP `input-send-event` 注入按键，打印 `ng: ring3 input ok (key=a)`；
 - 内核自检 `ng: vfs mount ok` / `ng: ramfs write/read ok` / `ng: fd bad
-  rejected` / `ng: vfs path edge ok` / `ng: WP2-1 selftest PASS`，新增
-  `ng: fat16 mount ok (clusters=2841)` / `read ok` / `write ok` /
-  `chain edge ok` / `bad bpb rejected` / `ng: WP2-2 selftest PASS`；
-  run-ng **62 条期望行 + 20 条正则**；ring3 demo 增加 FAT 读/写/stat/unlink；
-- host 单测 1085 → 1438（WP2-1）→ **1824 checks**（本 WP +386，含
-  `tests/unit-ng/test_fat16.c` 的合成镜像/坏 BPB/坏链/满盘/跨目录/VFS 集成）；
-  旧 32 位 305/305；
-- 设计/限制见 `docs/design/vfs-ng.md`、`docs/design/fat16-ng.md`，证据见
-  `docs/claims/ng-WP2-1.md`、`docs/claims/ng-WP2-2.md`。块设备（WP2-4）/
-  fb/输入（WP2-3）/shell（WP2-6）未动。
+  rejected` / `ng: vfs path edge ok` / `ng: WP2-1 selftest PASS`，`ng: fat16
+  mount ok (clusters=2841)` / `read ok` / `write ok` / `chain edge ok` /
+  `bad bpb rejected` / `ng: WP2-2 selftest PASS`，以及 WP2-3 的
+  `ng: pci vga found` / `ng: vbe mode 1280x800x32 ok` /
+  `ng: fb draw ok (readback)` / `ng: kbd init ok` / `ng: input event ok` /
+  `ng: WP2-3 selftest PASS`；run-ng **70 条期望行 + 27 条正则**（`-Fallback`
+  为 69/21）；
+- host 单测 1085 → 1438（WP2-1）→ 1824（WP2-2）→ **2290 checks**（WP2-3 +466，
+  含 `tests/unit-ng/test_drivers.c` 的 PCI/BAR、VBE、字体、键映射、环形缓冲、
+  VGA 文本、帧缓冲读回）；旧 32 位 305/305；
+- 设计/限制见 `docs/design/vfs-ng.md`、`fat16-ng.md`、`display-input-ng.md`，
+  证据见 `docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、`ng-WP2-3.md`。块设备
+  （WP2-4）/shell（WP2-6）未动；fb/输入不做 IRQ/鼠标（E3/C 之后）。
 
 ### E3
 

@@ -27,6 +27,7 @@
 #include "thread.h"
 #include "uaccess.h"
 #include "vfs.h"
+#include "wp23.h"
 
 /* 与 src/ng/syscall.c 的 struct syscall_frame 字段顺序一致（isr.S push 顺序）。 */
 struct syscall_frame {
@@ -104,6 +105,20 @@ static void t_dispatch_basic(void)
     syscall_dispatch(&f);
     CHECK(f.rax == 0);
     CHECK(strstr(fake_serial_text(), "ng: syscall exit test\r\n") != NULL);
+
+    /* WP2-3：30 readkey 原样透传 ng_input_readkey() 的返回值。 */
+    fake_input_reset();
+    CHECK(fake_input_readkey_calls() == 0);
+    frame_init(&f, NG_SYS_READKEY);
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)NG_EAGAIN);
+    CHECK(fake_input_readkey_calls() == 1);
+
+    fake_input_set_readkey(0x0061001EULL); /* flags=0, ascii='a', scancode=0x1E */
+    frame_init(&f, NG_SYS_READKEY);
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0x0061001EULL);
+    CHECK(fake_input_readkey_calls() == 2);
 }
 
 /* ------------------------------------------------------------------------- */
