@@ -23,6 +23,7 @@
 #include "proc.h"
 
 #include "elf.h"
+#include "fbmap.h"
 #include "fs_syscall.h"
 #include "heap.h"
 #include "io.h"
@@ -30,6 +31,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "serial.h"
+#include "shm.h"
 #include "syscall.h"
 #include "thread.h"
 #include "uaccess.h"
@@ -43,11 +45,17 @@ extern const u8 ng_proc_elf_start[];
 extern const u8 ng_proc_elf_end[];
 extern const u8 ng_user_elf_start[]; /* WP1-7 的 hello.S */
 extern const u8 ng_user_elf_end[];
+extern const u8 ng_displayd_elf_start[]; /* WP3-1 display server（L2a） */
+extern const u8 ng_displayd_elf_end[];
+extern const u8 ng_demo_elf_start[]; /* WP3-1 demo app（L3） */
+extern const u8 ng_demo_elf_end[];
 
 /* 内嵌 ELF 的落盘路径（ramfs /bin）。 */
 #define PROC_BIN_SHELL "/bin/shell"
 #define PROC_BIN_PROC "/bin/proc"
 #define PROC_BIN_HELLO "/bin/hello"
+#define PROC_BIN_DISPLAYD "/bin/displayd"
+#define PROC_BIN_DEMO "/bin/demo"
 
 /* freestanding 内存原语（src/ng/mem.c）。 */
 void *memcpy(void *dst, const void *src, u64 n);
@@ -321,6 +329,12 @@ static void proc_exit_self(struct proc *p, int status,
         p->bad_writes = res->bad_writes;
     }
     proc_release_handles(p);
+    /*
+     * ng WP3-1：共享内存页和 LFB 页不属于本进程的私有页，必须**先**从页表
+     * 摘掉再 as_destroy（as_destroy 会 free 每个 present 叶子页）。
+     */
+    shm_release_proc(p);
+    fbmap_release_proc(p);
     if (p->as != NULL) {
         struct user_as *as = (struct user_as *)p->as;
 
@@ -367,9 +381,9 @@ static void proc_thread_main(void *arg)
 
 static int proc_seed_bins(void)
 {
-    const u8 *blobs[3];
-    u64 sizes[3];
-    const char *paths[3];
+    const u8 *blobs[5];
+    u64 sizes[5];
+    const char *paths[5];
     struct vfs_ctx *ctx = fs_sys_ctx();
     u32 i;
 
@@ -382,6 +396,13 @@ static int proc_seed_bins(void)
     blobs[2] = ng_user_elf_start;
     sizes[2] = (u64)(usize)ng_user_elf_end - (u64)(usize)ng_user_elf_start;
     paths[2] = PROC_BIN_HELLO;
+    blobs[3] = ng_displayd_elf_start;
+    sizes[3] =
+        (u64)(usize)ng_displayd_elf_end - (u64)(usize)ng_displayd_elf_start;
+    paths[3] = PROC_BIN_DISPLAYD;
+    blobs[4] = ng_demo_elf_start;
+    sizes[4] = (u64)(usize)ng_demo_elf_end - (u64)(usize)ng_demo_elf_start;
+    paths[4] = PROC_BIN_DEMO;
 
     /* /bin 目录（ramfs 根只有 /tmp，WP2-1 种的）。 */
     if (ctx == NULL) {
@@ -397,7 +418,7 @@ static int proc_seed_bins(void)
             return 1;
         }
     }
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 5; i++) {
         int rc = fs_sys_seed_file(paths[i], blobs[i], sizes[i]);
 
         if (rc != VFS_OK) {
@@ -450,6 +471,11 @@ void proc_init(void)
     serial_puts(PROC_BIN_PROC);
     serial_puts(" hello=");
     serial_puts(PROC_BIN_HELLO);
+    serial_puts(")\r\n");
+    serial_puts("ng: desktop bin ok (displayd=");
+    serial_puts(PROC_BIN_DISPLAYD);
+    serial_puts(" demo=");
+    serial_puts(PROC_BIN_DEMO);
     serial_puts(")\r\n");
 
     serial_puts("ng: proc table ok (max=");
@@ -772,8 +798,10 @@ int proc_kill(u32 pid, u32 sig)
     if (p->tid != 0) {
         (void)sched_kill_thread(p->tid);
     }
-    /* 3. 关它自己的端口/句柄、销毁 AS。 */
+    /* 3. 关它自己的端口/句柄、销毁 AS（先摘共享页/LFB，再销毁）。 */
     proc_release_handles(p);
+    shm_release_proc(p);
+    fbmap_release_proc(p);
     if (p->as != NULL) {
         as_destroy((struct user_as *)p->as);
         (void)kfree(p->as);

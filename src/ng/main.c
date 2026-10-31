@@ -46,6 +46,7 @@
 #include "proc_selftest.h"
 #include "sched_selftest.h"
 #include "serial.h"
+#include "shm.h"
 #include "syscall.h"
 #include "trap.h"
 #include "types.h"
@@ -53,6 +54,7 @@
 #include "wp24.h"
 #include "wp25.h"
 #include "wp26.h"
+#include "wp31.h"
 
 /* WP2-5：把每个 WP 的 PASS/FAIL 写进 64 KiB log 环（启动关键路径证据）。 */
 static void log_wp(const char *wp, int fails)
@@ -85,6 +87,11 @@ void kmain(u64 mb_info)
     serial_puts("ng: hello 64-bit\r\n");
     (void)log_write("boot", "ng: hello 64-bit");
     ipc_init();
+    /*
+     * WP3-1：共享内存对象表（数据面）。只清表 + 绑 PMM 环境钩子，不分配页；
+     * 真正分配在 ring3 的 SYS_SHM_ALLOC（displayd 建 surface 时）。
+     */
+    shm_init();
 
     /* WP1-4 前半：内存图 + PMM。必须在建页表之前（页表页从 PMM 来）。 */
     mem_fails = mem_boot_init(mb_info);
@@ -343,6 +350,27 @@ void kmain(u64 mb_info)
         serial_puts(")\r\n");
     }
     log_wp("WP3-0", fails);
+
+    /* WP3-1：display server（L2a，ring3 进程 /bin/displayd）+ demo（L3）。
+     * 依赖 WP2-3 的 VBE/LFB/PS2、WP3-0 的进程/spawn/IPC、WP1-7 的用户 AS，
+     * 以及本 WP 新加的 syscall 45/46/47（共享内存 + LFB 用户映射）。
+     * 没有 LFB（-vga none 降级）时打印 skipped 并跳过，不算失败。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += wp31_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP3-1 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP3-1 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+    log_wp("WP3-1", fails);
 
     /* WP2-6：用户态 shell（L3）。默认启动顺序：所有自检 -> ring3 hello ->
      * shell（交互，直到 exit/Ctrl-D）。`build-ng.ps1 -Smoke` 编出的内核跳过

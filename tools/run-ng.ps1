@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP2-6: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP3-1: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
 # 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
@@ -109,6 +109,17 @@
 #   ng: ring3 input ok (key=a|key=other|timeout)
 # Fallback 模式（-Fallback，QEMU -vga none）：
 #   ng: pci vga missing / ng: vga text fallback ok (0xB8000) 替代 VBE/fb 行。
+# WP3-1 追加（display server / demo；stdvga 模式）：
+#   ng: desktop bin ok (displayd=/bin/displayd demo=/bin/demo)
+#   ng: displayd spawn/up / display port ok / display port file ok
+#   ng: surface create ok / surface map ok / shm map ok
+#   ng: composite ok (px=0x3070c0 at=160,120) / displayd status ok
+#   ng: demo exit ok / shm refcount ok / demo hold wait ok
+#   ng: displayd kill ok (status=265 live=0) / WP3-1 selftest PASS
+#   QMP：看到 `ng: demo input ready` 注入 qcode b；看到 `ng: composite ok`
+#   做 screendump，断言 PPM 上 (at+25,+25) == #3070c0（默认模式强制）。
+#   -NoQmp 时 input 走 timeout 分支、不做 screendump；
+#   -Fallback 时期望 `ng: WP3-1 selftest skipped (no fb)`。
 #
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
@@ -252,7 +263,9 @@ if ($Panic) {
         'ng: proc ipc cross ok (pid=',
         'ng: proc as isolated ok (va=0x40010000',
         'ng: proc kill ok (pids=',
-        'ng: WP3-0 selftest PASS'
+        'ng: desktop bin ok (displayd=/bin/displayd demo=/bin/demo)',
+        'ng: WP3-0 selftest PASS',
+        'ng: WP3-1 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -328,6 +341,46 @@ if ($Panic) {
     # 注入命令序列；-Smoke 内核跳过 shell（只跑 ring3 hello）；-NoQmp 不注入，
     # 因此也不要求 WP2-6 的交互行（shell 会停在 readkey 等键，脚本命中前面的
     # 期望行后主动结束 QEMU）。
+    # WP3-1：display server（L2a）+ demo（L3）。stdvga 路径完整跑；-vga none
+    # 时内核打印 "skipped (no fb)"（没有 LFB，displayd 无从映射）。
+    if ($Fallback) {
+        $required += @('ng: WP3-1 selftest skipped (no fb)')
+    } else {
+        $required += @(
+            'ng: displayd spawn ok (pid=',
+            'ng: displayd up (fb=0xfd000000 1280x800',
+            'ng: display port ok (ticket=',
+            'ng: display port file ok (ticket=',
+            'ng: demo spawn ok (pid=',
+            'ng: surface create ok (id=',
+            'ng: surface map ok (id=',
+            'ng: shm map ok (va=0x',
+            'ng: composite ok (px=0x',
+            'ng: input route ok (',
+            'ng: demo exit ok (status=0)',
+            'ng: shm refcount ok (live=',
+            'ng: displayd status ok (surface=1',
+            'ng: demo hold spawn ok (pid=',
+            'ng: displayd kill ok (status=265',
+            'ng: demo hold wait ok (status=0'
+        )
+        $patterns += @(
+            'ng: displayd up \(fb=0x[0-9a-f]+ 1280x800 pitch=[0-9]+ bpp=32\)',
+            'ng: surface create ok \(id=[0-9]+ w=400 h=300 shm=0x[0-9a-f]+ pages=118\)',
+            'ng: shm map ok \(va=0x[0-9a-f]+ pages=118\)',
+            'ng: composite ok \(px=0x3070c0 at=[0-9]+,[0-9]+\)',
+            'ng: displayd status ok \(surface=1 commits=[0-9]+ input=[0-9]+ px=0x3070c0\)',
+            'ng: demo hold wait ok \(status=0 waiters=0\)'
+        )
+        if ($NoQmp) {
+            # 不注入按键：demo 打印 timeout 分支，仍然证明 INPUT 路径可达。
+            $patterns += @('ng: input route ok \(timeout id=[0-9]+\)')
+        } else {
+            # QMP 注入 'b' -> displayd readkey -> INPUT 消息 -> demo。
+            $patterns += @('ng: input route ok \(key=b id=[0-9]+\)')
+        }
+    }
+
     if ($Smoke) {
         $required += @('ng: shell skipped (smoke mode)')
     } elseif (-not $NoQmp) {
@@ -398,6 +451,11 @@ if ($Panic) {
         'ng: WP2-7 selftest FAIL',
         'ng: proc .* FAIL',
         'ng: WP3-0 selftest FAIL',
+        'ng: WP3-1 .* FAIL',
+        'ng: displayd .* FAIL',
+        'ng: surface .* FAIL',
+        'ng: composite .* FAIL',
+        'ng: demo .* FAIL',
         'ng: parity FAIL',
         '(?m)^parity: [0-9]+/100 .* \.\.\. FAIL'
     )
@@ -472,7 +530,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP3-0) ==='
+Write-Host '=== run-ng (WP3-1) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("disk: {0} ({1} bytes, ide)" -f $disk, (Get-Item -LiteralPath $disk).Length)
 Write-Host ("shell: {0}" -f $(if ($Smoke) { 'skipped (-Smoke)' } elseif ($NoQmp) { 'no QMP injection (-NoQmp)' } else { 'QMP command script' }))
@@ -543,6 +601,56 @@ function Send-QmpKey($Qmp, [string]$Key) {
         return $false
     }
     return $false
+}
+
+# ---- WP3-1：QMP screendump + PPM 像素断言 --------------------------------
+# displayd 合成完一帧后会打印 `ng: composite ok (px=0x.... at=X,Y)`；脚本据此
+# 用 QMP screendump 抓一张 PPM，再断言 surface 内部探针像素
+#   (X + 25, Y + 25) == #3070c0
+# 与内核自检（displayd 从 LFB 读回的 px）/demo 的实心矩形颜色一致。
+function Send-QmpScreendump($Qmp, [string]$Path) {
+    if (-not $Qmp) { return $false }
+    $jsonPath = ($Path -replace '\\', '/')
+    try {
+        $Qmp.Writer.WriteLine('{"execute":"screendump","arguments":{"filename":"' + $jsonPath + '"}}')
+        $resp = $Qmp.Reader.ReadLine()
+        if ($resp -and ($resp -match '"return"')) { return $true }
+        Write-Host ("run-ng: QMP screendump response: {0}" -f $resp)
+    } catch {
+        return $false
+    }
+    return $false
+}
+
+function Read-Ppm([string]$Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $i = 0
+    $tokens = @()
+    while ($tokens.Count -lt 4) {
+        while ($i -lt $bytes.Length -and ($bytes[$i] -eq 32 -or $bytes[$i] -eq 10 -or
+                $bytes[$i] -eq 13 -or $bytes[$i] -eq 9)) { $i++ }
+        if ($i -ge $bytes.Length) { return $null }
+        if ($bytes[$i] -eq 35) {   # '#' 注释到行尾（PPM 允许）
+            while ($i -lt $bytes.Length -and $bytes[$i] -ne 10) { $i++ }
+            continue
+        }
+        $start = $i
+        while ($i -lt $bytes.Length -and -not ($bytes[$i] -eq 32 -or $bytes[$i] -eq 10 -or
+                $bytes[$i] -eq 13 -or $bytes[$i] -eq 9)) { $i++ }
+        $tokens += [Text.Encoding]::ASCII.GetString($bytes, $start, $i - $start)
+    }
+    $i++   # 跳过 maxval 后面的一个空白字节
+    if ($tokens[0] -ne 'P6') { return $null }
+    return @{ W = [int]$tokens[1]; H = [int]$tokens[2]; Offset = $i; Bytes = $bytes }
+}
+
+function Get-PpmPixel($Ppm, [int]$X, [int]$Y) {
+    if ($null -eq $Ppm -or $X -lt 0 -or $Y -lt 0 -or $X -ge $Ppm.W -or $Y -ge $Ppm.H) {
+        return $null
+    }
+    $o = $Ppm.Offset + ($Y * $Ppm.W + $X) * 3
+    if ($o + 2 -ge $Ppm.Bytes.Length) { return $null }
+    return @($Ppm.Bytes[$o], $Ppm.Bytes[$o + 1], $Ppm.Bytes[$o + 2])
 }
 
 # ---- WP2-6：QMP 注入 shell 命令序列 ----------------------------------------
@@ -667,6 +775,12 @@ $p = Start-Process @spArgs
 
 $qmp = $null
 $injected = $false
+$demoInjected = $false
+$screenDumped = $false
+$screenChecked = $false
+$screenBad = $false
+$screenMsg = ''
+$screenPixel = ''
 $shellTyped = $false
 if ($qmpPort -gt 0) {
     $qmp = Connect-Qmp -Port $qmpPort
@@ -698,9 +812,56 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
                     $injected = $true
                 }
             }
+            # WP3-1：demo 已就绪 -> 注入 'b'（displayd readkey -> INPUT -> demo）。
+            if (-not $demoInjected -and $qmp -and -not $Fallback -and $text.Contains('ng: demo input ready')) {
+                $demoInjected = $true
+                if (Send-QmpKey $qmp 'b') {
+                    Write-Host 'run-ng: QMP sendkey b -> displayd input route'
+                } else {
+                    Write-Host 'run-ng: WARN QMP sendkey b failed; demo input uses timeout path'
+                }
+            }
+            # WP3-1：第一帧合成完成 -> screendump + 像素断言（只做一次）。
+            if (-not $screenChecked -and $qmp -and -not $Fallback -and $text.Contains('ng: composite ok (px=')) {
+                $screenChecked = $true
+                $shot = Join-Path $tmpBase 'screen.ppm'
+                Remove-Item -LiteralPath $shot -Force -ErrorAction SilentlyContinue
+                if (Send-QmpScreendump $qmp $shot) {
+                    for ($i = 0; $i -lt 60; $i++) {
+                        if ((Test-Path -LiteralPath $shot) -and (Get-Item -LiteralPath $shot).Length -gt 54) { break }
+                        Start-Sleep -Milliseconds 50
+                    }
+                    Start-Sleep -Milliseconds 150
+                    $ppm = $null
+                    if (Test-Path -LiteralPath $shot) { $ppm = Read-Ppm $shot }
+                    $originX = 160
+                    $originY = 120
+                    $last = [regex]::Matches($text, 'ng: composite ok \(px=0x[0-9a-f]+ at=(\d+),(\d+)\)')
+                    if ($last.Count -gt 0) {
+                        $originX = [int]$last[$last.Count - 1].Groups[1].Value
+                        $originY = [int]$last[$last.Count - 1].Groups[2].Value
+                    }
+                    $probeX = $originX + 25
+                    $probeY = $originY + 25
+                    $pixel = Get-PpmPixel $ppm $probeX $probeY
+                    if ($null -eq $pixel) {
+                        $screenBad = $true
+                        $screenMsg = ("no ppm/pixel at {0},{1}" -f $probeX, $probeY)
+                    } elseif ($pixel[0] -eq 0x30 -and $pixel[1] -eq 0x70 -and $pixel[2] -eq 0xC0) {
+                        $screenDumped = $true
+                        $screenPixel = ("({0},{1})=#{2:x2}{3:x2}{4:x2}" -f $probeX, $probeY, $pixel[0], $pixel[1], $pixel[2])
+                        Write-Host ("run-ng: screendump pixel ok {0}" -f $screenPixel)
+                    } else {
+                        $screenBad = $true
+                        $screenMsg = ("pixel ({0},{1})=#{2:x2}{3:x2}{4:x2}, want #3070c0" -f $probeX, $probeY, $pixel[0], $pixel[1], $pixel[2])
+                    }
+                } else {
+                    $screenBad = $true
+                    $screenMsg = 'QMP screendump failed'
+                }
+            }
             # WP2-6：shell 已 ready -> 逐字符注入整条命令序列（一次会话只做一次）。
-            if (-not $Smoke -and -not $NoQmp -and $qmp -and -not $shellTyped -and
-                $text.Contains('ng: shell ready')) {
+            if (-not $Smoke -and -not $NoQmp -and $qmp -and -not $shellTyped -and                $text.Contains('ng: shell ready')) {
                 $shellTyped = $true
                 Write-Host 'run-ng: QMP typing WP2-6 shell commands'
                 $null = Send-ShellScript $qmp
@@ -739,6 +900,12 @@ if ($matched) {
     Write-Host ('-' * 48)
     Write-Host ($serialText.TrimEnd())
     Write-Host ('-' * 48)
+    if (-not $Panic -and -not $Fallback -and -not $NoQmp) {
+        if (-not $screenDumped -or $screenBad) {
+            Fail ("QMP screendump pixel assertion failed ({0})" -f $screenMsg)
+        }
+        Write-Host ("run-ng: screendump pixel: {0} (QMP PPM)" -f $screenPixel)
+    }
     $missingCount = @($required | Where-Object { -not $serialText.Contains($_) }).Count
     Write-Host ("run-ng: matched {0}/{1} expected lines + {2} patterns" -f ($required.Count - $missingCount), $required.Count, $patterns.Count)
     if ($Panic) {

@@ -25,6 +25,8 @@ int test_log(void);
 int test_pkg(void);
 int test_shell(void);
 int test_proc(void);
+int test_shm(void);
+int test_desktop(void);
 int test_parity(void);
 
 int ut_checks;
@@ -58,6 +60,8 @@ int main(void)
     test_pkg();
     test_shell();
     test_proc();
+    test_shm();
+    test_desktop();
     test_parity();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);

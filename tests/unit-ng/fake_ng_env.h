@@ -93,6 +93,27 @@ void fake_proc_set_pid(u64 pid);
 u32 fake_proc_count(void);
 const struct fake_proc_call *fake_proc_get(u32 i);
 
+/* ---- fake 共享内存 / FB syscall 胶水（WP3-1：45..47）---------------------- */
+/* syscall.c 会调 shm_sys_alloc/shm_sys_map/fbmap_sys_map；host 单测只验证
+ * 分发与参数搬运，所以这里记录调用并返回固定值（不分配页/不映射 AS）。 */
+enum fake_mm_fn {
+    FAKE_MM_SHM_ALLOC = 45,
+    FAKE_MM_SHM_MAP = 46,
+    FAKE_MM_FB_MAP = 47
+};
+
+struct fake_mm_call {
+    u32 fn;
+    u64 a;
+    u64 b;
+    u64 c;
+};
+
+void fake_mm_reset(void);
+void fake_mm_set_ret(u64 ret);
+u32 fake_mm_count(void);
+const struct fake_mm_call *fake_mm_get(u32 i);
+
 /* ---- fake readkey（WP2-3：syscall 30 胶水）--------------------------------- */
 /* 默认返回 NG_EAGAIN；fake_input_set_readkey 设定下一次（以及之后）的返回值。 */
 void fake_input_reset(void);

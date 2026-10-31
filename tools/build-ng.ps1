@@ -1,10 +1,11 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP2-6: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
+# build-ng.ps1 - ng WP3-1: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
 #               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello
 #               + VFS/ramfs（L1 服务域）+ FAT16（L1，RAM 盘镜像）+
 #               PCI/VBE/帧缓冲控制台 + PS/2 键盘（L1D 设备域）+
 #               ATA PIO 块设备 + 真实磁盘镜像上的 FAT16（L1D/L0，WP2-4）+
-#               auth/log/pkg（L1，WP2-5）+ 用户态 shell（L3，WP2-6））
+#               auth/log/pkg（L1，WP2-5）+ 用户态 shell（L3，WP2-6）+ 多进程（WP3-0）
+#               + display server / demo（L2a/L3，WP3-1））
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
@@ -98,7 +99,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP3-0) ==='
+Write-Host '=== build-ng (WP3-1) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -120,16 +121,22 @@ $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-I', (Join-Path $Repo 'src/services/log/include'),
     '-I', (Join-Path $Repo 'src/services/pkg/include'),
     '-I', (Join-Path $Repo 'src/drivers/include'),
+    '-I', (Join-Path $Repo 'src/desktop/include'),
     '-I', (Join-Path $Repo 'tests/parity'),
     '-c')
 if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
 if ($Smoke) { $cFlags += '-DNG_SMOKE_MODE=1' }
 
 # 用户程序（src/apps/shell/shell.c）的编译选项：ring3、无 libc、无 SSE。
+# WP3-1：displayd/demo 用 L2 的纯逻辑模块（src/desktop/{include,src}），所以
+# 用户程序也要有 src/ng（types.h）与 src/desktop/include 两个 include 路径。
 $userCFlags = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
     '-fno-stack-protector', '-fcf-protection=none', '-mno-sse',
     '-mgeneral-regs-only', '-fno-builtin', '-fno-pic', '-fno-pie', '-std=c11',
-    '-O2', '-Wall', '-Wextra', '-Werror', '-c')
+    '-O2', '-Wall', '-Wextra', '-Werror',
+    '-I', $srcDir,
+    '-I', (Join-Path $Repo 'src/desktop/include'),
+    '-c')
 
 # ---- WP1-7：用户程序 hello.S -> hello.elf（0x40000000）-> .incbin 嵌内核 ----
 # 用户 ELF 不是最终交付物，但它是"内核 ELF64 加载器"的真实输入：先按 0x40000000
@@ -414,6 +421,133 @@ if ($LASTEXITCODE -ne 0) { Fail 'proc ELF embed compile failed' }
 Write-Host ("user-proc: PASS ({0} bytes, {1} PT_LOAD, entry 0x{2:x}, end 0x{3:x})" -f $pb.Length, $pLoadCount, $pEntry, $pLoadEnd)
 Write-Host ''
 
+# ---- WP3-1：displayd（L2a）+ demo（L3）-------------------------------------
+# 两个用户 ELF 都链接到 0x40000000，共用 L2 的纯逻辑模块（协议编解码、surface
+# 表、合成器、绘制、8x8 字模）。displayd 是 ring3 display server，demo 是它的
+# 第一个客户端；内核把两个 ELF 都 .incbin 进 .rodata，proc_init 种到 /bin。
+function Test-NgUserElf {
+    param([string]$Path, [string]$Label, [int]$MinLoad)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $probs = New-Object System.Collections.Generic.List[string]
+    $load = 0
+    $end = 0
+    $entry = 0
+    if ($bytes.Length -lt 64) {
+        $probs.Add('smaller than ELF64 header')
+    } elseif (-not ($bytes[0] -eq 0x7F -and $bytes[1] -eq 0x45 -and $bytes[2] -eq 0x4C -and $bytes[3] -eq 0x46)) {
+        $probs.Add('bad magic')
+    } else {
+        if ($bytes[4] -ne 2) { $probs.Add(("class={0}, want 2" -f $bytes[4])) }
+        if ($bytes[5] -ne 1) { $probs.Add(("data={0}, want 1 (LSB)" -f $bytes[5])) }
+        $eType = [BitConverter]::ToUInt16($bytes, 16)
+        $eMachine = [BitConverter]::ToUInt16($bytes, 18)
+        $entry = [BitConverter]::ToUInt64($bytes, 24)
+        $phOff = [BitConverter]::ToUInt64($bytes, 32)
+        $phEnt = [BitConverter]::ToUInt16($bytes, 54)
+        $phNum = [BitConverter]::ToUInt16($bytes, 56)
+        if ($eType -ne 2) { $probs.Add(("e_type={0}, want 2 (ET_EXEC)" -f $eType)) }
+        if ($eMachine -ne 62) { $probs.Add(("e_machine={0}, want 62" -f $eMachine)) }
+        if ($phEnt -ne 56) { $probs.Add(("e_phentsize={0}, want 56" -f $phEnt)) }
+        if ($phNum -lt 1) { $probs.Add('no program headers') }
+        if ($entry -lt 0x40000000 -or $entry -ge 0x40010000) {
+            $probs.Add(("e_entry=0x{0:x} outside 0x40000000..0x40010000" -f $entry))
+        }
+        for ($i = 0; $i -lt $phNum; $i++) {
+            $ph = [int]$phOff + ($i * $phEnt)
+            if ($ph + 56 -gt $bytes.Length) { $probs.Add('phdr outside file'); break }
+            if ([BitConverter]::ToUInt32($bytes, $ph) -ne 1) { continue }  # PT_LOAD
+            $load++
+            $pFlags = [BitConverter]::ToUInt32($bytes, $ph + 4)
+            $pVaddr = [BitConverter]::ToUInt64($bytes, $ph + 16)
+            $pFilesz = [BitConverter]::ToUInt64($bytes, $ph + 32)
+            $pMemsz = [BitConverter]::ToUInt64($bytes, $ph + 40)
+            $pAlign = [BitConverter]::ToUInt64($bytes, $ph + 48)
+            if (($pVaddr % 4096) -ne 0) { $probs.Add(("PT_LOAD vaddr=0x{0:x} not 4 KiB aligned" -f $pVaddr)) }
+            if ($pAlign -lt 4096) { $probs.Add(("PT_LOAD align=0x{0:x} < 4096" -f $pAlign)) }
+            if ($pFilesz -gt $pMemsz) { $probs.Add('PT_LOAD filesz > memsz') }
+            if (($pFlags -band 3) -eq 3) { $probs.Add(("PT_LOAD 0x{0:x} is W+X (W^X violated)" -f $pVaddr)) }
+            if ($pVaddr -lt 0x40000000) { $probs.Add(("PT_LOAD vaddr=0x{0:x} below base" -f $pVaddr)) }
+            if (($pVaddr + $pMemsz) -gt 0x40010000) {
+                $probs.Add(("PT_LOAD ends 0x{0:x} above 0x40010000" -f ($pVaddr + $pMemsz)))
+            }
+            if (($pVaddr + $pMemsz) -gt $end) { $end = $pVaddr + $pMemsz }
+        }
+        if ($load -lt $MinLoad) {
+            $probs.Add(("PT_LOAD count {0} < {1}" -f $load, $MinLoad))
+        }
+    }
+    if ($probs.Count -gt 0) {
+        foreach ($p in $probs) { Write-Host ("  ! {0}" -f $p) }
+        Fail ("user {0} ELF verification failed" -f $Label)
+    }
+    Write-Host ("user-{0}: PASS ({1} bytes, {2} PT_LOAD, entry 0x{3:x}, end 0x{4:x})" -f `
+        $Label, $bytes.Length, $load, $entry, $end)
+    return @{ Bytes = $bytes; LoadCount = $load; Entry = $entry; End = $end }
+}
+
+function New-NgUserBlob {
+    param([string]$ElfPath, [string]$SymbolPrefix, [string]$ObjPath, [string]$AsmPath, [string]$Label)
+    $inc = ($ElfPath -replace '\\', '/')
+    $text = @"
+/* generated by tools/build-ng.ps1 (WP3-1): embed $Label ELF into .rodata */
+    .section .rodata
+    .align 16
+    .global ${SymbolPrefix}_start
+${SymbolPrefix}_start:
+    .incbin "$inc"
+    .global ${SymbolPrefix}_end
+${SymbolPrefix}_end:
+    .align 16
+"@
+    [IO.File]::WriteAllText($AsmPath, $text, (New-Object Text.UTF8Encoding $false))
+    & $clang @($asmFlags + @($AsmPath, '-o', $ObjPath)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0} ELF embed compile failed" -f $Label) }
+}
+
+Write-Host '=== user-desktop (WP3-1) ==='
+$dsInclude = Join-Path $Repo 'src/desktop/include'
+$dsSrcDir = Join-Path $Repo 'src/desktop/src'
+$dsUserSources = @('ds_protocol.c', 'ds_surface.c', 'ds_composite.c',
+    'ds_font8x8.c', 'ds_draw.c')
+$dsUserObjs = New-Object System.Collections.Generic.List[string]
+foreach ($name in $dsUserSources) {
+    $src = Join-Path $dsSrcDir $name
+    if (-not (Test-Path -LiteralPath $src)) { Fail ("missing desktop source: {0}" -f $src) }
+    $obj = Join-Path $objDir ('ds_' + [IO.Path]::GetFileNameWithoutExtension($name) + '.o')
+    Write-Host ("  {0} -> {1}" -f $name, ('obj-ng/' + [IO.Path]::GetFileName($obj)))
+    & $clang @($userCFlags + @($src, '-o', $obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0} compile failed" -f $name) }
+    $dsUserObjs.Add($obj)
+}
+
+$desktopPrograms = @(
+    @{ Name = 'displayd'; Src = (Join-Path $Repo 'src/desktop/display/displayd.c');
+       Obj = (Join-Path $objDir 'user_displayd.o'); Elf = (Join-Path $objDir 'displayd.elf');
+       Sym = 'ng_displayd_elf'; Label = 'displayd' },
+    @{ Name = 'demo'; Src = (Join-Path $Repo 'src/apps/demo/demo.c');
+       Obj = (Join-Path $objDir 'user_demo.o'); Elf = (Join-Path $objDir 'demo.elf');
+       Sym = 'ng_demo_elf'; Label = 'demo' }
+)
+$desktopBlobObjs = New-Object System.Collections.Generic.List[string]
+foreach ($prog in $desktopPrograms) {
+    if (-not (Test-Path -LiteralPath $prog.Src)) { Fail ("missing desktop program: {0}" -f $prog.Src) }
+    Write-Host ("  {0}.c -> {1}" -f $prog.Name, ('obj-ng/' + [IO.Path]::GetFileName($prog.Obj)))
+    & $clang @($userCFlags + @($prog.Src, '-o', $prog.Obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0}.c compile failed" -f $prog.Name) }
+    Write-Host ("  link    -> {0} (base 0x40000000)" -f ('obj-ng/' + [IO.Path]::GetFileName($prog.Elf)))
+    $linkUserArgs = @($target, '-fuse-ld=lld', '-nostdlib',
+        ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
+        '-o', $prog.Elf, $prog.Obj) + $dsUserObjs.ToArray()
+    & $clang @linkUserArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0}.elf link failed" -f $prog.Name) }
+    $info = Test-NgUserElf -Path $prog.Elf -Label $prog.Label -MinLoad 2
+    $blobObj = Join-Path $objDir ($prog.Name + '_elf_blob.o')
+    $blobAsm = Join-Path $objDir ($prog.Name + '_elf_blob.S')
+    New-NgUserBlob -ElfPath $prog.Elf -SymbolPrefix $prog.Sym -ObjPath $blobObj -AsmPath $blobAsm -Label $prog.Label
+    $desktopBlobObjs.Add($blobObj)
+}
+Write-Host ''
+
 # ---- WP2-2：FAT16 测试镜像 -> .incbin 嵌内核 .rodata ----------------------
 Write-Host '=== fat16 image (WP2-2) ==='
 $fatImg = Join-Path $objDir 'fat16.img'
@@ -516,7 +650,7 @@ Write-Host ''
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'proc_table.c', 'proc.c', 'proc_selftest.c', 'parity_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'proc_table.c', 'proc.c', 'proc_selftest.c', 'shm_core.c', 'shm.c', 'fbmap.c', 'wp31_selftest.c', 'parity_selftest.c', 'main.c')
 # L1 服务域源码（相对仓库根；-I src/ng 与各 src/services/*/include 已加）。
 $serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',
@@ -592,7 +726,7 @@ Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($shellParityObj, $userBlobObj, $shellBlobObj, $procBlobObj, $fatBlobObj)
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($shellParityObj, $userBlobObj, $shellBlobObj, $procBlobObj, $fatBlobObj) + $desktopBlobObjs.ToArray()
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

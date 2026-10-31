@@ -206,7 +206,20 @@ VFS（ramfs `/bin/*`）读 ELF64 → `elf64_load` 新 AS → 新内核线程 →
 两跳）与 AS 隔离/阻塞态 kill 证据；shell 新增 `spawn` / `wait` / `pid` 命令，
 run-ng 注入 `spawn /bin/proc hello` + `wait` 验证 shell 作为父进程。
 证据见 `docs/claims/ng-WP3-0.md`，设计见 `docs/design/proc-ng.md`。
-下一步：WP3-1 display server（fb/输入接 IRQ、surface/buffer、焦点路由）。
+
+**WP3-1 完成**（display server，L2a）。内核只加机制：syscall **45 SHM_ALLOC /
+46 SHM_MAP / 47 FB_MAP**（共享物理页 + refcount、owner/root 校验、进程退出/
+被 kill 先摘映射再销毁 AS；LFB 以 PCD/PWT/NX 映射进用户 AS，root-only）；L2
+新增 `src/desktop/{include,src,display}`：`/bin/displayd`（ring3）用
+`FB_MAP` 拿扫描输出、`PORT_CREATE` 建显示端口并把 ticket 写进
+`/run/display.port`，surface 表/z-order/裁剪/ARGB source-over 合成/基础光标/
+焦点/PS2 输入转发全部在 ring3；surface 像素走**共享内存**（控制面仍是 ≤4 KiB
+IPC 消息，CREATE 返回 `shm_handle`）。`/bin/demo`（L3）读发现文件 → 建
+400x300 surface → 画渐变/矩形/文字 → COMMIT → 等 INPUT。run-ng 用 QMP
+`input-send-event` 注入 `b`，并 `screendump` 抓 PPM 断言 `(185,145)=#3070c0`；
+kill displayd 后内核继续跑、客户端自己超时退出（崩溃隔离）。证据见
+`docs/claims/ng-WP3-1.md`，设计见 `docs/design/display-server-ng.md`。
+下一步：WP3-2 shell/WM（面板/启动器/任务切换）。
 
 ### E4
 

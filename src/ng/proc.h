@@ -106,6 +106,11 @@ struct proc {
     u64 load_pages;
     u32 load_segs;
     u32 marker_phys; /* 标记页物理地址（证据/自检） */
+    /*
+     * ng WP3-1：共享内存 bump 分配器（0 = 还没用过，从 SHM_VA_BASE 开始）。
+     * 同一个 shm 对象在 displayd 和客户端里可以落在不同 VA —— 这是正常的。
+     */
+    u64 shm_next_va;
     char path[PROC_PATH_MAX];
     char cwd[PROC_CWD_MAX];
     void *as;      /* struct user_as *（纯表把它当不透明指针） */

@@ -22,6 +22,7 @@
  */
 #include "syscall.h"
 
+#include "fbmap.h"
 #include "fs_syscall.h"
 #include "gdt.h"
 #include "io.h"
@@ -29,6 +30,7 @@
 #include "paging.h"
 #include "proc.h"
 #include "serial.h"
+#include "shm.h"
 #include "svc_syscall.h"
 #include "thread.h"
 #include "uaccess.h"
@@ -381,6 +383,16 @@ void syscall_dispatch(struct syscall_frame *f)
         break;
     case NG_SYS_GETPPID:
         f->rax = proc_sys_getppid();
+        break;
+    /* WP3-1：显示/共享内存机制。用户指针在 shm.c/fbmap.c 里经 uaccess 校验。 */
+    case NG_SYS_SHM_ALLOC:
+        f->rax = shm_sys_alloc(f->rdi, f->rsi, f->rdx);
+        break;
+    case NG_SYS_SHM_MAP:
+        f->rax = shm_sys_map(f->rdi, f->rsi);
+        break;
+    case NG_SYS_FB_MAP:
+        f->rax = fbmap_sys_map(f->rdi, f->rsi);
         break;
     default:
         f->rax = (u64)-1;

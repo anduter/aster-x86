@@ -71,6 +71,7 @@ static void reset_env(void)
     fake_serial_reset();
     fake_ipc_reset();
     fake_proc_reset();
+    fake_mm_reset();
     fake_gdt_reset();
     fake_ring3_set(NULL, NULL);
     memset(arena, 0, sizeof(arena));
@@ -739,6 +740,51 @@ static void t_dispatch_proc(void)
     CHECK(fake_proc_count() == 5);
 }
 
+/* ------------------------------------------------------------------------- */
+/* WP3-1：45..47（共享内存 + LFB 映射）的参数搬运                             */
+/* ------------------------------------------------------------------------- */
+
+static void t_dispatch_mm(void)
+{
+    struct syscall_frame f;
+    const struct fake_mm_call *c;
+
+    reset_env();
+    fake_mm_set_ret(0);
+
+    frame_init(&f, NG_SYS_SHM_ALLOC);
+    f.rdi = 118;
+    f.rsi = 0x5000;
+    f.rdx = 0x6000;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    CHECK(fake_mm_count() == 1);
+    c = fake_mm_get(0);
+    CHECK(c != NULL && c->fn == FAKE_MM_SHM_ALLOC);
+    CHECK(c != NULL && c->a == 118 && c->b == 0x5000 && c->c == 0x6000);
+
+    frame_init(&f, NG_SYS_SHM_MAP);
+    f.rdi = 0x10003;
+    f.rsi = 0x7000;
+    fake_mm_set_ret((u64)(i64)(-1));
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)(-1));
+    c = fake_mm_get(1);
+    CHECK(c != NULL && c->fn == FAKE_MM_SHM_MAP);
+    CHECK(c != NULL && c->a == 0x10003 && c->b == 0x7000);
+
+    frame_init(&f, NG_SYS_FB_MAP);
+    f.rdi = 0x8000;
+    f.rsi = 0x9000;
+    fake_mm_set_ret((u64)(i64)(-19));
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)(-19));
+    c = fake_mm_get(2);
+    CHECK(c != NULL && c->fn == FAKE_MM_FB_MAP);
+    CHECK(c != NULL && c->a == 0x8000 && c->b == 0x9000);
+    CHECK(fake_mm_count() == 3);
+}
+
 int test_syscall(void)
 {
     t_dispatch_basic();
@@ -747,6 +793,7 @@ int test_syscall(void)
     t_dispatch_fs();
     t_dispatch_svc();
     t_dispatch_proc();
+    t_dispatch_mm();
     t_run_user_args();
     t_run_user_ok();
     t_run_user_bad();

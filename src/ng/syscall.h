@@ -42,6 +42,9 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
  *  42  getpid()                             -> pid               （WP3-0）
  *  43  kill(pid, sig)                       -> 0 / -err          （WP3-0）
  *  44  getppid()                            -> ppid              （WP3-0）
+ *  45  shm_alloc(size_pages, &va, &handle)  -> 0 / -err          （WP3-1）
+ *  46  shm_map(handle, &va)                 -> 0 / -err          （WP3-1）
+ *  47  fb_map(&va, &info)                   -> 0 / -err          （WP3-1，root）
  * 其中 msg/buf/path/stat 是用户指针（内核做 U/S 页校验 + SMAP copyin/copyout）；
  * timeout 单位是 TSC tick（0 = 非阻塞，~0 = 永久）。
  *
@@ -76,6 +79,9 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
 #define NG_SYS_GETPID 42u
 #define NG_SYS_KILL 43u
 #define NG_SYS_GETPPID 44u
+#define NG_SYS_SHM_ALLOC 45u
+#define NG_SYS_SHM_MAP 46u
+#define NG_SYS_FB_MAP 47u
 
 /* ring3 一次执行的统计（syscall_run_user 填）。 */
 struct ring3_result {

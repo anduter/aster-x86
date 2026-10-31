@@ -13,10 +13,12 @@
 
 - main：冻结在 69ab006（旧 32 位，305/305）。
 - 开发分支：ng（64 位内核）。
-- 当前阶段：**E3 进行中（WP3-0 完成）**。E2（WP2-1…WP2-7）已全部完成并打
-  tag `ng-e2`（`d3a5671`）；E3 的前置 **WP3-0（多进程用户态 + 跨进程 IPC）**
-  落地：进程表/spawn/wait/kill、per-process 句柄表、ticket 跨进程 IPC、
-  shell 作为父进程。
+- 当前阶段：**E3 进行中（WP3-0、WP3-1 完成）**。E2（WP2-1…WP2-7）已全部完成
+  并打 tag `ng-e2`（`d3a5671`）；E3 的前置 **WP3-0（多进程用户态 + 跨进程
+  IPC）** 与 **WP3-1（display server，L2a）** 落地：进程表/spawn/wait/kill、
+  per-process 句柄表、ticket 跨进程 IPC、shell 作为父进程；syscall 45/46/47
+  （共享内存 + LFB 用户映射）、ring3 `/bin/displayd`（surface/合成/焦点/输入
+  转发）、L3 `/bin/demo`、QMP screendump 像素断言。
 - 门禁：`tools/ci-ng.ps1` 一条命令跑 check-domains / check-deps / unit-ng /
   build-ng / run-ng / parity-ng / 旧 32 位 `build.ps1 -Test`，全绿输出
   `=== NG CI PASS ===`（`-Quick` 跳 QEMU/legacy）；CI 见
@@ -25,12 +27,14 @@
   `ng: ring3 input ok` + 用户态 shell（`ng: shell ready` / 各命令证据行 /
   `ng: WP2-6 selftest PASS`）+ **parity 100/100**
   （`ng: parity 100/100 PASS`，host 95/95）+ **WP3-0 多进程**
-  （`ng: proc spawn/wait/ipc cross/kill/as isolated` /`ng: WP3-0 selftest PASS`）；
-  host 单测 **4043 checks, 0 failures**；旧 32 位 305/305；
+  （`ng: proc spawn/wait/ipc cross/kill/as isolated` /`ng: WP3-0 selftest PASS`）
+  + **WP3-1 display server**（`ng: displayd up` / `ng: composite ok (px=...)` /
+  `ng: input route ok` / `ng: WP3-1 selftest PASS` + QMP 截图像素）；
+  host 单测 **4402 checks, 0 failures**；旧 32 位 305/305；
   check-domains / check-deps 0 违规（`docs/claims/ng-WP2-1.md` …
-  `ng-WP2-7.md`、`ng-WP3-0.md`）。
-- 下一步：E3 主体（WP3-1 display server / WP3-2 shell-WM / WP3-3 session
-  manager / WP3-4 SDK alpha），见 evolution.md。
+  `ng-WP2-7.md`、`ng-WP3-0.md`、`ng-WP3-1.md`）。
+- 下一步：E3 主体（WP3-2 shell/WM / WP3-3 session manager / WP3-4 SDK
+  alpha），见 evolution.md。
 
 ## 执行规则
 
@@ -60,5 +64,6 @@
 | auth-log-pkg-ng.md | WP2-5 auth（salt+SHA-256 迭代）/ 64 KiB log 环 / pkg 清单与校验 / syscall 31..35 |
 | shell-ng.md | WP2-6 用户态 shell（L3）：命令/行编辑/重定向/cwd/证据行/run-ng 注入 |
 | proc-ng.md | WP3-0 进程模型：pid/进程表、spawn/wait/kill、per-process 句柄、ticket 跨进程 IPC |
+| display-server-ng.md | WP3-1 display server（L2a）：syscall 45/46/47、共享内存 refcount、协议、surface/z-order/合成、输入路由、QMP 像素断言 |
 | `tests/parity/parity_cases.h` / `parity_body.inc` | WP2-7 parity 100 项的唯一 case 表与共享断言体（kernel/host 同源） |
 | domains/ | 每域一页 |

@@ -89,6 +89,7 @@ $sources = @(
     'src/ng/handle.c',
     'src/ng/ipc_core.c',
     'src/ng/proc_table.c',
+    'src/ng/shm_core.c',
     'src/ng/elf.c',
     'src/ng/uaccess.c',
     'src/ng/syscall.c',
@@ -110,6 +111,11 @@ $sources = @(
     'src/drivers/video/vga_text.c',
     'src/drivers/input/ps2.c',
     'src/apps/shell/shell.c',
+    'src/desktop/src/ds_protocol.c',
+    'src/desktop/src/ds_surface.c',
+    'src/desktop/src/ds_composite.c',
+    'src/desktop/src/ds_font8x8.c',
+    'src/desktop/src/ds_draw.c',
     'tests/unit-ng/fake_ng_env.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
@@ -129,6 +135,8 @@ $sources = @(
     'tests/unit-ng/test_pkg.c',
     'tests/unit-ng/test_shell.c',
     'tests/unit-ng/test_proc.c',
+    'tests/unit-ng/test_shm.c',
+    'tests/unit-ng/test_desktop.c',
     'tests/unit-ng/test_parity.c'
 )
 $srcPaths = @()
@@ -143,6 +151,7 @@ $ccArgs = @(
     '-I', (Join-Path $Repo 'src/services/log/include'),
     '-I', (Join-Path $Repo 'src/services/pkg/include'),
     '-I', (Join-Path $Repo 'src/drivers/include'),
+    '-I', (Join-Path $Repo 'src/desktop/include'),
     '-I', (Join-Path $Repo 'tests/unit-ng'),
     '-I', (Join-Path $Repo 'tests/parity'),
     '-o', $exe

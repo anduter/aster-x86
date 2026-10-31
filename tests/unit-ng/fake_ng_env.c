@@ -461,6 +461,75 @@ u64 proc_sys_getppid(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* fake 共享内存 / FB syscall 胶水（WP3-1：45..47）                           */
+/* ------------------------------------------------------------------------- */
+
+#define FAKE_MM_MAX 8u
+
+static struct fake_mm_call fmm_calls[FAKE_MM_MAX];
+static u32 fmm_count;
+static u64 fmm_ret;
+
+void fake_mm_reset(void)
+{
+    u32 i;
+
+    for (i = 0; i < FAKE_MM_MAX; i++) {
+        fmm_calls[i].fn = 0;
+        fmm_calls[i].a = 0;
+        fmm_calls[i].b = 0;
+        fmm_calls[i].c = 0;
+    }
+    fmm_count = 0;
+    fmm_ret = 0;
+}
+
+void fake_mm_set_ret(u64 ret)
+{
+    fmm_ret = ret;
+}
+
+u32 fake_mm_count(void)
+{
+    return fmm_count;
+}
+
+const struct fake_mm_call *fake_mm_get(u32 i)
+{
+    if (i >= fmm_count || i >= FAKE_MM_MAX) {
+        return NULL;
+    }
+    return &fmm_calls[i];
+}
+
+static u64 fake_mm_record(u32 fn, u64 a, u64 b, u64 c)
+{
+    if (fmm_count < FAKE_MM_MAX) {
+        fmm_calls[fmm_count].fn = fn;
+        fmm_calls[fmm_count].a = a;
+        fmm_calls[fmm_count].b = b;
+        fmm_calls[fmm_count].c = c;
+    }
+    fmm_count++;
+    return fmm_ret;
+}
+
+u64 shm_sys_alloc(u64 pages, u64 uva_out, u64 uhandle_out)
+{
+    return fake_mm_record(FAKE_MM_SHM_ALLOC, pages, uva_out, uhandle_out);
+}
+
+u64 shm_sys_map(u64 handle, u64 uva_out)
+{
+    return fake_mm_record(FAKE_MM_SHM_MAP, handle, uva_out, 0);
+}
+
+u64 fbmap_sys_map(u64 uva_out, u64 uinfo_out)
+{
+    return fake_mm_record(FAKE_MM_FB_MAP, uva_out, uinfo_out, 0);
+}
+
+/* ------------------------------------------------------------------------- */
 /* fake readkey（WP2-3：syscall 30 的分发只在 host 上验证“透传 + 返回值”）    */
 /* ------------------------------------------------------------------------- */
 
