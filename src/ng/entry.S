@@ -1,5 +1,5 @@
 # =============================================================================
-# ng WP1-1: 32 位启动入口 -> 长模式（long mode） -> 64 位 C 入口
+# ng WP1-1/WP1-2: 32 位启动入口 -> 长模式（long mode） -> 64 位 C 入口
 #
 # 镜像同时带两个“启动头”，都落在同一个 32 位入口 _start：
 #   - multiboot2 header：给 GRUB 之类的 multiboot2 引导器；
@@ -8,8 +8,13 @@
 #     走 PVH 路径（"Error loading uncompressed kernel without PVH ELF Note"）。
 #   两条路径的进入状态相同：32 位保护模式、分页关闭、平坦段。
 #
-# 本文件只做 WP1-1 的最小闭环：建 1 GiB 恒等页表 -> 开 PAE/LME/PG ->
-# far jump 进 64 位 -> 调 kmain。不做 trap/syscall/PMM（后续 WP）。
+# 本文件只建**引导用**的最小页表（1 GiB 恒等映射、2 MiB 大页），够把 CPU 带进
+# 长模式并跑到 C。真正的 4 级页表（4 KiB 内核段 + 2 MiB 大页混合、W^X/NX）由
+# src/ng/paging.c 建好后写 CR3 切换；两张表对当前代码/栈/页表池的映射一致，
+# 所以切 CR3 之后不需要再来一次 far jump。
+#
+# 本文件在开分页之前就把 EFER.NXE 置上（CPU 支持时）：NX 位必须在任何带 NX
+# 的页表被装载前生效，否则 NX=1 会被当成保留位 -> #PF。
 # =============================================================================
 
 # ---- multiboot2 header（8 字节对齐，必须在前 32 KiB 文件内）----------------
@@ -50,16 +55,16 @@ gdt64_ptr:
     .short gdt64_end - gdt64 - 1
     .quad gdt64
 
-# ---- 页表与启动栈（.bss；QEMU/GRUB 加载 ELF 时按 p_memsz 清零，入口再显式清零）--
+# ---- 引导页表与启动栈（.bss；入口显式清零，不依赖加载器行为）-------------
     .section .bss
     .align 4096
-pml4:
+boot_pml4:
     .skip 4096
     .align 4096
-pdpt:
+boot_pdpt:
     .skip 4096
     .align 4096
-pd:
+boot_pd:
     .skip 4096
 
     .align 16
@@ -76,10 +81,10 @@ _start:
     cli
     cld
     # EBX 由引导器给：multiboot2 = information pointer，PVH = hvm_start_info。
-    # WP1-1 还不用，先存进 ESI 留给 kmain（64 位下作为第一个参数）。
+    # 本 WP 不用，先存进 ESI 留给 kmain（64 位下作为第一个参数）。
     movl %ebx, %esi
 
-    # 检查 CPUID 是否支持长模式：CPUID.80000001h:EDX[29] = LM
+    # CPUID 80000001h：EDX[29]=LM（必须有），EDX[20]=NX（决定 EFER.NXE）
     movl $0x80000000, %eax
     cpuid
     cmpl $0x80000001, %eax
@@ -88,10 +93,13 @@ _start:
     cpuid
     btl $29, %edx
     jnc .Lno_long_mode
+    xorl %ebp, %ebp
+    btl $20, %edx
+    adcl $0, %ebp                         # EBP = 1 表示支持 NX
 
     # 32 位启动栈（64 位入口会重新设置一次；这里先保证能跑 C 之前的代码）
     movl $boot_stack_top, %esp
-    xorl %ebp, %ebp
+    xorl %ebx, %ebx
 
     # 载入带 64 位段的 GDT，并用 far jump 刷新 CS
     lgdt gdt64_ptr
@@ -104,19 +112,19 @@ _start:
     movw %ax, %fs
     movw %ax, %gs
 
-    # 先把三张表清零：不依赖加载器对 .bss 的清零行为
-    movl $pml4, %edi
+    # 先把三张引导表清零
+    movl $boot_pml4, %edi
     xorl %eax, %eax
     movl $(3 * 1024), %ecx                # 3 页 = 3 * 1024 个 dword
     rep stosl
 
     # PML4[0] -> PDPT，PDPT[0] -> PD（present + writable）
-    movl $pdpt, %eax
+    movl $boot_pdpt, %eax
     orl $0x3, %eax
-    movl %eax, pml4
-    movl $pd, %eax
+    movl %eax, boot_pml4
+    movl $boot_pd, %eax
     orl $0x3, %eax
-    movl %eax, pdpt
+    movl %eax, boot_pdpt
 
     # PD[i] = i * 2 MiB | PS | RW | P，i = 0..511：恒等映射前 1 GiB
     xorl %ecx, %ecx
@@ -124,8 +132,8 @@ _start:
     movl %ecx, %eax
     shll $21, %eax
     orl $0x83, %eax                       # 0x80 = PS（2 MiB 页）
-    movl %eax, pd(,%ecx,8)
-    movl $0, pd+4(,%ecx,8)
+    movl %eax, boot_pd(,%ecx,8)
+    movl $0, boot_pd+4(,%ecx,8)
     incl %ecx
     cmpl $512, %ecx
     jne .Lfill_pd
@@ -134,15 +142,22 @@ _start:
     movl %cr4, %eax
     orl $0x20, %eax
     movl %eax, %cr4
-    # CR3 = PML4 物理地址（此时恒等映射，虚拟地址 == 物理地址）
-    movl $pml4, %eax
+    # CR3 = 引导 PML4 物理地址（此时恒等映射，虚拟地址 == 物理地址）
+    movl $boot_pml4, %eax
     movl %eax, %cr3
-    # EFER.LME = 1
+
+    # EFER：LME=1；支持 NX 时同时置 NXE（必须在开分页前）
     movl $0xC0000080, %ecx
     rdmsr
-    orl $0x100, %eax
+    orl $0x100, %eax                      # LME
+    testl %ebp, %ebp
+    jz .Lefer_nx_done
+    orl $0x800, %eax                      # NXE = bit 11
+.Lefer_nx_done:
     wrmsr
-    # CR0.PG = 1：从这里开始进入长模式（compatibility 子模式，CS 仍是 32 位）
+    xorl %ebp, %ebp
+
+    # CR0.PG = 1：从这条指令开始进入长模式（compatibility 子模式，CS 仍是 32 位）
     movl %cr0, %eax
     orl $0x80000000, %eax
     movl %eax, %cr0

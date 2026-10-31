@@ -1,16 +1,18 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP1-1: 构建 64 位 boot 内核（ELF64 x86_64）
+# build-ng.ps1 - ng WP1-2: 构建 64 位内核（ELF64 x86_64，4 级页表 + W^X/NX）
 #
-# 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、页表、长模式）、
-#       src/ng/main.c（64 位 C 入口：COM1 串口 hello）、src/ng/link.ld。
+# 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
+#       src/ng/serial.c（COM1）、src/ng/paging.c（4 级页表/W^X/NX/SMEP/SMAP）、
+#       src/ng/main.c（64 位 C 入口）、src/ng/link.ld。
 # 输出：dist-ng/aster-ng.elf，对象文件在 obj-ng/。
 #
 # 工具链（WP0-4 已验证）：
 #   clang --target=x86_64-elf -fuse-ld=lld -ffreestanding -nostdlib
 #   -mno-red-zone -fno-stack-protector
 #
-# 校验：ELF64 / x86_64 / ET_EXEC / 入口地址；multiboot2 头在前 32 KiB 且
-#       8 字节对齐、checksum 为 0；PT_NOTE 里有 Xen PVH 入口（QEMU -kernel 用）。
+# 校验：ELF64 / x86_64 / ET_EXEC / 入口地址；PT_LOAD 4 KiB 对齐（按段分页的
+#       前提）；multiboot2 头在前 32 KiB 且 8 字节对齐、checksum 为 0；
+#       PT_NOTE 里有 Xen PVH 入口（QEMU -kernel 用）。
 #
 # usage: powershell -File tools/build-ng.ps1 [-Repo <root>] [-DistDir dist-ng] [-ObjDir obj-ng]
 # 退出码：0 = PASS；1 = FAIL。
@@ -52,16 +54,13 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP1-1) ==='
+Write-Host '=== build-ng (WP1-2) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
 if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }
-
-$entryObj = Join-Path $objDir 'entry.o'
-$mainObj = Join-Path $objDir 'main.o'
 
 $target = '--target=x86_64-elf'
 $common = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
@@ -70,30 +69,46 @@ $asmFlags = $common + @('-c')
 $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-fno-pic', '-fno-pie', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-c')
 
+# C 源文件按顺序编译；新增 .c 只要加进这个列表。
+$cSources = @('serial.c', 'paging.c', 'main.c')
+$steps = $cSources.Count + 2
+$step = 0
+
 # ---- 编译 ------------------------------------------------------------------
-Write-Host '  [1/3] entry.S'
+$step++
+Write-Host ("  [{0}/{1}] entry.S" -f $step, $steps)
+$entryObj = Join-Path $objDir 'entry.o'
 & $clang @($asmFlags + @((Join-Path $srcDir 'entry.S'), '-o', $entryObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) { Fail 'entry.S compile failed' }
 
-Write-Host '  [2/3] main.c'
-& $clang @($cFlags + @((Join-Path $srcDir 'main.c'), '-o', $mainObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
-if ($LASTEXITCODE -ne 0) { Fail 'main.c compile failed' }
+$cObjs = New-Object System.Collections.Generic.List[string]
+foreach ($src in $cSources) {
+    $step++
+    Write-Host ("  [{0}/{1}] {2}" -f $step, $steps, $src)
+    $obj = Join-Path $objDir ([IO.Path]::GetFileNameWithoutExtension($src) + '.o')
+    & $clang @($cFlags + @((Join-Path $srcDir $src), '-o', $obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0} compile failed" -f $src) }
+    $cObjs.Add($obj)
+}
 
 # ---- 链接 ------------------------------------------------------------------
-Write-Host '  [3/3] link -> dist-ng/aster-ng.elf'
+$step++
+Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf, $entryObj, $mainObj)
+    '-o', $elf, $entryObj) + $cObjs.ToArray()
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }
     Fail 'link failed'
 }
 
-# ---- 校验 ELF64 / 启动头 --------------------------------------------------
+# ---- 校验 ELF64 / 启动头 / 段对齐 -----------------------------------------
 $b = [IO.File]::ReadAllBytes($elf)
 $problems = New-Object System.Collections.Generic.List[string]
+$loadCount = 0
+$segAlignOk = $true
 
 if ($b.Length -lt 64) { $problems.Add('file smaller than ELF64 header') }
 
@@ -113,6 +128,24 @@ if ($problems.Count -eq 0) {
     if ($eMachine -ne 62) { $problems.Add(("e_machine={0}, want 62 (EM_X86_64)" -f $eMachine)) }
     if ($eEntry -lt 0x100000 -or $eEntry -ge 0x110000) {
         $problems.Add(("e_entry=0x{0:x} outside 0x100000..0x110000" -f $eEntry))
+    }
+
+    # ---- PT_LOAD：每段 4 KiB 对齐（.text/.rodata/.data/.bss 分页的前提）----
+    for ($i = 0; $i -lt $ePhNum; $i++) {
+        $ph = [int]$ePhOff + ($i * $ePhentSize)
+        if ($ph + 56 -gt $b.Length) { break }
+        if ([BitConverter]::ToUInt32($b, $ph) -ne 1) { continue }   # PT_LOAD
+        $loadCount++
+        $pVaddr = [BitConverter]::ToUInt64($b, $ph + 16)
+        $pAlign = [BitConverter]::ToUInt64($b, $ph + 48)
+        if (($pVaddr % 4096) -ne 0) { $segAlignOk = $false }
+        if ($pAlign -lt 4096) { $segAlignOk = $false }
+    }
+    if (-not $segAlignOk) {
+        $problems.Add('PT_LOAD segment not 4 KiB aligned (section pages would be shared)')
+    }
+    if ($loadCount -lt 4) {
+        $problems.Add(("PT_LOAD count {0} < 4 (want headers/text/rodata/data)" -f $loadCount))
     }
 
     # ---- multiboot2 header：前 32 KiB、8 字节对齐、checksum = 0 ----
@@ -186,6 +219,8 @@ Write-Host ("  machine  {0} (EM_X86_64)" -f $eMachine)
 Write-Host ("  type     {0} (ET_EXEC)" -f $eType)
 Write-Host ("  entry    {0}" -f ('0x{0:x16}' -f $eEntry))
 Write-Host ("  phnum    {0}" -f $ePhNum)
+Write-Host 'segments: PASS'
+Write-Host ("  {0} PT_LOAD, 4 KiB aligned (per-section pages)" -f $loadCount)
 Write-Host 'multiboot2: PASS'
 Write-Host ("  header   file offset 0x{0:x}, length {1}, checksum 0, 8-byte aligned" -f $mbOff, $mbLen)
 Write-Host 'pvh-note: PASS'

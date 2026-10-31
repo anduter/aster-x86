@@ -1,31 +1,61 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP1-1: 在 QEMU 里启动 dist-ng/aster-ng.elf，等串口 hello
+# run-ng.ps1 - ng WP1-2: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
-# 启动命令（WP1-1 出口）：
+# 启动命令（WP1-1/WP1-2 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
-#                      -display none -no-reboot -m 256
+#                      -display none -no-reboot -m 256 -cpu max
 #
 # 用 file: 串口而不是 stdio：脚本要在 QEMU 不退出（内核 hlt 循环）的情况下
-# 轮询串口内容，命中 "ng: hello 64-bit" 后主动结束 QEMU。
+# 轮询串口内容，命中所有期望行后主动结束 QEMU。
+#
+# -cpu 默认 max：默认的 qemu64 不报 SMEP/SMAP，WP1-2 的 CR4 置位路径就测不到；
+# 想看"CPU 不支持时打印 off"的检测路径，用 -Cpu qemu64（见 claims）。
+#
+# 期望行（全部命中才 PASS）：
+#   ng: hello 64-bit
+#   ng: paging 4-level ok
+#   ng: wx layout ok (text rx, rodata ro, data rw-nx)
+#   ng: nx on
+#   ng: smep=<on|off> smap=<on|off>
+#   ng: WP1-2 selftest PASS
 #
 # 若 ELF 不存在会先调用 tools/build-ng.ps1（干净检出也能一条命令 PASS）。
 #
 # usage: powershell -File tools/run-ng.ps1 [-Repo <root>] [-ElfPath <elf>]
-#                                           [-TimeoutSec 20] [-SerialLog <path>]
-# 退出码：0 = PASS；1 = FAIL（缺 QEMU / 启动失败 / 超时未见 hello）。
+#                                           [-TimeoutSec 20] [-SerialLog <path>] [-Cpu max]
+# 退出码：0 = PASS；1 = FAIL（缺 QEMU / 启动失败 / 超时 / 期望行缺失）。
 # =============================================================================
 param(
     [string]$Repo = '',
     [string]$ElfPath = '',
     [int]$TimeoutSec = 20,
-    [string]$SerialLog = ''
+    [string]$SerialLog = '',
+    [string]$Cpu = 'max'
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not $Repo) { $Repo = Split-Path -Parent $PSScriptRoot }
 $Repo = (Resolve-Path $Repo).Path
 
-$marker = 'ng: hello 64-bit'
+# ---- 期望的串口行 ----------------------------------------------------------
+$required = @(
+    'ng: hello 64-bit',
+    'ng: paging 4-level ok',
+    'ng: wx layout ok (text rx, rodata ro, data rw-nx)',
+    'ng: nx on',
+    'ng: WP1-2 selftest PASS'
+)
+$smepPattern = 'ng: smep=(on|off) smap=(on|off)'
+$failPattern = 'ng: WP1-2 selftest FAIL'
+
+function Test-Serial([string]$text) {
+    if (-not $text) { return $false }
+    foreach ($line in $required) {
+        if (-not $text.Contains($line)) { return $false }
+    }
+    if ($text -notmatch $smepPattern) { return $false }
+    return $true
+}
 
 function Fail([string]$msg) {
     Write-Host ("run-ng: FAIL ({0})" -f $msg)
@@ -71,7 +101,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP1-1) ==='
+Write-Host '=== run-ng (WP1-2) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }
@@ -82,20 +112,25 @@ $qemuArgs = @(
     '-serial', ('"file:' + $SerialLog + '"'),
     '-display', 'none',
     '-no-reboot',
-    '-m', '256'
+    '-m', '256',
+    '-cpu', $Cpu
 )
-Write-Host ("args: -kernel <elf> -serial file:<log> -display none -no-reboot -m 256 (timeout {0}s)" -f $TimeoutSec)
+Write-Host ("args: -kernel <elf> -serial file:<log> -display none -no-reboot -m 256 -cpu {0} (timeout {1}s)" -f $Cpu, $TimeoutSec)
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru `
     -RedirectStandardError $errLog -RedirectStandardOutput $outLog -WindowStyle Hidden
 
 $matched = $false
+$failedEarly = $false
 while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
     if ($p.HasExited) { break }
     if (Test-Path -LiteralPath $SerialLog) {
         $text = Get-Content -LiteralPath $SerialLog -Raw -ErrorAction SilentlyContinue
-        if ($text -and $text.Contains($marker)) { $matched = $true; break }
+        if ($text) {
+            if ($text -match $failPattern) { $failedEarly = $true; break }
+            if (Test-Serial $text) { $matched = $true; break }
+        }
     }
     Start-Sleep -Milliseconds 100
 }
@@ -124,7 +159,9 @@ if ($matched) {
     Write-Host ('-' * 48)
     Write-Host ($serialText.TrimEnd())
     Write-Host ('-' * 48)
-    Write-Host ("run-ng: PASS (found '{0}' in {1:N1}s)" -f $marker, $sw.Elapsed.TotalSeconds)
+    $missingCount = @($required | Where-Object { -not $serialText.Contains($_) }).Count
+    Write-Host ("run-ng: matched {0}/{1} expected lines + smep/smap line" -f ($required.Count - $missingCount), $required.Count)
+    Write-Host ("run-ng: PASS (all expected lines in {0:N1}s, cpu {1})" -f $sw.Elapsed.TotalSeconds, $Cpu)
     Remove-TmpBase
     exit 0
 }
@@ -134,16 +171,24 @@ Write-Host 'run-ng: serial output:'
 Write-Host ('-' * 48)
 if ($serialText) { Write-Host ($serialText.TrimEnd()) } else { Write-Host '(empty)' }
 Write-Host ('-' * 48)
+$missing = @($required | Where-Object { -not $serialText -or -not $serialText.Contains($_) })
+if ($missing.Count -gt 0) {
+    foreach ($m in $missing) { Write-Host ("run-ng: missing line: {0}" -f $m) }
+}
+if ($serialText -and $serialText -notmatch $smepPattern) {
+    Write-Host 'run-ng: missing line: ng: smep=<on|off> smap=<on|off>'
+}
 if ($qemuErr -and $qemuErr.Trim()) {
     Write-Host 'run-ng: qemu stderr:'
     Write-Host ($qemuErr.TrimEnd())
 }
+if ($failedEarly) { Fail 'kernel reported ng: WP1-2 selftest FAIL' }
 if ($exitedEarly) {
     # Start-Process 返回的进程对象有时读不到 ExitCode；读不到就不打，stderr 已足够定位
     $code = $null
     try { $p.WaitForExit(); $code = $p.ExitCode } catch { }
     $suffix = ''
     if ("$code" -ne '') { $suffix = " (code $code)" }
-    Fail ("QEMU exited before '{0}'{1}" -f $marker, $suffix)
+    Fail ("QEMU exited before all expected lines{0}" -f $suffix)
 }
-Fail ("timeout {0}s, marker '{1}' not found" -f $TimeoutSec, $marker)
+Fail ("timeout {0}s, expected lines not all found" -f $TimeoutSec)

@@ -92,3 +92,10 @@
 - **理由**：QEMU 11 的 multiboot 加载器只接受 32 位 ELF。WP1-1 实测：带 MB1 头的 ELF64 报 `Cannot load x86-64 image, give a 32bit one.`，带 MB2 头的 ELF64 走 Linux 加载器并报 `Error loading uncompressed kernel without PVH ELF Note`。PVH 是 QEMU 加载 ELF64 的既有路径，进入状态与 multiboot 相同：32 位保护模式、分页关闭、平坦段；镜像仍保留 MB2 头给 GRUB。
 - **影响**：`src/ng/entry.S` 同时带两种头，`tools/build-ng.ps1` 校验两者；`tools/run-ng.ps1` 仍用 `qemu-system-x86_64 -kernel ...`。GRUB/multiboot2 实机路径 WP1-1 未实测。
 - **替代**：改用 GRUB + `-cdrom` 启动——偏离 WP1-1 的 `-kernel` 出口；改用 ELF32 包装器——与“产出 ELF64”出口冲突；均否决。
+
+## ADR-014：内核页表用 4 KiB 段页 + 2 MiB 大页混合；SMAP 走 stac/clac 窗口
+
+- **决策**：ng 内核恒等映射 1 GiB；`[0, 2 MiB)` 用 4 KiB 页，按链接脚本的段边界分别给 `.text` R-X、`.rodata` RO+NX、`.data/.bss` RW+NX；`[2 MiB, 1 GiB)` 用 2 MiB 大页 RW+NX。页表页从 `.bss` 静态池分配（WP1-4 前无 PMM）。`EFER.NXE` 在开分页前置位，`CR0.WP=1`，`CR4.SMEP/SMAP` 由 CPUID 决定。ring0 访问用户内存统一走 `stac/clac` 窗口（范围校验 + 成对 + 异常入口 `clac` + syscall `SFMASK` 清 AC）。
+- **理由**：段权限必须先有页级粒度，否则 `.rodata` 可写、`.text` 可写就谈不上 W^X；而全 1 GiB 都拆 4 KiB 既浪费页表又没必要。`.bss` 静态池让 WP1-2 不依赖 PMM，边界干净。SMAP 下不按约定就会随机 #PF，必须把约定前置到 ABI/文档。
+- **影响**：`src/ng/paging.c` 是唯一建表/改权限的地方；`link.ld` 增加段边界符号与 `__kernel_end <= 2 MiB` 断言；`docs/design/paging-ng.md` 记录布局、标志位与 stac/clac 约定；WP1-3 的 `copyin/copyout`、#PF 入口与 syscall `SFMASK` 按该约定实现。
+- **替代**：全 2 MiB 大页——无法按段设权限（W^X 不成立）；页表页走 PMM——把 WP1-4 依赖提前；SMAP 关闭——放弃保护，且与出口冲突；均否决。
