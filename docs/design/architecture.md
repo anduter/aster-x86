@@ -223,6 +223,7 @@ D0 总出口：外部开发者照文档编译、打包、运行一个 GUI 应用
 
 ### D1（可用桌面）
 
+- **D1 前置（WP5-0f/0g）**：PIT/TSC/RTC 时间基 + ring3 抢占；内核保持协作，完整内核抢占留 D2。
 - POSIX Profile 1.0：zlib/FreeType/FFmpeg/SDL2 能编译并运行。
 - 网络：TLS/HTTP、DNS、证书/时间/熵。
 - 浏览器 B0 集成（无 JS 的 HTML/CSS 子集）。

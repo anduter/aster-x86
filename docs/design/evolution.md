@@ -21,7 +21,7 @@
 | E2 服务/驱动移植 | VFS/ramfs、FAT16、fb/input/blk、auth/log/pkg、shell | 8 周 | 64 位 shell + 100 项 parity |
 | E3 桌面会话 S1 | display server、shell/WM、session manager、SDK alpha、demo | 8 周 | ✅ 杀 shell 应用不死（tag ng-e3；WM 死循环为已知限制） |
 | E4 D0 收口 | 故障注入、外部开发者测试、ABI 冻结、文档/发布 | 4 周 | ✅ D0 出口（tag ng-e4） |
-| E5 D1 | POSIX Profile、TLS/HTTP、浏览器 B0、真实硬件、8h 浸泡 | 按 D1 计划 | D1 出口 |
+| E5 D1 | **前置 WP5-0f/0g（时间基 + ring3 抢占）**、POSIX Profile、TLS/HTTP、浏览器 B0、真实硬件、8h 浸泡 | 按 D1 计划 | D1 出口 |
 
 E1 是硬时间盒：6 周内没跑到 ring3，停下来重新评估（增加移植、缩范围或调整架构），不要无限期调页表。
 
@@ -334,6 +334,26 @@ E4 进度（2026-10-31）：**WP4-1…WP4-4 全部完成；D0 关闭，tag `ng-e
 - 冻结后仍保留的已知缺口（不阻塞 D0，D1 前处理）：未分配号 `ENOSYS`、
   IPC 时间单位、cap/revoke、每进程 uid/fd、用户态 fault 隔离、运行时 ABI
   版本查询、`SHM_FREE`、结构体对齐校验；详见 `docs/abi/abi-1.0.md` §10。
+
+### E5（D1）前置：WP5-0f / WP5-0g
+
+D1 的 POSIX/网络/浏览器之前，先把“时间基 + ring3 抢占”钉死；否则 D1 的延迟/吞吐数据不可信。
+
+| ID | 内容 | 主要路径 | 出口 |
+|---|---|---|---|
+| WP5-0f | PIT 1000Hz + TSC 校准 + RTC + clock_gettime/nanosleep + HLT idle | src/ng/pic.c、pit.c、rtc.c、time.c、isr.S、sched.c | timer irq / idle hlt / clock / nanosleep 证据；1h 串口零增长 |
+| WP5-0g | **ring3 抢占**：IRQ0 置 need_resched，IRQ 返回用户态时按时间片切换；内核保持 IF=0/协作 | src/ng/isr.S、trap.c、sched.c、sched_arch.c、thread.h、main.c | WM 自旋不再卡死全系统；CPU-bound ring3 进程不能饿死 shell/WM |
+
+**合并验收（0f + 0g）**
+
+1. clock_gettime(MONOTONIC/REALTIME)；1h drift ≤100 ppm（D1 初始目标，之后收紧）。
+2. PIT 1000Hz；tick 开销 ≤1% CPU（空闲）。
+3. nanosleep 误差 p99 ≤2ms；唤醒延迟 p99 ≤5ms。
+4. RTC 墙钟与宿主差 <5s（boot 采样；读失败要在证据里标注）。
+5. **WM 自旋测试**：WM 死循环时 shell/其他应用仍可运行；可 kill WM，面板恢复。
+6. 更新 sched-ng/time-ng/claims；ci-ng 全绿。
+
+**边界**：0g 只做 ring3 抢占，不做内核抢占/SMP；APIC timer、完整内核抢占、RT 优先级留 D2。
 
 ## 3. 第一周 checklist
 

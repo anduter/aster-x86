@@ -107,5 +107,6 @@
 | domains/ | 每域一页：`l0-kernel.md`、`l1-services.md`、`l1d-drivers.md`、`l2-desktop.md`、`l3-apps.md`、`a-platform.md`、`b-lifecycle.md`；`_index.md` 定义 manifest 五元组与**已知漂移** |
 | ../abi/abi-1.0.md | **native ABI 1.0 冻结规范**（v1.0.0；调用约定/四类命名空间/错误码/上限/版本策略/冻结结论） |
 | ../abi/abi-1.0.h | ABI 1.0 机器可读冻结头（`tools/abi-check.ps1` 三方比对） |
+| ../audit/ng-code-review-2026-10-31.md | 代码审查：P0/P1/P2 缺陷、证据、修复顺序（静态审查，基线 a48c29b） |
 | ../abi/abi-1.0-draft.md | 历史草案（已被冻结版取代，仅供追溯） |
 | ../release/d0.md | D0 本地发布说明（范围/出口/已知限制/安装运行/校验） |

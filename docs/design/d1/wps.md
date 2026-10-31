@@ -169,7 +169,7 @@ SysV（crt0 保证 16 B）；否则 `movaps` 会 #GP。
 | 项 | 内容 |
 |---|---|
 | **范围** | PIC 重映射 + PIT 1000 Hz；IRQ0 只累加 tick/唤醒睡眠队列，不在 IRQ 里调度；无 ready 线程时 `sti; hlt`，tick 唤醒后继续；TSC 校准（PIT 基准）；CMOS RTC 读墙钟；`clock_gettime(CLOCK_MONOTONIC/REALTIME)`、`nanosleep`、`getrandom`（RDRAND/RDSEED，缺失时 SHA-256 DRBG + TSC/RTC/中断抖动）；调度器睡眠按 ms。 |
-| **不做** | 不做抢占式时间片；不做 APIC timer（5b）；不做 NTP；不做高精度 `<1ms` 睡眠；不做 RTC 闹钟。 |
+| **不做** | 不做**内核**抢占式时间片（ring3 抢占见 WP5-0g）；不做 APIC timer（5b）；不做 NTP；不做高精度 `<1ms` 睡眠；不做 RTC 闹钟。 |
 | **允许路径** | `src/ng/pic.c`、`src/ng/pic.h`、`src/ng/pit.c`、`src/ng/pit.h`、`src/ng/rtc.c`、`src/ng/rtc.h`、`src/ng/time.c`、`src/ng/time.h`、`src/ng/random.c`、`src/ng/random.h`、`src/ng/isr.S`、`src/ng/trap.c`、`src/ng/sched.c`、`src/ng/sched_arch.c`、`src/ng/main.c`、`src/ng/syscall.c`、`src/ng/syscall.h`、`tests/unit-ng/test_time.c`、`tools/build-ng.ps1`、`tools/unit-ng.ps1`、`tools/run-ng.ps1`、`docs/design/sched-ng.md`、`docs/claims/ng-WP5-0f.md` |
 | **出口** | `ng: timer irq ok (hz=1000)`；`ng: idle hlt ok (cpu<5%)`（宿主 1 min 采样）；`ng: clock ok (realtime=.. mono=..)`（与宿主差 <5s）；`ng: nanosleep ok (err<=2ms)`；`ng: random ok`（重复种子测试）；1h 空闲串口零增长。 |
 | **依赖** | 0a（syscall 号） |
@@ -179,6 +179,18 @@ SysV（crt0 保证 16 B）；否则 `movaps` 会 #GP。
 `thread_sleep/wake`/syscall 返回点。`hlt` 前要确认没有 ready 线程；IRQ 返回后
 重新检查。`clock_gettime` 的 REALTIME 在 boot 时读 RTC 一次，之后 = RTC 基准 +
 单调 tick；RTC 读失败则用编译日期/`0`，并在证据里标注。
+
+### WP5-0g ring3 抢占（D1 前置）
+
+| 项 | 内容 |
+|---|---|
+| **范围** | IRQ0 tick 置 need_resched；IRQ 返回 ring3 时若 need_resched/时间片到期，保存用户现场并切到调度器；内核仍 IF=0/协作，不在 IRQ 里 switch；时间片默认 10ms（1000Hz 下 10 tick）。 |
+| **不做** | 不做内核抢占；不做 SMP/APIC timer（5b）；不做 RT 优先级/期限调度。 |
+| **允许路径** | src/ng/isr.S、src/ng/trap.c、src/ng/sched.c、src/ng/sched_arch.c、src/ng/thread.h、src/ng/main.c、tests/unit-ng/test_sched.c、tools/run-ng.ps1、docs/design/sched-ng.md、docs/claims/ng-WP5-0g.md |
+| **出口** | ng: tick preempt ok (hz=1000 slice=10ms)；WM 自旋时 shell/其他应用仍可运行，可 kill WM 并恢复面板；CPU-bound ring3 进程不能饿死 shell；unit 覆盖 need_resched/时间片边界。 |
+| **依赖** | 0f |
+
+**关键设计**：IRQ0 只做 tick++、唤醒到期线程、置 need_resched；返回路径在 iretq 前检查该标志，若目标仍是 ring3 且时间片到期，保存现场后走 sched_yield()。这样不需要把内核改成可抢占，也不在 IRQ handler 里切栈。
 
 ## 3. WP5-1 POSIX Profile
 

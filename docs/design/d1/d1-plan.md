@@ -459,8 +459,7 @@ LAPIC/IOAPIC → SMP 启动（AP 停泊）→ 真网卡/键盘。**不做**安�
 
 ### 6.2 调度/内核
 
-- **抢占式时间片**：D1 保持协作式调度；tick IRQ 只做时间/睡眠唤醒/HLT idle，
-  不做 ring3 抢占。CPU-bound 进程仍可能饿死别人（已知限制）。
+- **抢占式时间片**：内核保持 IF=0/协作式；**ring3 抢占由 WP5-0g 提供**（tick 置 need_resched，返回用户态时切时间片）；不做内核抢占。内核态长临界区仍可能推迟调度。
 - **多核调度 / 负载均衡 / CPU 热插拔**：AP 启动后停泊，调度仍在 BSP。
 - **SMP 安全的全内核锁重写**：只做到“AP 不破坏 BSP”的启动与停泊。
 - **watchdog 自动重启**：D1 做到心跳/日志/浸泡检测；panic 后自动重启留 D2。
@@ -505,7 +504,7 @@ LAPIC/IOAPIC → SMP 启动（AP 停泊）→ 真网卡/键盘。**不做**安�
 | D1-A | libc 底座 | **移植 newlib 4.x**（BSD 许可，syscall stubs 清晰）；`libc/` 包装 crt/errno/pthread | 自写 libc 工期不可控；picolibc 为备选；musl 移植面更大 |
 | D1-B | TLS 引擎 | **BearSSL（TLS 1.2）** + 自写 HTTP/1.1；不依赖 OpenSSL | mbedTLS 备选（更大、可 TLS 1.3）；自写 TLS 不作为首选 |
 | D1-C | 网络位置 | **L1 内核库 + native socket syscall + facade**；netd 进程 D2 | 现在拆 netd 会先造 IPC/驱动 cap，拖长关键路径 |
-| D1-D | 调度 | **D1 保持协作式**；tick IRQ 只做时间/睡眠/idle；不做抢占/SMP 调度 | 抢占会要求全内核锁/可重入审计，D1 风险不可控 |
+| D1-D | 调度 | **内核保持协作式；加 ring3 抢占（WP5-0g）**；tick 只做时间/睡眠/idle + need_resched；不做内核抢占/SMP 调度 | 全内核抢占要求锁/可重入审计，D1 风险不可控；ring3 抢占成本低且能解决 WM 自旋 |
 | D1-E | 真机范围 | **一款 UEFI 机型 + GOP + PS/2 + 一款 Intel 网卡；AP 停泊；无安装器** | 多机型/USB 存储/GPU 驱动会翻倍；安装器建议 D1.1 |
 | D1-F | 浏览器 | **自有引擎、无 JS、单线程非阻塞事件循环**；B0 子集固定 | 移植 WebKit 不在 D1 评估范围；多线程 B0 会引入调度死锁 |
 | D1-G | POSIX 进程模型 | **execve + posix_spawn；fork 延后**；线程用 clone + pthread 子集 | fork+COW 是 D2；无 fork 会限制部分 autotools 运行时，但目标库不需要 |
