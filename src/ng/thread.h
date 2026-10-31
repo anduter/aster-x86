@@ -234,6 +234,7 @@ struct sched_core *sched_core_state(void); /* 诊断/自检读队列状态 */
 u64 sched_now(void); /* TSC */
 u64 sched_switch_count(void);
 u64 sched_yield_count(void);
+u64 sched_idle_runs(void); /* WP5-0h：idle 真正 hlt 的次数（0 = 没停过） */
 u32 sched_live_count(void);
 u32 sched_created_count(void);
 u32 sched_reap_count(void);

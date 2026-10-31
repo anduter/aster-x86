@@ -629,12 +629,238 @@ static void test_fb(void)
     (void)y;
 }
 
+/* ------------------------------------------------------------------------- */
+/* WP5-0h：统一输入服务（鼠标解码 / 事件队列 / 所有权 / aux 初始化）          */
+/* ------------------------------------------------------------------------- */
+
+struct fake_mouse_ctl {
+    u8 data;
+    int has_data;
+    int fail_ack;
+    u8 seq[32];
+    u32 seq_n;
+};
+
+static struct fake_mouse_ctl fm;
+
+static u8 fake_mouse_inb(void *ctx, u16 port)
+{
+    (void)ctx;
+    if (port == PS2_STATUS_PORT) {
+        return fm.has_data ? PS2_STATUS_OUTPUT_FULL : 0u;
+    }
+    if (port == PS2_DATA_PORT) {
+        u8 v = fm.data;
+
+        fm.has_data = 0;
+        return v;
+    }
+    return 0xFFu;
+}
+
+static void fake_mouse_outb(void *ctx, u16 port, u8 value)
+{
+    (void)ctx;
+    if (port == PS2_STATUS_PORT && value == 0x20u) {
+        fm.data = 0x00u; /* 配置字节 */
+        fm.has_data = 1;
+        return;
+    }
+    if (port == PS2_DATA_PORT) {
+        if (fm.seq_n < (u32)sizeof(fm.seq)) {
+            fm.seq[fm.seq_n++] = value;
+        }
+        if (!fm.fail_ack) {
+            fm.data = PS2_ACK;
+            fm.has_data = 1;
+        }
+    }
+}
+
+static void test_input_service(void)
+{
+    struct input_io io;
+    struct input_mouse ms;
+    struct input_queue q;
+    struct input_packet pk;
+    struct input_owner owner;
+    struct input_state st;
+    struct input_event ev;
+    u8 pkt[3];
+    u32 b = 0;
+    i32 dx = 0;
+    i32 dy = 0;
+    u32 i;
+
+    /* ---- 3 字节包解码：符号位 / 按键位 / 屏幕 y 方向 ---- */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 0x08u;
+    pkt[1] = 10;
+    pkt[2] = 10;
+    CHECK(input_mouse_decode(pkt, &b, &dx, &dy) == 0);
+    CHECK(b == 0u && dx == 10 && dy == -10);
+
+    pkt[0] = 0x39u; /* left + 两个符号位（bit4/bit5） */
+    pkt[1] = 0x80u;
+    pkt[2] = 0x80u;
+    CHECK(input_mouse_decode(pkt, &b, &dx, &dy) == 0);
+    CHECK(b == INPUT_BTN_LEFT && dx == -128 && dy == 128);
+
+    pkt[0] = 0x0Eu; /* right + middle */
+    pkt[1] = 0xFFu;
+    pkt[2] = 0x01u;
+    CHECK(input_mouse_decode(pkt, &b, &dx, &dy) == 0);
+    CHECK(b == (INPUT_BTN_RIGHT | INPUT_BTN_MIDDLE) && dx == 255 && dy == -1);
+
+    pkt[0] = 0x48u; /* X overflow */
+    CHECK(input_mouse_decode(pkt, &b, &dx, &dy) == -1);
+    pkt[0] = 0x88u; /* Y overflow */
+    CHECK(input_mouse_decode(pkt, &b, &dx, &dy) == -1);
+    CHECK(input_mouse_decode(NULL, &b, &dx, &dy) == -1);
+
+    /* ---- 喂字节状态机：失步/ACK 丢弃、凑满 3 字节才出事件 ---- */
+    input_mouse_reset(&ms);
+    input_queue_reset(&q);
+    CHECK(input_mouse_feed(&ms, 0x00u, &q) == 0);  /* bit3=0 失步 */
+    CHECK(input_mouse_feed(&ms, PS2_ACK, &q) == 0); /* ACK 在包边界忽略 */
+    CHECK(input_mouse_feed(&ms, 0x08u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 10u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 20u, &q) == 1);
+    CHECK(input_queue_pop(&q, &pk) == 0);
+    CHECK(pk.type == INPUT_EV_MOVE && pk.x == 10 && pk.y == -20 &&
+          pk.buttons == 0u);
+    CHECK(ms.packets == 1u && ms.moves == 1u && ms.button_events == 0u);
+
+    /* 左键按下（无位移）：只出 BUTTON。 */
+    CHECK(input_mouse_feed(&ms, 0x09u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 0u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 0u, &q) == 1);
+    CHECK(input_queue_pop(&q, &pk) == 0);
+    CHECK(pk.type == INPUT_EV_BUTTON && pk.key == INPUT_BTN_LEFT &&
+          pk.buttons == INPUT_BTN_LEFT);
+    CHECK(ms.button_events == 1u && ms.buttons == INPUT_BTN_LEFT);
+
+    /* 左键释放。 */
+    CHECK(input_mouse_feed(&ms, 0x08u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 0u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 0u, &q) == 1);
+    CHECK(input_queue_pop(&q, &pk) == 0 && pk.type == INPUT_EV_BUTTON &&
+          pk.buttons == 0u);
+    CHECK(ms.button_events == 2u && ms.buttons == 0u);
+
+    /* 右键 + 位移同一包：先 BUTTON 后 MOVE。 */
+    CHECK(input_mouse_feed(&ms, 0x2Au, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 5u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 0xF6u, &q) == 2);
+    CHECK(input_queue_pop(&q, &pk) == 0 && pk.type == INPUT_EV_BUTTON &&
+          pk.buttons == INPUT_BTN_RIGHT);
+    CHECK(input_queue_pop(&q, &pk) == 0 && pk.type == INPUT_EV_MOVE &&
+          pk.x == 5 && pk.y == 10 && pk.buttons == INPUT_BTN_RIGHT);
+    CHECK(ms.moves == 2u && ms.button_events == 3u);
+
+    /* 溢出包：不出事件、计数，再同步恢复。 */
+    CHECK(input_mouse_feed(&ms, 0x48u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 1u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 2u, &q) == 0);
+    CHECK(ms.overflows == 1u);
+    CHECK(input_queue_pop(&q, &pk) == -1);
+    CHECK(input_mouse_feed(&ms, 0x0Au, &q) == 0); /* 保持右键按下，只出 MOVE */
+    CHECK(input_mouse_feed(&ms, 1u, &q) == 0);
+    CHECK(input_mouse_feed(&ms, 1u, &q) == 1);
+    CHECK(input_queue_pop(&q, &pk) == 0 && pk.type == INPUT_EV_MOVE &&
+          pk.buttons == INPUT_BTN_RIGHT);
+
+    /* ---- 事件队列 FIFO / 满丢弃 / reset ---- */
+    input_queue_reset(&q);
+    CHECK(q.count == 0u && q.lost == 0u);
+    memset(&pk, 0, sizeof(pk));
+    pk.type = INPUT_EV_KEY;
+    for (i = 0; i < INPUT_QUEUE_SIZE; i++) {
+        pk.key = i;
+        CHECK(input_queue_push(&q, &pk) == 0);
+    }
+    CHECK(q.count == INPUT_QUEUE_SIZE);
+    CHECK(input_queue_push(&q, &pk) == -1);
+    CHECK(q.lost == 1u);
+    for (i = 0; i < INPUT_QUEUE_SIZE; i++) {
+        CHECK(input_queue_pop(&q, &pk) == 0 && pk.key == i);
+    }
+    CHECK(input_queue_pop(&q, &pk) == -1);
+    CHECK(input_queue_push(NULL, &pk) == -1);
+    CHECK(input_queue_pop(NULL, &pk) == -1);
+    input_queue_reset(&q);
+    CHECK(q.count == 0u && q.head == 0u && q.tail == 0u);
+
+    /* ---- 所有权状态机 ---- */
+    input_owner_reset(&owner);
+    CHECK(owner.pid == 0u);
+    CHECK(input_owner_may_read(&owner, 0u, 0) == 1);
+    CHECK(input_owner_claim(&owner, 0u, 0) == -1);
+    CHECK(input_owner_claim(&owner, 7u, 0) == 0);
+    CHECK(owner.pid == 7u && owner.claims == 1u);
+    CHECK(input_owner_may_read(&owner, 7u, 1) == 1);
+    CHECK(input_owner_may_read(&owner, 8u, 1) == 0);
+    CHECK(owner.denials == 1u);
+    CHECK(input_owner_claim(&owner, 8u, 1) == -1);
+    CHECK(owner.denials == 2u && owner.pid == 7u);
+    CHECK(input_owner_claim(&owner, 7u, 1) == 0);
+    CHECK(owner.claims == 2u);
+    CHECK(input_owner_release(&owner, 8u) == -1);
+    CHECK(input_owner_release(&owner, 7u) == 0);
+    CHECK(owner.pid == 0u && owner.releases == 1u);
+    CHECK(input_owner_release(&owner, 7u) == -1);
+
+    /* 属主死了：may_read 自动回收；新进程可重新认领。 */
+    CHECK(input_owner_claim(&owner, 9u, 0) == 0);
+    CHECK(input_owner_may_read(&owner, 10u, 0) == 1);
+    CHECK(owner.pid == 0u && owner.releases == 2u);
+    CHECK(input_owner_claim(&owner, 9u, 0) == 0);
+    CHECK(input_owner_claim(&owner, 10u, 0) == 0);
+    CHECK(owner.pid == 10u);
+    CHECK(input_owner_release(&owner, 10u) == 0);
+
+    /* ---- input_feed_ev：事件既进旧环也回填 *out ---- */
+    input_init(&st);
+    memset(&ev, 0, sizeof(ev));
+    CHECK(input_feed_ev(&st, 0x1Eu, &ev) == 1);
+    CHECK(ev.ascii == 'a' && ev.scancode == 0x1Eu);
+    CHECK(input_next(&st, &ev) == 0 && ev.ascii == 'a');
+    CHECK(input_feed_ev(&st, 0x9Eu, &ev) == 0);
+    CHECK(input_feed_ev(&st, 0x2Au, &ev) == 0);
+    CHECK(input_feed_ev(&st, 0x1Eu, &ev) == 1 && ev.ascii == 'A');
+    CHECK(input_next(&st, &ev) == 0 && ev.ascii == 'A');
+
+    /* ---- ps2_init_mouse：aux 初始化序列 0xF6/F3/0x64/E8/3/F4 ---- */
+    memset(&fm, 0, sizeof(fm));
+    io.inb = fake_mouse_inb;
+    io.outb = fake_mouse_outb;
+    io.ctx = NULL;
+    input_mouse_reset(&ms);
+    CHECK(ps2_init_mouse(&ms, &io) == 0);
+    CHECK(fm.seq_n >= 7u);
+    CHECK(fm.seq[0] == 0x02u);       /* 配置字节 */
+    CHECK(fm.seq[1] == 0xF6u);       /* set defaults */
+    CHECK(fm.seq[2] == 0xF3u);       /* set sample rate */
+    CHECK(fm.seq[3] == 100u);
+    CHECK(fm.seq[4] == 0xE8u);       /* set resolution */
+    CHECK(fm.seq[5] == 3u);
+    CHECK(fm.seq[6] == 0xF4u);       /* enable reporting */
+    CHECK(ms.packets == 0u);
+    CHECK(ps2_init_mouse(NULL, &io) == -1);
+
+    /* 不 ACK 的控制器：init 失败（不能假装鼠标就绪）。 */
+    fm.fail_ack = 1;
+    input_mouse_reset(&ms);
+    CHECK(ps2_init_mouse(&ms, &io) == -1);
+}
+
 void test_drivers(void)
 {
     test_pci();
     test_vbe();
     test_font();
     test_input();
+    test_input_service();
     test_vga_text();
     test_fb();
 }

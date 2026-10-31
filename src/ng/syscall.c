@@ -27,6 +27,7 @@
 #include "fbmap.h"
 #include "fs_syscall.h"
 #include "gdt.h"
+#include "input.h"
 #include "io.h"
 #include "ipc.h"
 #include "paging.h"
@@ -396,9 +397,27 @@ void syscall_dispatch(struct syscall_frame *f)
     case NG_SYS_FB_MAP:
         f->rax = fbmap_sys_map(f->rdi, f->rsi);
         break;
+    /*
+     * WP5-0h（ABI 1.1 DRAFT）：输入服务。
+     *   96 input_event(&ev)：非阻塞；用户指针在 dispatch 里 copyout 校验；
+     *   97 input_claim(pid, flags)：pid=0 当前进程，flags bit0 = 释放。
+     */
+    case NG_SYS_INPUT_EVENT: {
+        struct input_packet ev;
+        int rc = ng_input_event(&ev);
+
+        if (rc == 0 && copyout(f->rdi, &ev, (u64)sizeof(ev)) != UACCESS_OK) {
+            rc = UACCESS_EFAULT;
+        }
+        f->rax = (u64)(i64)rc;
+        break;
+    }
+    case NG_SYS_INPUT_CLAIM:
+        f->rax = (u64)ng_input_claim(f->rdi, f->rsi);
+        break;
     default:
         /*
-         * ABI 1.1（WP5-0a）：未分配号（2..9、15..19、28..29、36..39、96..）与
+         * ABI 1.1（WP5-0a）：未分配号（2..9、15..19、28..29、36..39、98..）与
          * 1.1 已分配但内核尚未实现的号（48..95）统一 -ENOSYS(-38)。
          * 1.0 §10 第 1 项已声明未分配号行为不属于 1.0 契约，故不破坏 1.0。
          */
@@ -518,7 +537,7 @@ static int syscall_enosys_test(void)
 {
     /* 1.0 未分配号 + 1.1 已分配但未实现的号：都必须落 default。 */
     static const u64 nos[] = {
-        2u, 9u, 15u, 19u, 28u, 29u, 36u, 39u, 48u, 95u, 96u
+        2u, 9u, 15u, 19u, 28u, 29u, 36u, 39u, 48u, 95u, 98u
     };
     struct syscall_frame f = {0};
     u64 bad = 0;

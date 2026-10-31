@@ -222,3 +222,19 @@ ctx 初值、FIFO 入队、槽位上限、NULL fn）、`thread_sleep(0)` 语义�
 - **TSC 不做频率校准**：`thread_sleep` 的 tick 是原始 TSC 增量，跨机器不可比。
 - **用户线程/ring3 线程**：不做；`thread_t` 只表示内核线程，ELF64/用户态线程
   留给 WP1-7 之后。
+
+## 8. WP5-0h 追加：输入轮询接在调度点
+
+- `sched_yield()` 在真正入队/切换前调用一次 `ng_input_poll()`：所有
+  `thread_sleep()`、IPC 阻塞、shell 的 readkey EAGAIN、main 的空闲循环都会
+  经过这里，因此输入不依赖 idle 线程是否被调度到，也不依赖 IF=0 的 hlt。
+- `sched_idle_body()` 不再承担输入轮询；它的 hlt 只在 ready/blocked 都为 0 时
+  发生（桌面运行时 displayd 总有一个 sleep deadline，实际走不到）。
+- 诊断 accessor `sched_idle_runs()` 返回 idle 真正 hlt 的次数；实测桌面/输入
+  阶段恒为 0（`ng: input claim ok (... idle=0)`），证明 hlt 没停 CPU。
+- `main.c` 末尾从 `ng_input_poll(); hlt;` 改为 `sched_yield()`：IF=0 的 hlt 会
+  永久停 CPU；等 WP5-0f 的 tick IRQ 再接 `sti; hlt`。
+- **边界**：boot/init（pid 1）的同步 ring3 演示没有独立 `syscall_top`/`pml4`，
+  在它的 syscall 里 yield 会让调度器切回内核 CR3，SYSRET 取指 #PF；所以
+  readkey 只对非 `THREAD_F_BOOT` 线程 yield。细节见
+  `docs/claims/ng-input-mouse.md`。

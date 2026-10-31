@@ -137,11 +137,12 @@ static void t_dispatch_unknown(void)
 {
     /*
      * 1.0 未分配号（2..9、15..19、28..29、36..39）+ 1.1 已分配但内核未实现
-     * 的号（48..95）+ 1.1 号段之后（96..）都必须落 default。
+     * 的号（48..95）+ 1.1 号段之后（98..）都必须落 default；96/97 是 WP5-0h
+     * 的 DRAFT 输入服务（见 t_dispatch_input）。
      */
     static const u64 nos[] = {
         2u, 9u, 15u, 19u, 28u, 29u, 36u, 39u,
-        48u, 49u, 75u, 95u, 96u, 99u, 127u, 0xFFFFFFFFu
+        48u, 49u, 75u, 95u, 98u, 99u, 127u, 0xFFFFFFFFu
     };
     struct syscall_frame f;
     u32 i;
@@ -846,10 +847,99 @@ static void t_dispatch_mm(void)
     CHECK(fake_mm_count() == 3);
 }
 
+/* ------------------------------------------------------------------------- */
+/* 1c. WP5-0h：96 input_event / 97 input_claim                                */
+/* ------------------------------------------------------------------------- */
+
+static void t_dispatch_input(void)
+{
+    struct syscall_frame f;
+    struct input_packet src;
+    struct input_packet *dst;
+    u64 bad = 0xDEAD0000ULL;
+
+    reset_env();
+    fake_input_reset();
+    fake_input_event_reset();
+    fake_input_claim_reset();
+
+    /* 96 EAGAIN：没有事件，rax 原样透传 -11。 */
+    frame_init(&f, NG_SYS_INPUT_EVENT);
+    f.rdi = ubuf;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)NG_EAGAIN);
+    CHECK(fake_input_event_calls() == 1);
+
+    /* 96 成功：copyout 28 字节到用户页，字段逐一相等。 */
+    src.type = INPUT_EV_MOVE;
+    src.key = 0;
+    src.x = -30;
+    src.y = 40;
+    src.buttons = INPUT_BTN_LEFT;
+    src.scancode = 0;
+    src.flags = 0;
+    fake_input_event_set(0, &src);
+    frame_init(&f, NG_SYS_INPUT_EVENT);
+    f.rdi = ubuf;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    dst = (struct input_packet *)(usize)ubuf;
+    CHECK(dst->type == INPUT_EV_MOVE && dst->x == -30 && dst->y == 40);
+    CHECK(dst->buttons == INPUT_BTN_LEFT && dst->key == 0);
+
+    src.type = INPUT_EV_KEY;
+    src.key = 'a';
+    src.scancode = 0x1E;
+    src.flags = INPUT_F_SHIFT;
+    fake_input_event_set(0, &src);
+    frame_init(&f, NG_SYS_INPUT_EVENT);
+    f.rdi = ubuf;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    CHECK(dst->type == INPUT_EV_KEY && dst->key == 'a' &&
+          dst->scancode == 0x1E && dst->flags == INPUT_F_SHIFT);
+
+    /* 96 坏用户指针：有事件时 copyout 失败 -> EFAULT。 */
+    fake_input_event_set(0, &src);
+    frame_init(&f, NG_SYS_INPUT_EVENT);
+    f.rdi = bad;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)UACCESS_EFAULT);
+
+    /* 96 没事件时不做 copyout：坏指针仍返回 EAGAIN。 */
+    fake_input_event_set(-11, NULL);
+    frame_init(&f, NG_SYS_INPUT_EVENT);
+    f.rdi = bad;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)NG_EAGAIN);
+
+    /* 97 认领/释放参数原样搬运，返回值透传。 */
+    fake_input_claim_set(0);
+    frame_init(&f, NG_SYS_INPUT_CLAIM);
+    f.rdi = 0;
+    f.rsi = 0;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    CHECK(fake_input_claim_calls() == 1);
+    CHECK(fake_input_claim_last_pid() == 0 &&
+          fake_input_claim_last_flags() == 0);
+
+    fake_input_claim_set(-16); /* EBUSY：已有存活属主 */
+    frame_init(&f, NG_SYS_INPUT_CLAIM);
+    f.rdi = 12;
+    f.rsi = 1; /* release */
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)(-16));
+    CHECK(fake_input_claim_calls() == 2);
+    CHECK(fake_input_claim_last_pid() == 12 &&
+          fake_input_claim_last_flags() == 1);
+}
+
 int test_syscall(void)
 {
     t_dispatch_basic();
     t_dispatch_unknown();
+    t_dispatch_input();
     t_write_bounds();
     t_dispatch_ipc();
     t_dispatch_fs();

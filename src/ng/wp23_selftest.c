@@ -32,7 +32,9 @@
 #include "io.h"
 #include "paging.h"
 #include "pci.h"
+#include "proc.h"
 #include "serial.h"
+#include "thread.h"
 #include "vbe.h"
 #include "vga_text.h"
 
@@ -96,8 +98,28 @@ static struct input_io g_input_io = {ps2_inb, ps2_outb, NULL};
 static struct fb_info g_fb;
 static struct vga_text g_text;
 static struct input_state g_input;
-static int g_fb_ready;   /* fb_init + 画图读回自检都通过 */
-static int g_text_ready; /* VGA 文本降级初始化完成 */
+static int g_fb_ready;
+static int g_text_ready;
+
+/*
+ * WP5-0h：内核输入服务。键盘（g_input）+ 鼠标（g_mouse）由 sched_yield()
+ * 调度点上的 ng_input_poll() 轮询（readkey 对 boot 同步 ring3 演示兜底），
+ * 统一推进 g_events；syscall 96 只做非阻塞出队。readkey（syscall 30）继续
+ * 从 g_input.ring 读，保留旧 ABI；但 displayd 认领输入后，其它进程的
+ * readkey 返回 -EAGAIN 并让出一轮，避免 shell 忙等抢键。
+ */
+static struct input_queue g_events;
+static struct input_mouse g_mouse;
+static struct input_owner g_owner;
+static int g_input_ready;
+static int g_mouse_ready;
+static u32 g_input_aux_bytes;
+static u32 g_input_key_bytes;
+static u32 g_input_poll_rounds;
+static u32 g_mouse_moves_seen;
+static u32 g_mouse_buttons_seen;
+static u32 g_key_print;
+static u32 g_mouse_print;
 
 /* ------------------------------------------------------------------------- */
 /* LFB 映射                                                                   */
@@ -479,26 +501,266 @@ int wp23_selftest(void)
         serial_puts("ng: kbd init FAIL (no i8042 ack)\r\n");
         fails++;
     }
-    (void)input_poll(&g_input, &g_input_io, INPUT_POLL_MAX);
+
+    /* WP5-0h：aux 口 + 3 字节包鼠标。QEMU/wstdvga 路径必须 ACK。 */
+    input_queue_reset(&g_events);
+    input_mouse_reset(&g_mouse);
+    input_owner_reset(&g_owner);
+    g_input_aux_bytes = 0;
+    g_input_key_bytes = 0;
+    g_input_poll_rounds = 0;
+    g_mouse_moves_seen = 0;
+    g_mouse_buttons_seen = 0;
+    if (ps2_init_mouse(&g_mouse, &g_input_io) == 0) {
+        g_mouse_ready = 1;
+        serial_puts("ng: mouse init ok (aux=0x60 irq12=1 f4/f3/e8)\r\n");
+    } else {
+        g_mouse_ready = 0;
+        serial_puts("ng: mouse init FAIL (no aux ack)\r\n");
+        fails++;
+    }
+    g_input_ready = 1;
+    ng_input_poll();
 
     fails += input_decode_selftest();
     return fails;
 }
 
+/* ------------------------------------------------------------------------- */
+/* WP5-0h：内核输入服务                                                       */
+/* ------------------------------------------------------------------------- */
+
+static int ng_input_owner_alive(u32 pid)
+{
+    const struct proc *p;
+
+    if (pid == 0u) {
+        return 0;
+    }
+    p = proc_slot(pid);
+    if (p == NULL) {
+        return 0;
+    }
+    return (p->state != PROC_STATE_FREE && p->state != PROC_STATE_ZOMBIE) ? 1
+                                                                          : 0;
+}
+
+/*
+ * 输入服务轮询：sched_yield() 是主轮询点（所有阻塞/让出都经过），readkey
+ * 在 boot 的同步 ring3 演示里做兜底。i8042 状态 bit5 区分 aux（鼠标）和
+ * 键盘；键盘字节仍喂旧解码器（readkey 兼容），同时复制一份进 g_events 给
+ * syscall 96。没有 IRQ 也能工作。
+ */
+void ng_input_poll(void)
+{
+    u32 n;
+
+    if (g_input_ready == 0) {
+        return;
+    }
+    g_input_poll_rounds++;
+    for (n = 0; n < INPUT_POLL_MAX; n++) {
+        u8 status = g_input_io.inb(g_input_io.ctx, PS2_STATUS_PORT);
+        u8 data;
+
+        if (status == 0xFFu || (status & PS2_STATUS_OUTPUT_FULL) == 0u) {
+            return;
+        }
+        data = g_input_io.inb(g_input_io.ctx, PS2_DATA_PORT);
+        if ((status & PS2_STATUS_AUX) != 0u) {
+            u32 packets = g_mouse.packets;
+
+            g_input_aux_bytes++;
+            (void)input_mouse_feed(&g_mouse, data, &g_events);
+            if (g_mouse.packets != packets && g_mouse_print < 4u) {
+                g_mouse_print++;
+                serial_puts("ng: input poll mouse ok (packets=");
+                serial_putdec(g_mouse.packets);
+                serial_puts(" rounds=");
+                serial_putdec(g_input_poll_rounds);
+                serial_puts(" idle=");
+                serial_putdec(sched_idle_runs());
+                serial_puts(")\r\n");
+            }
+        } else {
+            struct input_event ev;
+            int rc;
+
+            g_input_key_bytes++;
+            rc = input_feed_ev(&g_input, data, &ev);
+            if (rc == 1) {
+                struct input_packet pk;
+
+                pk.type = INPUT_EV_KEY;
+                pk.key = (u32)ev.ascii;
+                pk.x = 0;
+                pk.y = 0;
+                pk.buttons = g_mouse.buttons;
+                pk.scancode = (u32)ev.scancode;
+                pk.flags = (u32)ev.flags;
+                (void)input_queue_push(&g_events, &pk);
+                if (g_key_print < 4u) {
+                    g_key_print++;
+                    serial_puts("ng: input poll key ok (key=");
+                    serial_puthex((u32)ev.ascii);
+                    serial_puts(" scancode=");
+                    serial_puthex((u32)ev.scancode);
+                    serial_puts(" keys=");
+                    serial_putdec(g_input_key_bytes);
+                    serial_puts(" rounds=");
+                    serial_putdec(g_input_poll_rounds);
+                    serial_puts(" idle=");
+                    serial_putdec(sched_idle_runs());
+                    serial_puts(")\r\n");
+                }
+            }
+        }
+    }
+}
+
+/* syscall 96：非阻塞取一个统一输入事件。0=取到，-EAGAIN=没有。 */
+int ng_input_event(struct input_packet *out)
+{
+    if (out == NULL) {
+        return NG_EAGAIN;
+    }
+    if (input_queue_pop(&g_events, out) != 0) {
+        return NG_EAGAIN;
+    }
+    if (out->type == INPUT_EV_MOVE) {
+        g_mouse_moves_seen++;
+    } else if (out->type == INPUT_EV_BUTTON) {
+        g_mouse_buttons_seen++;
+    }
+    return 0;
+}
+
+/*
+ * syscall 97：输入所有权。pid=0 表示当前进程；flags bit0=释放。
+ * 返回 0 / -1(EPERM，当前不是进程) / -16(EBUSY，已有存活属主)。数值与
+ * ABI 1.0 的 EPERM/EBUSY 一致。
+ */
+i64 ng_input_claim(u64 pid_arg, u64 flags)
+{
+    u32 pid = (u32)pid_arg;
+    int alive;
+
+    if (pid == 0u) {
+        pid = proc_getpid();
+    }
+    if (pid == 0u) {
+        return -1;
+    }
+    if ((flags & 1u) != 0u) {
+        return (input_owner_release(&g_owner, pid) == 0) ? 0 : -1;
+    }
+    alive = ng_input_owner_alive(g_owner.pid);
+    if (input_owner_claim(&g_owner, pid, alive) != 0) {
+        return -16;
+    }
+    /* 认领成功：清掉旧 readkey 环与已入队的旧事件（认领前的按键不属于 displayd）。 */
+    input_ring_reset(&g_input.ring);
+    input_queue_reset(&g_events);
+    serial_puts("ng: input claim ok (pid=");
+    serial_putdec(pid);
+    serial_puts(" polls=");
+    serial_putdec(g_input_poll_rounds);
+    serial_puts(" keys=");
+    serial_putdec(g_input_key_bytes);
+    serial_puts(" aux=");
+    serial_putdec(g_input_aux_bytes);
+    serial_puts(" idle=");
+    serial_putdec(sched_idle_runs());
+    serial_puts(")\r\n");
+    return 0;
+}
+
+/*
+ * WP5-0h：只有“真正的进程线程”可以在 syscall 里让出。boot 线程 / init（pid 1）
+ * 的 ring3 演示没有独立 syscall 栈与 PML4 恢复上下文（proc_init 只把 init
+ * 挂到 boot TCB 上，没设 t->syscall_top/t->pml4），在里面调度会把 CR3 切回
+ * 内核表，SYSRET 回用户态时取指失败（实测 #PF）。所以 readkey/输入路径只对
+ * 非 boot 线程 yield。
+ */
+static int ng_input_can_yield(void)
+{
+    thread_t *t = thread_self();
+
+    if (t == NULL) {
+        return 0;
+    }
+    return ((t->flags & THREAD_F_BOOT) != 0) ? 0 : 1;
+}
+
 u64 ng_input_readkey(void)
 {
     struct input_event ev;
+    u32 pid = proc_getpid();
+    int alive = ng_input_owner_alive(g_owner.pid);
 
-    (void)input_poll(&g_input, &g_input_io, INPUT_POLL_MAX);
+    if (input_owner_may_read(&g_owner, pid, alive) == 0) {
+        /*
+         * 不是输入属主：让出一轮，避免 shell 在 -EAGAIN 上空转饿死 displayd。
+         * boot/init 的同步 ring3 演示不能在这里调度（见上）。
+         */
+        if (ng_input_can_yield()) {
+            (void)thread_sleep(0);
+        }
+        return (u64)(i64)NG_EAGAIN;
+    }
+    /*
+     * 兜底轮询：sched_yield() 是主轮询点，但 boot 的同步 ring3 演示没有调度
+     * 点（不能 yield），所以 readkey 自己也把控制器里的字节收进队列。
+     */
+    ng_input_poll();
     if (input_next(&g_input, &ev) != 0) {
+        if (ng_input_can_yield()) {
+            (void)thread_sleep(0);
+        }
         return (u64)(i64)NG_EAGAIN;
     }
     return ((u64)ev.flags << 24) | ((u64)ev.ascii << 16) | (u64)ev.scancode;
 }
 
-void ng_input_poll(void)
+/* 诊断用（parity/claims 读计数，不改变状态）。 */
+u32 ng_input_aux_bytes(void)
 {
-    (void)input_poll(&g_input, &g_input_io, INPUT_POLL_MAX);
+    return g_input_aux_bytes;
+}
+
+u32 ng_input_key_bytes(void)
+{
+    return g_input_key_bytes;
+}
+
+u32 ng_input_poll_rounds(void)
+{
+    return g_input_poll_rounds;
+}
+
+u32 ng_input_mouse_moves(void)
+{
+    return g_mouse_moves_seen;
+}
+
+u32 ng_input_mouse_buttons(void)
+{
+    return g_mouse_buttons_seen;
+}
+
+u32 ng_input_owner_pid(void)
+{
+    return g_owner.pid;
+}
+
+u32 ng_input_owner_denials(void)
+{
+    return g_owner.denials;
+}
+
+int ng_input_mouse_ready(void)
+{
+    return g_mouse_ready;
 }
 
 /* ------------------------------------------------------------------------- */

@@ -21,6 +21,8 @@
 #include "ds_composite.h"
 #include "ds_protocol.h"
 #include "ds_surface.h"
+#include "ds_draw.h"
+#include "ds_composite.h"
 #include "session_protocol.h"
 #include "types.h"
 
@@ -45,6 +47,28 @@
 #define D_SYS_SHM_ALLOC 45
 #define D_SYS_SHM_MAP 46
 #define D_SYS_FB_MAP 47
+/* WP5-0h（ABI 1.1 DRAFT）：统一输入服务。 */
+#define D_SYS_INPUT_EVENT 96
+#define D_SYS_INPUT_CLAIM 97
+#define D_SYS_GETPID 42
+
+/* 与 src/drivers/include/input.h 的 struct input_packet 同布局（28 字节）。 */
+struct d_input_event {
+    u32 type;     /* D_INPUT_EV_* */
+    u32 key;      /* KEY: ASCII；BUTTON: 按键位图 */
+    i32 x;        /* MOVE: dx */
+    i32 y;        /* MOVE: dy */
+    u32 buttons;
+    u32 scancode;
+    u32 flags;
+};
+
+#define D_INPUT_EV_KEY 1u
+#define D_INPUT_EV_MOVE 2u
+#define D_INPUT_EV_BUTTON 3u
+#define D_INPUT_BTN_LEFT 0x01u
+#define D_INPUT_EAGAIN (-11)
+#define D_INPUT_EBUSY (-16)
 
 /* ---- VFS 常量（与 src/services/fs/include/vfs.h 一致） ------------------- */
 #define D_O_WRONLY 0x001u
@@ -206,6 +230,21 @@ static u32 g_sess_seen;
 static struct ds_session_status_body g_sess;
 static struct ds_table g_table;
 static struct ds_screen g_screen;
+
+/*
+ * WP5-0h：光标位置 + “保存光标下面那块屏幕”的 software cursor。
+ * 移动前先恢复 8x12 背景，再在新位置保存背景并画光标；任何合成前也先
+ * erase，合成后再 paint，避免拖动时留残影 / 把光标像素写进背景。
+ */
+static u32 g_cur_x;
+static u32 g_cur_y;
+static u32 g_cur_saved[DS_CURSOR_H][DS_CURSOR_W];
+static int g_cur_valid;
+static u32 g_mouse_moves;
+static u32 g_mouse_clicks;
+static u32 g_mouse_prints;
+static u32 g_buttons;
+static u32 g_input_owner_pid;
 
 /* ------------------------------------------------------------------------- */
 /* 状态文件（内核自检读；每次状态变化重写一遍）                               */
@@ -455,14 +494,118 @@ static u32 d_screen_probe(const struct ds_surface *sf)
     return ds_screen_read(&g_screen, (i64)x, (i64)y);
 }
 
+static void d_cursor_save_background(void)
+{
+    u32 row;
+    u32 col;
+
+    for (row = 0; row < DS_CURSOR_H; row++) {
+        for (col = 0; col < DS_CURSOR_W; col++) {
+            g_cur_saved[row][col] = ds_screen_read(
+                &g_screen, (i64)g_cur_x + (i64)col, (i64)g_cur_y + (i64)row);
+        }
+    }
+}
+
+static void d_cursor_paint(void)
+{
+    if (g_screen.px == NULL) {
+        return;
+    }
+    if (g_cur_valid == 0) {
+        d_cursor_save_background();
+        g_cur_valid = 1;
+    }
+    ds_cursor_draw(&g_screen, g_cur_x, g_cur_y);
+}
+
+static void d_cursor_erase(void)
+{
+    u32 row;
+    u32 col;
+
+    if (g_cur_valid == 0) {
+        return;
+    }
+    for (row = 0; row < DS_CURSOR_H; row++) {
+        for (col = 0; col < DS_CURSOR_W; col++) {
+            ds_screen_pixel(&g_screen, (i64)g_cur_x + (i64)col,
+                            (i64)g_cur_y + (i64)row, g_cur_saved[row][col]);
+        }
+    }
+    g_cur_valid = 0;
+}
+
+/* 初始位置沿用 WP3-1 的右下角（不遮挡窗口/像素断言）。 */
+static void d_cursor_init(void)
+{
+    u32 bg;
+    u32 row;
+    u32 col;
+
+    g_cur_x = (g_screen.w > DS_CURSOR_W + 4u)
+                  ? (g_screen.w - DS_CURSOR_W - 4u)
+                  : 0u;
+    g_cur_y = (g_screen.h > DS_CURSOR_H + 4u)
+                  ? (g_screen.h - DS_CURSOR_H - 4u)
+                  : 0u;
+    /*
+     * 上一次 displayd 被 kill 时可能把光标留在同一个右下角位置；直接 save
+     * 会把“旧光标的白色像素”当成背景，之后移动就会留下残影。先用光标左侧
+     * 的屏幕像素把这块刷成背景（右下角通常没有窗口），再 save+draw。
+     */
+    bg = ds_screen_read(&g_screen, (g_cur_x > 2u) ? (i64)(g_cur_x - 2u) : 0,
+                        (i64)g_cur_y);
+    for (row = 0; row < DS_CURSOR_H; row++) {
+        for (col = 0; col < DS_CURSOR_W; col++) {
+            ds_screen_pixel(&g_screen, (i64)g_cur_x + (i64)col,
+                            (i64)g_cur_y + (i64)row, bg);
+        }
+    }
+    g_cur_valid = 0;
+    d_cursor_paint();
+}
+
 static void d_cursor_place(void)
 {
-    ds_cursor_draw(&g_screen, (g_screen.w > DS_CURSOR_W + 4u)
-                                  ? (g_screen.w - DS_CURSOR_W - 4u)
-                                  : 0u,
-                   (g_screen.h > DS_CURSOR_H + 4u)
-                       ? (g_screen.h - DS_CURSOR_H - 4u)
-                       : 0u);
+    d_cursor_paint();
+}
+
+/* 相对移动（屏幕坐标，右/下为正）；越界贴边。 */
+
+static void d_cursor_move(i32 dx, i32 dy)
+{
+    i32 max_x;
+    i32 max_y;
+    i32 nx;
+    i32 ny;
+
+    if (g_screen.w <= DS_CURSOR_W || g_screen.h <= DS_CURSOR_H) {
+        return;
+    }
+    max_x = (i32)(g_screen.w - DS_CURSOR_W);
+    max_y = (i32)(g_screen.h - DS_CURSOR_H);
+    nx = (i32)g_cur_x + dx;
+    ny = (i32)g_cur_y + dy;
+    if (nx < 0) {
+        nx = 0;
+    }
+    if (ny < 0) {
+        ny = 0;
+    }
+    if (nx > max_x) {
+        nx = max_x;
+    }
+    if (ny > max_y) {
+        ny = max_y;
+    }
+    if ((u32)nx == g_cur_x && (u32)ny == g_cur_y) {
+        return;
+    }
+    d_cursor_erase();
+    g_cur_x = (u32)nx;
+    g_cur_y = (u32)ny;
+    d_cursor_paint();
 }
 
 static void d_composite_surface(struct ds_surface *sf)
@@ -473,6 +616,7 @@ static void d_composite_surface(struct ds_surface *sf)
     region.y = sf->y;
     region.w = sf->w;
     region.h = sf->h;
+    d_cursor_erase();
     (void)ds_composite_region(&g_screen, &g_table, &region, NULL);
     d_cursor_place();
 
@@ -505,65 +649,145 @@ static void d_send_input(u32 ticket, u32 surface_id, u32 ascii, u32 scancode,
     (void)d_send_msg(ticket, 0, &m, g_port);
 }
 
+static void d_handle_key(const struct d_input_event *ev)
+{
+    u32 flags = ev->flags;
+    u32 ascii = ev->key;
+    u32 scancode = ev->scancode;
+    struct ds_surface *focus;
+    u32 hotkey_sent = 0;
+
+    /*
+     * WP3-2：WM 注册了全局热键 —— 先把按键给 WM 一份（带 GLOBAL 位），
+     * 再按焦点转发。WM 用它做 Tab 任务切换 / 1..9 启动器。
+     */
+    if (g_hotkey_client != 0 &&
+        (g_hotkey_key == DS_HOTKEY_ANY || ascii == g_hotkey_key)) {
+        d_send_input(g_hotkey_client, g_hotkey_surface, ascii, scancode,
+                     flags | DS_INPUT_F_GLOBAL);
+        hotkey_sent = 1;
+        if (g_hotkey_prints < 8u) {
+            g_hotkey_prints++;
+            d_put("ng: displayd hotkey ok (key=");
+            d_puthex(ascii);
+            d_put(" scancode=");
+            d_puthex(scancode);
+            d_put(")\r\n");
+        }
+    }
+
+    focus = ds_table_find(&g_table, ds_table_focus_id(&g_table));
+    if (focus == NULL || focus->client_ticket == 0) {
+        return;
+    }
+    /* 焦点客户端就是 WM 时，热键副本已经送过了（不重复投递）。 */
+    if (!(hotkey_sent != 0 && focus->client_ticket == g_hotkey_client)) {
+        d_send_input(focus->client_ticket, focus->id, ascii, scancode, flags);
+    }
+    g_inputs++;
+    d_put("ng: displayd input ok (key=");
+    if (ascii >= 0x20u && ascii < 0x7Fu) {
+        char c = (char)ascii;
+        (void)d_sys(D_SYS_WRITE, (i64)&c, 1, 0);
+    } else {
+        d_put("0");
+    }
+    d_put(" scancode=");
+    d_puthex(scancode);
+    d_put(")\r\n");
+    d_status_write();
+}
+
+/* 命中测试：z-order 从上到下，返回包含 (x,y) 的最上层 surface id。 */
+static u32 d_hit_surface(u32 x, u32 y)
+{
+    u32 i = ds_table_count(&g_table);
+
+    while (i > 0u) {
+        struct ds_surface *s = ds_table_at(&g_table, i - 1u);
+
+        if (s != NULL && s->used != 0u && s->mapped != 0u && x >= s->x &&
+            y >= s->y && x < s->x + s->w && y < s->y + s->h) {
+            return s->id;
+        }
+        i--;
+    }
+    return 0;
+}
+
+static void d_handle_mouse_move(const struct d_input_event *ev)
+{
+    d_cursor_move(ev->x, ev->y);
+    g_mouse_moves++;
+    if (g_mouse_prints < D_MAX_PRINTS) {
+        g_mouse_prints++;
+        d_put("ng: displayd mouse move ok (x=");
+        d_putdec(g_cur_x);
+        d_put(" y=");
+        d_putdec(g_cur_y);
+        d_put(" dx=");
+        d_putdec((u32)((ev->x < 0) ? (u32)(-ev->x) : (u32)ev->x));
+        d_put(" dy=");
+        d_putdec((u32)((ev->y < 0) ? (u32)(-ev->y) : (u32)ev->y));
+        d_put(" n=");
+        d_putdec(g_mouse_moves);
+        d_put(")\r\n");
+    }
+}
+
+static void d_handle_mouse_button(const struct d_input_event *ev)
+{
+    u32 prev = g_buttons;
+
+    g_buttons = ev->buttons;
+    if ((prev & D_INPUT_BTN_LEFT) == 0u &&
+        (g_buttons & D_INPUT_BTN_LEFT) != 0u) {
+        /* 最小可用语义：左键按下把焦点给命中窗口（没有命中就保持原焦点）。 */
+        u32 id = d_hit_surface(g_cur_x + DS_CURSOR_W / 2u,
+                               g_cur_y + DS_CURSOR_H / 2u);
+
+        if (id != 0u) {
+            (void)ds_table_focus(&g_table, id);
+            d_status_write();
+        }
+        g_mouse_clicks++;
+        if (g_mouse_prints < D_MAX_PRINTS) {
+            g_mouse_prints++;
+            d_put("ng: displayd mouse click ok (x=");
+            d_putdec(g_cur_x);
+            d_put(" y=");
+            d_putdec(g_cur_y);
+            d_put(" focus=");
+            d_putdec(id);
+            d_put(" n=");
+            d_putdec(g_mouse_clicks);
+            d_put(")\r\n");
+        }
+    }
+}
+
+/*
+ * WP5-0h：统一输入消费。syscall 96 非阻塞，一次最多取 16 个事件；键盘沿用
+ * WP3-2/3-3 的热键副本 + 焦点转发，鼠标移动光标、按下时点选焦点。
+ */
 static void d_poll_input(void)
 {
     u32 n;
 
     for (n = 0; n < 16u; n++) {
-        i64 v = d_sys(D_SYS_READKEY, 0, 0, 0);
-        u32 flags;
-        u32 ascii;
-        u32 scancode;
-        struct ds_surface *focus;
-        u32 hotkey_sent = 0;
+        struct d_input_event ev;
 
-        if (v < 0) {
-            return; /* EAGAIN：没有键了 */
+        ds_memzero(&ev, (u64)sizeof(ev));
+        if (d_sys4(D_SYS_INPUT_EVENT, (i64)&ev, 0, 0, 0) != 0) {
+            return; /* EAGAIN：队列空了 */
         }
-        flags = (u32)((v >> 24) & 0xFFu);
-        ascii = (u32)((v >> 16) & 0xFFu);
-        scancode = (u32)(v & 0xFFu);
-
-        /*
-         * WP3-2：WM 注册了全局热键 —— 先把按键给 WM 一份（带 GLOBAL 位），
-         * 再按焦点转发。WM 用它做 Tab 任务切换 / 1..9 启动器。
-         */
-        if (g_hotkey_client != 0 &&
-            (g_hotkey_key == DS_HOTKEY_ANY || ascii == g_hotkey_key)) {
-            d_send_input(g_hotkey_client, g_hotkey_surface, ascii, scancode,
-                         flags | DS_INPUT_F_GLOBAL);
-            hotkey_sent = 1;
-            if (g_hotkey_prints < 8u) {
-                g_hotkey_prints++;
-                d_put("ng: displayd hotkey ok (key=");
-                d_puthex(ascii);
-                d_put(" scancode=");
-                d_puthex(scancode);
-                d_put(")\r\n");
-            }
+        if (ev.type == D_INPUT_EV_MOVE) {
+            d_handle_mouse_move(&ev);
+        } else if (ev.type == D_INPUT_EV_BUTTON) {
+            d_handle_mouse_button(&ev);
+        } else if (ev.type == D_INPUT_EV_KEY) {
+            d_handle_key(&ev);
         }
-
-        focus = ds_table_find(&g_table, ds_table_focus_id(&g_table));
-        if (focus == NULL || focus->client_ticket == 0) {
-            continue;
-        }
-        /* 焦点客户端就是 WM 时，热键副本已经送过了（不重复投递）。 */
-        if (!(hotkey_sent != 0 && focus->client_ticket == g_hotkey_client)) {
-            d_send_input(focus->client_ticket, focus->id, ascii, scancode,
-                         flags);
-        }
-        g_inputs++;
-        d_put("ng: displayd input ok (key=");
-        if (ascii >= 0x20u && ascii < 0x7Fu) {
-            char c = (char)ascii;
-            (void)d_sys(D_SYS_WRITE, (i64)&c, 1, 0);
-        } else {
-            d_put("0");
-        }
-        d_put(" scancode=");
-        d_puthex(scancode);
-        d_put(")\r\n");
-        d_status_write();
     }
 }
 
@@ -1036,6 +1260,18 @@ static void d_handle_msg(int type, const struct ds_msg *m, u32 from)
 /* 初始化                                                                     */
 /* ------------------------------------------------------------------------- */
 
+/* WP5-0h：整屏清背景 —— 去掉启动自检残留和窗口销毁后的像素残留。 */
+static void d_clear_background(void)
+{
+    u32 x;
+    u32 y;
+
+    for (y = 0; y < g_screen.h; y++) {
+        for (x = 0; x < g_screen.w; x++) {
+            g_screen.px[(usize)y * g_screen.pitch_px + x] = 0xFF101820u;
+        }
+    }
+}
 static int d_init_fb(void)
 {
     struct ds_fb_info info;
@@ -1072,7 +1308,30 @@ static int d_init_fb(void)
     d_put(")\r\n");
 
     ds_table_init(&g_table, info.width, info.height);
-    d_cursor_place();
+    d_clear_background();
+    d_cursor_init();
+    return 0;
+}
+
+/*
+ * WP5-0h：displayd 是输入属主。认领成功后内核把 readkey（syscall 30）留给
+ * 本进程；shell 等其它进程再 readkey 会得到 -EAGAIN。认领是幂等的（重复
+ * 认领返回 0），进程死掉后内核按“属主已死”自动回收。
+ */
+static int d_claim_input(void)
+{
+    i64 rc = d_sys(D_SYS_INPUT_CLAIM, 0, 0, 0);
+
+    if (rc != 0) {
+        d_put("ng: displayd input claim FAIL (rc=");
+        d_putdec((u32)(-rc));
+        d_put(")\r\n");
+        return 1;
+    }
+    g_input_owner_pid = (u32)d_sys(D_SYS_GETPID, 0, 0, 0);
+    d_put("ng: displayd input claim ok (pid=");
+    d_putdec(g_input_owner_pid);
+    d_put(")\r\n");
     return 0;
 }
 
@@ -1119,6 +1378,9 @@ static int d_open_port(void)
 int d_main(void)
 {
     if (d_init_fb() != 0) {
+        return 1;
+    }
+    if (d_claim_input() != 0) {
         return 1;
     }
     if (d_open_port() != 0) {

@@ -420,3 +420,25 @@ ng: session survives wm ok (app=18 alive=1 wm=19 restarts=1)
 ng: WP3-3 selftest PASS
 QMP PPM（第三张）：panel(4,4)=#202838 demo(217,177)=#3070c0
 ```
+
+## 15. WP5-0h 追加：输入服务化 + 鼠标（displayd 侧）
+
+- **输入属主**：displayd 启动时 `input_claim(0)`（syscall 97）；成功后内核把
+  syscall 30 `readkey` 留给本进程。shell 等其它进程在桌面存活时 readkey 返回
+  `-EAGAIN` 并让出一轮（避免忙等抢键/饿死桌面）；属主进程死后自动回收。
+- **消费 96**：主循环 `port_recv` 超时分支改调 `input_event`（syscall 96）。
+  KEY -> 原逻辑（WM 热键副本 `DS_INPUT_F_GLOBAL` + 焦点窗口 INPUT）；
+  MOVE -> 移动 8×12 软件光标；BUTTON 左键按下 -> z-order 命中测试，命中窗口
+  `ds_table_focus()`（最小语义，不向客户端转发鼠标事件）。
+- **软件光标**：save-under（paint 前保存 8×12 背景、erase 恢复）；合成前
+  erase、合成后 paint；初始化先用光标左侧像素刷掉右下角可能残留的旧光标。
+- **证据**：
+  ```text
+  ng: displayd input claim ok (pid=22)
+  ng: displayd hotkey ok (key=0x31 scancode=0x2)
+  ng: wm launch req ok (app=/bin/demo via=key)     [QMP 1，3 次]
+  ng: displayd mouse move ok (x=968 y=584 dx=46 dy=0 n=3)
+  QMP mouse_move -300 -200: PPM diff=192 px bbox=(968,585)-(1275,796)
+  ```
+  细节与复跑见 `docs/claims/ng-input-mouse.md`。
+

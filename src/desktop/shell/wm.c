@@ -246,6 +246,8 @@ static u32 g_fault_spin;
 static u32 g_session_list_printed;
 static u32 g_empty_idle;
 static u32 g_rounds;
+static u32 g_last_hotkey_key;
+static u32 g_last_hotkey_round;
 static u32 g_panel_va;
 static u32 g_panel_px;
 static struct ds_wm_layout g_layout;
@@ -803,6 +805,13 @@ static void wm_handle_input(const struct ds_msg *m)
             __asm__ volatile("pause");
         }
     }
+    /* 去抖：同一热键 8 轮（~160ms）内只处理一次，抑制按住连发 */
+    /* Tab 保持连续切换（不因去抖变迟钝）；启动键 1..9 只抑制 4 轮（~80ms）连发。 */
+    if (key != 9u && key == g_last_hotkey_key && (g_rounds - g_last_hotkey_round) < 4u) {
+        return;
+    }
+    g_last_hotkey_key = key;
+    g_last_hotkey_round = g_rounds;
     action = ds_wm_hotkey_consume(&g_hotkey, key, flags, &index);
     if (action == DS_WM_HOTKEY_TASK_SWITCH) {
         wm_do_switch(0);
@@ -917,12 +926,13 @@ static void wm_register_hotkey(void)
 static void wm_run(void)
 {
     u32 rounds;
+    u32 limit = (g_session != 0u) ? 0xFFFFFFFFu : W_ROUNDS;
 
     wm_send_list();
     if (g_session != 0) {
         wm_session_heartbeat();
     }
-    for (rounds = 0; rounds < W_ROUNDS; rounds++) {
+    for (rounds = 0; rounds < limit; rounds++) {
         struct w_frame f;
         int rc = w_recv_frame(&f, W_POLL_TICKS);
 

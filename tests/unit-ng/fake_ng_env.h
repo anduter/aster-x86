@@ -114,6 +114,20 @@ void fake_mm_set_ret(u64 ret);
 u32 fake_mm_count(void);
 const struct fake_mm_call *fake_mm_get(u32 i);
 
+/* ---- WP5-0h：fake 96 input_event / 97 input_claim ------------------------- */
+#include "input.h"
+
+void fake_input_event_reset(void);
+/* rc=0 时把 *pk 拷给下一次 ng_input_event()；rc<0 只返回错误。 */
+void fake_input_event_set(int rc, const struct input_packet *pk);
+u32 fake_input_event_calls(void);
+
+void fake_input_claim_reset(void);
+void fake_input_claim_set(i64 rc);
+u32 fake_input_claim_calls(void);
+u64 fake_input_claim_last_pid(void);
+u64 fake_input_claim_last_flags(void);
+
 /* ---- fake readkey（WP2-3：syscall 30 胶水）--------------------------------- */
 /* 默认返回 NG_EAGAIN；fake_input_set_readkey 设定下一次（以及之后）的返回值。 */
 void fake_input_reset(void);

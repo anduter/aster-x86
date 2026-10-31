@@ -333,6 +333,7 @@ if ($Panic) {
             'ng: vbe mode 1280x800x32 ok',
             'ng: fb draw ok (readback)',
             'ng: kbd init ok',
+            'ng: mouse init ok (aux=0x60 irq12=1 f4/f3/e8)',
             'ng: input event ok',
             'ng: ring3 input ready',
             'ng: ring3 input ok',
@@ -361,6 +362,7 @@ if ($Panic) {
         $required += @(
             'ng: displayd spawn ok (pid=',
             'ng: displayd up (fb=0xfd000000 1280x800',
+            'ng: displayd input claim ok (pid=',
             'ng: display port ok (ticket=',
             'ng: display port file ok (ticket=',
             'ng: demo spawn ok (pid=',
@@ -378,6 +380,7 @@ if ($Panic) {
         )
         $patterns += @(
             'ng: displayd up \(fb=0x[0-9a-f]+ 1280x800 pitch=[0-9]+ bpp=32\)',
+            'ng: displayd input claim ok \(pid=[0-9]+\)',
             'ng: surface create ok \(id=[0-9]+ w=400 h=300 shm=0x[0-9a-f]+ pages=118\)',
             'ng: shm map ok \(va=0x[0-9a-f]+ pages=118\)',
             'ng: composite ok \(px=0x3070c0 at=[0-9]+,[0-9]+\)',

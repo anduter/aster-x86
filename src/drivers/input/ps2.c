@@ -116,6 +116,11 @@ void input_init(struct input_state *st)
 
 int input_feed(struct input_state *st, u8 byte)
 {
+    return input_feed_ev(st, byte, NULL);
+}
+
+int input_feed_ev(struct input_state *st, u8 byte, struct input_event *out)
+{
     u8 code;
     u8 flags;
     u8 ascii;
@@ -185,6 +190,9 @@ int input_feed(struct input_state *st, u8 byte)
     st->presses++;
     if (input_ring_push(&st->ring, &ev) != 0) {
         return -1;
+    }
+    if (out != NULL) {
+        *out = ev;
     }
     return 1;
 }
@@ -309,3 +317,364 @@ int ps2_init(struct input_state *st, const struct input_io *io)
     }
     return -1;
 }
+
+/* ========================================================================== */
+/* WP5-0h：统一输入队列 / PS/2 鼠标 / 所有权                                   */
+/* ========================================================================== */
+
+void input_queue_reset(struct input_queue *q)
+{
+    if (q == NULL) {
+        return;
+    }
+    q->head = 0;
+    q->tail = 0;
+    q->count = 0;
+    q->lost = 0;
+}
+
+int input_queue_push(struct input_queue *q, const struct input_packet *ev)
+{
+    if (q == NULL || ev == NULL) {
+        return -1;
+    }
+    if (q->count >= INPUT_QUEUE_SIZE) {
+        q->lost++;
+        return -1;
+    }
+    q->ev[q->head] = *ev;
+    q->head = (q->head + 1u) % INPUT_QUEUE_SIZE;
+    q->count++;
+    return 0;
+}
+
+int input_queue_pop(struct input_queue *q, struct input_packet *out)
+{
+    if (q == NULL || out == NULL || q->count == 0) {
+        return -1;
+    }
+    *out = q->ev[q->tail];
+    q->tail = (q->tail + 1u) % INPUT_QUEUE_SIZE;
+    q->count--;
+    return 0;
+}
+
+void input_mouse_reset(struct input_mouse *ms)
+{
+    u32 i;
+
+    if (ms == NULL) {
+        return;
+    }
+    for (i = 0; i < 3u; i++) {
+        ms->packet[i] = 0;
+    }
+    ms->index = 0;
+    ms->buttons = 0;
+    ms->packets = 0;
+    ms->moves = 0;
+    ms->button_events = 0;
+    ms->overflows = 0;
+    ms->bytes = 0;
+    ms->x = 0;
+    ms->y = 0;
+}
+
+int input_mouse_decode(const u8 packet[3], u32 *buttons, i32 *dx, i32 *dy)
+{
+    u8 flags;
+    i32 rx;
+    i32 ry;
+
+    if (packet == NULL) {
+        return -1;
+    }
+    flags = packet[0];
+    if (buttons != NULL) {
+        *buttons = (u32)(flags & 0x07u);
+    }
+    rx = (i32)packet[1];
+    ry = (i32)packet[2];
+    if ((flags & 0x10u) != 0u) {
+        rx -= 256; /* byte1 的符号位（9 位补码的低 8 位） */
+    }
+    if ((flags & 0x20u) != 0u) {
+        ry -= 256; /* byte2 的符号位 */
+    }
+    if (dx != NULL) {
+        *dx = rx;
+    }
+    if (dy != NULL) {
+        *dy = -ry; /* PS/2 的 y 向上为正；屏幕坐标向下为正 */
+    }
+    return ((flags & 0xC0u) != 0u) ? -1 : 0;
+}
+
+int input_mouse_feed(struct input_mouse *ms, u8 byte, struct input_queue *q)
+{
+    u32 buttons = 0;
+    struct input_packet ev;
+    i32 dx = 0;
+    i32 dy = 0;
+    int pushed = 0;
+
+    if (ms == NULL) {
+        return 0;
+    }
+    ms->bytes++;
+    if (ms->index == 0u) {
+        /* 初始化 ACK/RESEND 或失步字节：丢掉，等新的 bit3=1 同步字节。 */
+        if (byte == PS2_ACK || byte == PS2_RESEND) {
+            return 0;
+        }
+        if ((byte & 0x08u) == 0u) {
+            return 0;
+        }
+    }
+    ms->packet[ms->index] = byte;
+    ms->index++;
+    if (ms->index < 3u) {
+        return 0;
+    }
+    ms->index = 0;
+    ms->packets++;
+
+    if (input_mouse_decode(ms->packet, &buttons, &dx, &dy) != 0) {
+        ms->overflows++;
+        return 0;
+    }
+    ms->x = dx;
+    ms->y = dy;
+
+    if (buttons != ms->buttons) {
+        ms->buttons = buttons;
+        ms->button_events++;
+        ev.type = INPUT_EV_BUTTON;
+        ev.key = buttons;
+        ev.x = 0;
+        ev.y = 0;
+        ev.buttons = buttons;
+        ev.scancode = 0;
+        ev.flags = 0;
+        if (input_queue_push(q, &ev) == 0) {
+            pushed++;
+        }
+    }
+    if (dx != 0 || dy != 0) {
+        ms->moves++;
+        ev.type = INPUT_EV_MOVE;
+        ev.key = 0;
+        ev.x = dx;
+        ev.y = dy;
+        ev.buttons = ms->buttons;
+        ev.scancode = 0;
+        ev.flags = 0;
+        if (input_queue_push(q, &ev) == 0) {
+            pushed++;
+        }
+    }
+    return pushed;
+}
+
+/* ---- aux 口小工具 --------------------------------------------------------- */
+
+static int aux_write(const struct input_io *io, u8 value)
+{
+    if (wait_input_clear(io) != 0) {
+        return -1;
+    }
+    io->outb(io->ctx, PS2_STATUS_PORT, PS2_CMD_WRITE_AUX);
+    if (wait_input_clear(io) != 0) {
+        return -1;
+    }
+    io->outb(io->ctx, PS2_DATA_PORT, value);
+    return 0;
+}
+
+/* 0=ACK，1=RESEND（调用方重试），-1=超时/没有控制器。 */
+static int aux_read_ack(const struct input_io *io)
+{
+    u32 i;
+
+    for (i = 0; i < 200000u; i++) {
+        u8 status = io->inb(io->ctx, PS2_STATUS_PORT);
+        u8 data;
+
+        if (status == 0xFFu) {
+            return -1;
+        }
+        if ((status & PS2_STATUS_OUTPUT_FULL) == 0u) {
+            continue;
+        }
+        data = io->inb(io->ctx, PS2_DATA_PORT);
+        if (data == PS2_ACK) {
+            return 0;
+        }
+        if (data == PS2_RESEND) {
+            return 1;
+        }
+        /* 初始化期间残留的键盘字节/鼠标包：丢弃（还没打开数据报告）。 */
+    }
+    return -1;
+}
+
+static int aux_cmd(const struct input_io *io, u8 cmd)
+{
+    u32 attempt;
+
+    for (attempt = 0; attempt < 3u; attempt++) {
+        int rc;
+
+        if (aux_write(io, cmd) != 0) {
+            return -1;
+        }
+        rc = aux_read_ack(io);
+        if (rc == 0) {
+            return 0;
+        }
+        if (rc < 0) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+static int aux_cmd_param(const struct input_io *io, u8 cmd, u8 param)
+{
+    if (aux_cmd(io, cmd) != 0) {
+        return -1;
+    }
+    if (aux_write(io, param) != 0) {
+        return -1;
+    }
+    return (aux_read_ack(io) == 0) ? 0 : -1;
+}
+
+static int read_config_byte(const struct input_io *io, u8 *out)
+{
+    u32 i;
+
+    if (wait_input_clear(io) != 0) {
+        return -1;
+    }
+    io->outb(io->ctx, PS2_STATUS_PORT, PS2_CMD_READ_CONFIG);
+    for (i = 0; i < 200000u; i++) {
+        u8 status = io->inb(io->ctx, PS2_STATUS_PORT);
+
+        if (status == 0xFFu) {
+            return -1;
+        }
+        if ((status & PS2_STATUS_OUTPUT_FULL) != 0u) {
+            *out = io->inb(io->ctx, PS2_DATA_PORT);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int ps2_init_mouse(struct input_mouse *ms, const struct input_io *io)
+{
+    u8 config = 0;
+
+    if (ms == NULL || io == NULL || io->inb == NULL || io->outb == NULL) {
+        return -1;
+    }
+    input_mouse_reset(ms);
+    if (io->inb(io->ctx, PS2_STATUS_PORT) == 0xFFu) {
+        return -1;
+    }
+    flush_output(io);
+
+    /* 只动 aux 接口，不重配键盘（键盘的 0xF4 已在 ps2_init 里开过）。 */
+    if (wait_input_clear(io) == 0) {
+        io->outb(io->ctx, PS2_STATUS_PORT, PS2_CMD_DISABLE_AUX);
+    }
+    flush_output(io);
+    if (read_config_byte(io, &config) != 0) {
+        return -1;
+    }
+    config |= 0x02u;  /* IRQ12（本 WP 仍轮询，置位只为和固件默认一致） */
+    config &= (u8)~0x20u; /* 允许 aux 时钟/数据 */
+    if (wait_input_clear(io) != 0) {
+        return -1;
+    }
+    io->outb(io->ctx, PS2_STATUS_PORT, PS2_CMD_WRITE_CONFIG);
+    if (wait_input_clear(io) != 0) {
+        return -1;
+    }
+    io->outb(io->ctx, PS2_DATA_PORT, config);
+    if (wait_input_clear(io) != 0) {
+        return -1;
+    }
+    io->outb(io->ctx, PS2_STATUS_PORT, PS2_CMD_ENABLE_AUX);
+    flush_output(io);
+
+    /* WP5-0h 要求的初始化序列：默认值 -> 采样率 100 -> 分辨率 3 -> 开报告。 */
+    if (aux_cmd(io, PS2_MOUSE_SET_DEFAULT) != 0) {
+        return -1;
+    }
+    if (aux_cmd_param(io, PS2_MOUSE_SET_SAMPLE, 100u) != 0) {
+        return -1;
+    }
+    if (aux_cmd_param(io, PS2_MOUSE_SET_RES, 3u) != 0) {
+        return -1;
+    }
+    if (aux_cmd(io, PS2_MOUSE_ENABLE) != 0) {
+        return -1;
+    }
+    flush_output(io);
+    return 0;
+}
+
+/* ---- 所有权 --------------------------------------------------------------- */
+
+void input_owner_reset(struct input_owner *o)
+{
+    if (o == NULL) {
+        return;
+    }
+    o->pid = 0;
+    o->claims = 0;
+    o->denials = 0;
+    o->releases = 0;
+}
+
+int input_owner_claim(struct input_owner *o, u32 pid, int owner_alive)
+{
+    if (o == NULL || pid == 0u) {
+        return -1;
+    }
+    if (o->pid != 0u && o->pid != pid && owner_alive != 0) {
+        o->denials++;
+        return -1;
+    }
+    o->pid = pid;
+    o->claims++;
+    return 0;
+}
+
+int input_owner_may_read(struct input_owner *o, u32 pid, int owner_alive)
+{
+    if (o == NULL || o->pid == 0u || o->pid == pid) {
+        return 1;
+    }
+    if (owner_alive == 0) {
+        /* 属主进程已经死了：自动回收，任何人都可以重新读/认领。 */
+        o->pid = 0;
+        o->releases++;
+        return 1;
+    }
+    o->denials++;
+    return 0;
+}
+
+int input_owner_release(struct input_owner *o, u32 pid)
+{
+    if (o == NULL || pid == 0u || o->pid != pid) {
+        return -1;
+    }
+    o->pid = 0;
+    o->releases++;
+    return 0;
+}
+

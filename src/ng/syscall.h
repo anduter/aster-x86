@@ -45,6 +45,8 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
  *  45  shm_alloc(size_pages, &va, &handle)  -> 0 / -err          （WP3-1）
  *  46  shm_map(handle, &va)                 -> 0 / -err          （WP3-1）
  *  47  fb_map(&va, &info)                   -> 0 / -err          （WP3-1，root）
+ *  96  input_event(struct input_packet*)    -> 0 / -EAGAIN       （WP5-0h，DRAFT 1.1）
+ *  97  input_claim(pid, flags)              -> 0 / -EBUSY / -EPERM（WP5-0h，DRAFT 1.1）
  * 其中 msg/buf/path/stat 是用户指针（内核做 U/S 页校验 + SMAP copyin/copyout）；
  * timeout 单位是 TSC tick（0 = 非阻塞，~0 = 永久）。
  *
@@ -55,7 +57,9 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
  *
  * ABI 1.1（WP5-0a，docs/abi/abi-1.1.h）：
  *   - 48..95 是 1.1 新号段（已冻结分配，尚未实现）；未分配号（2..9、15..19、
- *     28..29、36..39、96..）也不属于任何 ABI；
+ *     28..29、36..39、98..）也不属于任何 ABI；
+ *   - WP5-0h 的 DRAFT 号 96 input_event / 97 input_claim 已实现，ABI 1.1 文本
+ *     由后续 WP 统一（本 WP 只在 claims 记录，不改 docs/abi）；
  *   - 两者在 syscall_dispatch() 的 default 统一返回 -ENOSYS(-38)，不再是过去的
  *     -1(EPERM)。1.0 §10 第 1 项已声明未分配号行为不属于 1.0 契约，故不破坏
  *     1.0；已分配 0/1、10..14、20..27、30..35、40..47 的语义/错误码不变。
@@ -89,6 +93,9 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
 #define NG_SYS_SHM_ALLOC 45u
 #define NG_SYS_SHM_MAP 46u
 #define NG_SYS_FB_MAP 47u
+/* WP5-0h（ABI 1.1 DRAFT）：输入服务。96 = 统一事件，97 = 所有权。 */
+#define NG_SYS_INPUT_EVENT 96u
+#define NG_SYS_INPUT_CLAIM 97u
 /*
  * ABI 1.1（WP5-0a）：未分配号与"1.1 已分配但未实现号"的统一返回值，数值沿用
  * ABI 1.0 保留的 ENOSYS(-38)。默认分支只返回它，不返回 -1。

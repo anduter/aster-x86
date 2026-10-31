@@ -23,6 +23,9 @@
 #include "thread.h"
 
 #include "sched_arch.h"
+#ifndef NG_HOST_TEST
+#include "wp23.h"
+#endif
 
 /* 栈底 16 字节 canary（两段 ASCII 常量，溢出会被自检抓到）。 */
 #define THREAD_CANARY0 0x4E472D5448524541ULL /* "NG-THREA" */
@@ -405,6 +408,15 @@ void sched_yield(void)
     if (self == NULL) {
         return;
     }
+#ifndef NG_HOST_TEST
+    /*
+     * WP5-0h：输入服务的调度点轮询。放在 yield（所有 sleep/阻塞/空闲都会
+     * 经过）而不是只放 idle：idle 可能因为别的 ready 线程而排不到，或者
+     * 在 IF=0 的 hlt 里停住；yield 点能保证 shell/displayd 让出 CPU 时
+     * QEMU 注入的 PS/2 字节被收进内核队列。
+     */
+    ng_input_poll();
+#endif
     sched.yields++;
     if (self->state == THREAD_RUNNING) {
         self->state = THREAD_READY;
@@ -438,7 +450,12 @@ static void sched_idle_body(void *arg)
 
     for (;;) {
         if (sched.ready_count == 0 && sched.blocked_count == 0) {
-            /* 没有 runnable、也没有等定时器的线程：hlt（IF=0，即终态）。 */
+            /*
+             * 没有 runnable、也没有等定时器的线程：hlt（IF=0，即终态）。
+             * 输入轮询已前移到 sched_yield()，所以这里不再依赖 idle 是否被
+             * 调度到；桌面运行时 displayd 总有 sleep 期限（blocked_count>0），
+             * main 线程也一直 READY，实际上不会走到这条 hlt。
+             */
             sched.idle_runs++;
             sched_arch_idle();
         }
@@ -631,6 +648,12 @@ u64 sched_switch_count(void)
 u64 sched_yield_count(void)
 {
     return sched.yields;
+}
+
+/* WP5-0h 诊断：idle 线程真正走到 hlt 路径的次数（0 = 从没停过 CPU）。 */
+u64 sched_idle_runs(void)
+{
+    return sched.idle_runs;
 }
 
 u32 sched_live_count(void)

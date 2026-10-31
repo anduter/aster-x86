@@ -44,6 +44,7 @@
 #include "parity_selftest.h"
 #include "proc.h"
 #include "proc_selftest.h"
+#include "thread.h"
 #include "sched_selftest.h"
 #include "serial.h"
 #include "shm.h"
@@ -443,7 +444,7 @@ void kmain(u64 mb_info)
 
     for (;;) {
         /* idle 点轮询 PS/2：没有 IRQ 时也不会把键盘字节丢在控制器里。 */
-        ng_input_poll();
-        __asm__ volatile("hlt");
+        /* WP5-0h: 输入轮询在 sched_yield() 调度点；IF=0 下不要 hlt。 */
+        sched_yield();
     }
 }

@@ -559,6 +559,90 @@ u64 ng_input_readkey(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* fake 96/97：输入事件与所有权（WP5-0h）                                    */
+/* ------------------------------------------------------------------------- */
+
+static int fevent_rc = -11;
+static struct input_packet fevent_pkt;
+static u32 fevent_calls;
+
+void fake_input_event_reset(void)
+{
+    fevent_rc = -11;
+    fevent_calls = 0;
+    fevent_pkt.type = 0;
+    fevent_pkt.key = 0;
+    fevent_pkt.x = 0;
+    fevent_pkt.y = 0;
+    fevent_pkt.buttons = 0;
+    fevent_pkt.scancode = 0;
+    fevent_pkt.flags = 0;
+}
+
+void fake_input_event_set(int rc, const struct input_packet *pk)
+{
+    fevent_rc = rc;
+    if (pk != NULL) {
+        fevent_pkt = *pk;
+    }
+}
+
+u32 fake_input_event_calls(void)
+{
+    return fevent_calls;
+}
+
+int ng_input_event(struct input_packet *out)
+{
+    fevent_calls++;
+    if (fevent_rc == 0 && out != NULL) {
+        *out = fevent_pkt;
+    }
+    return fevent_rc;
+}
+
+static i64 fclaim_rc;
+static u32 fclaim_calls;
+static u64 fclaim_pid;
+static u64 fclaim_flags;
+
+void fake_input_claim_reset(void)
+{
+    fclaim_rc = 0;
+    fclaim_calls = 0;
+    fclaim_pid = 0;
+    fclaim_flags = 0;
+}
+
+void fake_input_claim_set(i64 rc)
+{
+    fclaim_rc = rc;
+}
+
+u32 fake_input_claim_calls(void)
+{
+    return fclaim_calls;
+}
+
+u64 fake_input_claim_last_pid(void)
+{
+    return fclaim_pid;
+}
+
+u64 fake_input_claim_last_flags(void)
+{
+    return fclaim_flags;
+}
+
+i64 ng_input_claim(u64 pid, u64 flags)
+{
+    fclaim_calls++;
+    fclaim_pid = pid;
+    fclaim_flags = flags;
+    return fclaim_rc;
+}
+
+/* ------------------------------------------------------------------------- */
 /* fake FS 数据页池（WP2-1）                                                  */
 /* ------------------------------------------------------------------------- */
 

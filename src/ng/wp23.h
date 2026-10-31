@@ -27,15 +27,42 @@
 int wp23_selftest(void);
 
 /*
- * syscall 30 readkey：非阻塞。
+ * syscall 30 readkey：非阻塞兼容接口。
  *   有键：返回 (flags << 24) | (ascii << 16) | scancode（flags 见 INPUT_F_*）；
  *   无键：返回 (u64)(i64)NG_EAGAIN。
- * 每次调用先轮询 PS/2 输出缓冲，所以不需要 IRQ。
+ * WP5-0h 起不再只在 readkey 里轮询 PS/2：内核队列由 sched_yield() 调度点
+ * 的 ng_input_poll() 填充（boot 的同步 ring3 演示仍由 readkey 兜底一次）。
+ * displayd 认领输入后，其它进程返回 -EAGAIN 并让出一轮（避免 shell 忙等
+ * 抢键/饿死桌面）。
  */
 u64 ng_input_readkey(void);
 
-/* 在 idle 点轮询 PS/2（main.c 的 hlt 循环/自检用）。 */
+/* 调度点轮询（sched_yield 调用；readkey 对 boot 演示兜底）。 */
 void ng_input_poll(void);
+
+/*
+ * syscall 96 input_event(struct input_packet*)：非阻塞取一个统一事件
+ * （键盘/鼠标移动/鼠标按键）。0=取到；NG_EAGAIN=没有；用户指针由
+ * syscall.c 的 copyout 校验。
+ */
+struct input_packet;
+int ng_input_event(struct input_packet *out);
+
+/*
+ * syscall 97 input_claim(pid, flags)：pid=0 表示当前进程，flags bit0=释放。
+ * 返回 0 / -1(EPERM) / -16(EBUSY：已有存活属主)。
+ */
+i64 ng_input_claim(u64 pid, u64 flags);
+
+/* 诊断计数（claims 用；只读）。 */
+u32 ng_input_aux_bytes(void);
+u32 ng_input_key_bytes(void);
+u32 ng_input_poll_rounds(void);
+u32 ng_input_mouse_moves(void);
+u32 ng_input_mouse_buttons(void);
+u32 ng_input_owner_pid(void);
+u32 ng_input_owner_denials(void);
+int ng_input_mouse_ready(void);
 
 /*
  * WP2-7 parity 诊断（只读）：
