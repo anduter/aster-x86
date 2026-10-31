@@ -54,6 +54,11 @@
 
 /* 攻击进程自己的伪造 WM 令牌：seq=9, role=WM(1), nonce=0x7A5A。 */
 #define A_FAKE_WM_TOKEN 0x7A5A0109u
+/* 第二轮：第二个伪 WM 令牌（nonce 不同）—— "WM 令牌只认领一次"的负例。 */
+#define A_FAKE_WM_TOKEN2 0x7B5B0109u
+/* 第二轮：攻击进程自己伪造的 APP 令牌（seq=1, role=APP(2), nonce=0x3C3C），
+ * 用来建一个带令牌的"会话窗口"，验证 FOCUS 的令牌策略与归属回收。 */
+#define A_APP_TOKEN 0x3C3C0201u
 
 /* 发现端口时枚举的 (generation, slot) 范围：端口 ticket = (gen << 16) | slot，
  * slot < 64；启动早期最多几十次端口创建/关闭，24 代足够覆盖。 */
@@ -69,6 +74,14 @@ static u32 g_checks;
 static u32 g_fails;
 static u32 g_displayd_pid;
 static u32 g_sessiond_pid;
+/*
+ * 第二轮：ring3 越界写（a_child_shm_oob）目前会让内核 PANIC —— 这是
+ * docs/claims/ng-audit-wip.md 里记的已知限制（ring3 #PF 未隔离，内核
+ * trap 直接 panic），不属于本会话能改的范围（src/ng 归 syscall 审计）。
+ * 所以它变成**可选**场景：`spawn /mnt/disk/audit.elf oob` 才跑，默认跳过，
+ * 这样一次 QEMU 能把 display/session 的协议用例全部跑完。
+ */
+static int g_do_oob;
 
 /* ------------------------------------------------------------------------- */
 /* syscall / 输出                                                             */
@@ -527,8 +540,7 @@ static int a_create(u32 port, u32 w, u32 h, u32 flags, u32 x, u32 y,
     a_fill_create(&m, w, h, flags, x, y, token, title, title_mode);
     if (a_send_ds(port, &m, g_port) != 0) {
         return 0;
-    }
-    for (tries = 0; tries < DS_REPLY_WAIT_TRIES; tries++) {
+    }    for (tries = 0; tries < DS_REPLY_WAIT_TRIES; tries++) {
         int t = a_recv_ds(g_port, &r, NULL, DS_REPLY_WAIT_TICKS);
 
         if (t == (int)DS_MSG_CREATE_REPLY) {
@@ -551,13 +563,55 @@ static int a_create(u32 port, u32 w, u32 h, u32 flags, u32 x, u32 y,
     return 0;
 }
 
+/*
+ * 第二轮：用**指定 from 端口**发 CREATE（回复也收到那个端口）。
+ * 用来验证"别的端口发来的第二个 WM 令牌 CREATE 必须被拒"。
+ */
+static int a_create_from(u32 disp, u32 from, u32 w, u32 h, u32 token,
+                         const char *title, u32 *out_id, i32 *out_status)
+{
+    struct ds_msg m;
+    struct ds_msg r;
+    u32 tries;
+
+    a_fill_create(&m, w, h, 0, 0, 0, token, title, 0);
+    if (a_send_ds(disp, &m, from) != 0) {
+        return 0;
+    }
+    for (tries = 0; tries < DS_REPLY_WAIT_TRIES; tries++) {
+        int t = a_recv_ds(from, &r, NULL, DS_REPLY_WAIT_TICKS);
+
+        if (t == (int)DS_MSG_CREATE_REPLY) {
+            if (out_id != NULL) {
+                *out_id = r.u.create_reply.surface_id;
+            }
+            if (out_status != NULL) {
+                *out_status = r.status;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int a_list(u32 port, struct ds_msg *out)
 {
     struct ds_msg m;
+    u32 tries;
 
     ds_memzero(&m, (u64)sizeof(m));
     m.type = DS_MSG_LIST;
-    if (a_send_ds(port, &m, g_port) != 0) {
+    /*
+     * 端口只有 16 深：洪泛/背压之后 LIST 也可能撞上 EAGAIN（这是正常的
+     * 背压，不是 displayd 的缺陷）。重试几次再判定失败。
+     */
+    for (tries = 0; tries < 8u; tries++) {
+        if (a_send_ds(port, &m, g_port) == 0) {
+            break;
+        }
+        a_sleep_ms(10u);
+    }
+    if (tries == 8u) {
         return 0;
     }
     return a_wait_ds(g_port, DS_MSG_LIST_REPLY, out, DS_REPLY_WAIT_TRIES);
@@ -858,6 +912,30 @@ static void a_attack_create_geom(u32 disp)
                 title_len);
     }
 
+    /*
+     * 第二轮：标题里的 CR/LF/控制符不能在串口上伪造证据行（displayd 打印前
+     * 净化）。真正断言在宿主侧（serial 里不能出现以 "PANIC:" 开头的行），
+     * 这里只负责把这段 payload 打进协议。
+     */
+    {
+        u32 id = 0;
+        u32 shm = 0;
+        u32 pages = 0;
+        i32 st = 0;
+
+        if (a_create(disp, 8, 8, 0, 0, 0, 0, "\r\nPANIC: vec=0xe", 0, &id,
+                     &shm, &pages, &st) &&
+            st == 0 && id != 0) {
+            struct ds_msg d;
+
+            ds_memzero(&d, (u64)sizeof(d));
+            d.type = DS_MSG_DESTROY;
+            d.u.destroy.surface_id = id;
+            (void)a_send_ds(disp, &d, g_port);
+        }
+        a_check(id != 0, "display title-inject", id);
+    }
+
     /* LIST 小缓冲 + 端口背压：depth=1 的端口收 12 条 LIST_REPLY（11 条应
      * 被 displayd 以非阻塞方式丢掉），再用小缓冲截断读一条，最后确认服务
      * 仍然可用。 */
@@ -1064,6 +1142,30 @@ static void a_attack_authz(u32 disp)
         a_check(0, "destroy wm-token", 0);
         return;
     }
+    /*
+     * 第二轮：WM 角色令牌**只认领一次**。已经有 WM 令牌时，另一个客户端
+     * 拿另一个"形状合法"的 WM 令牌 CREATE 必须被拒（以前会覆盖 g_wm_token，
+     * 于是任何应用都能抢走 WM 的跨窗口权限 + 全局热键通道）。
+     */
+    {
+        u32 w2 = 0;
+        i32 st2 = 0;
+        u32 found_w2 = 0;
+
+        (void)a_create_from(disp, p2, 8, 8, A_FAKE_WM_TOKEN2, "W2", &w2,
+                            &st2);
+        if (a_list(disp, &r)) {
+            u32 k;
+
+            for (k = 0; k < r.u.list_reply.count && k < DS_LIST_MAX; k++) {
+                if (r.u.list_reply.entries[k].id == w2 && w2 != 0) {
+                    found_w2 = 1;
+                }
+            }
+        }
+        a_check(st2 != 0 && w2 == 0 && found_w2 == 0, "display wm-claim",
+                (u32)st2);
+    }
     /* WM 令牌可以销毁别人的窗口。 */
     ds_memzero(&m, (u64)sizeof(m));
     m.type = DS_MSG_DESTROY;
@@ -1102,20 +1204,34 @@ static void a_attack_authz(u32 disp)
     {
         u32 i;
         u32 accepted = 1;
+        u32 sent = 0;
 
         for (i = 0; i < 40u; i++) {
             struct ds_msg h;
+            u32 tries;
 
             ds_memzero(&h, (u64)sizeof(h));
             h.type = DS_MSG_REGISTER_HOTKEY;
             h.u.register_hotkey.surface_id = w;
             h.u.register_hotkey.key = DS_HOTKEY_ANY;
             h.u.register_hotkey.token = A_FAKE_WM_TOKEN;
-            if (a_send_ds(disp, &h, g_port) != 0) {
+            /*
+             * 端口只有 16 深：洪泛时内核会给 EAGAIN（这是正常的背压，不是
+             * displayd 的缺陷）。每条最多重试 8 次，只有真的送不进去才算失败。
+             */
+            for (tries = 0; tries < 8u; tries++) {
+                if (a_send_ds(disp, &h, g_port) == 0) {
+                    sent++;
+                    break;
+                }
+                a_sleep_ms(10u);
+            }
+            if (tries == 8u) {
                 accepted = 0;
             }
         }
-        a_check(a_list(disp, &r) && accepted, "hotkey flood", 40u);
+        a_check(a_list(disp, &r) && accepted && sent == 40u, "hotkey flood",
+                40u);
     }
 
     /* 销毁 WM 面板（用它的令牌）后再用 token=0 注册：回到 v2 兼容路径。 */
@@ -1133,7 +1249,93 @@ static void a_attack_authz(u32 disp)
     (void)a_send_ds(disp, &m, p2);
     a_check(a_list(disp, &r), "hotkey legacy", 0u);
 
-    /* 清场：B 由创建者端口（g_port）销毁。 */
+    /*
+     * 第二轮：WM 面板销毁后，WM 令牌必须被回收；带令牌的会话窗口不能被
+     * "token=0 + 知道 id" 或"旧 WM 令牌"抢焦点。
+     *   - 以前 g_wm_token 永不回收（销毁后再读已清零的槽位，条件恒假）；
+     *   - 以前 FOCUS 的 token=0 对任何窗口都放行。
+     *
+     * 注意 SHM 对象池只有 8 个（src/ng/shm.h，DESTROY 不释放）：这个 displayd
+     * 到此时已经用掉 7 个（pos/title/title-inject/badops/a/b/w），所以这里
+     * **只能再建一个** surface（V）。焦点锚点复用仍然活着的无令牌窗口 B。
+     */
+    {
+        u32 v = 0;
+        u32 shm = 0;
+        u32 pages = 0;
+        i32 st = 0;
+        u32 found_v = 0;
+        u32 focused_v = 0;
+        u32 focused_b = 0;
+        u32 own_ok = 0;
+
+        /* 锚点：把焦点放到无令牌的 B 上（v1/v2 兼容路径，必须成功）。 */
+        ds_memzero(&m, (u64)sizeof(m));
+        m.type = DS_MSG_FOCUS;
+        m.u.focus.surface_id = b;
+        (void)a_send_ds(disp, &m, g_port);
+        a_sleep_ms(50u);
+        /* 最后一个可用 surface：带 APP 令牌的 V。 */
+        if (!a_create(disp, 8, 8, 0, 0, 0, A_APP_TOKEN, "V", 0, &v, &shm,
+                      &pages, &st) ||
+            st != 0 || v == 0) {
+            a_check(0, "display focus-token", 0);
+            goto authz_done;
+        }
+        /* 1) 外来端口 token=0：拒绝（V 有令牌）。 */
+        ds_memzero(&m, (u64)sizeof(m));
+        m.type = DS_MSG_FOCUS;
+        m.u.focus.surface_id = v;
+        (void)a_send_ds(disp, &m, p2);
+        a_sleep_ms(50u);
+        /* 2) 旧的 WM 令牌（面板已销毁）：也必须拒绝。 */
+        ds_memzero(&m, (u64)sizeof(m));
+        m.type = DS_MSG_FOCUS;
+        m.u.focus.surface_id = v;
+        m.u.focus.token = A_FAKE_WM_TOKEN;
+        (void)a_send_ds(disp, &m, p2);
+        a_sleep_ms(50u);
+        if (a_list(disp, &r)) {
+            u32 k;
+
+            for (k = 0; k < r.u.list_reply.count && k < DS_LIST_MAX; k++) {
+                if (r.u.list_reply.entries[k].id == v) {
+                    found_v = 1;
+                    focused_v = r.u.list_reply.entries[k].focused;
+                }
+                if (r.u.list_reply.entries[k].id == b) {
+                    focused_b = r.u.list_reply.entries[k].focused;
+                }
+            }
+        }
+        a_check(found_v != 0 && focused_v == 0 && focused_b == 1,
+                "display focus-token", focused_v * 10u + focused_b);
+        /* 3) 正例：窗口自己的令牌可以改焦点。 */
+        ds_memzero(&m, (u64)sizeof(m));
+        m.type = DS_MSG_FOCUS;
+        m.u.focus.surface_id = v;
+        m.u.focus.token = A_APP_TOKEN;
+        (void)a_send_ds(disp, &m, g_port);
+        a_sleep_ms(50u);
+        if (a_list(disp, &r)) {
+            u32 k;
+
+            for (k = 0; k < r.u.list_reply.count && k < DS_LIST_MAX; k++) {
+                if (r.u.list_reply.entries[k].id == v) {
+                    own_ok = r.u.list_reply.entries[k].focused;
+                }
+            }
+        }
+        a_check(own_ok == 1, "display focus-own", own_ok);
+        /* 清场：带令牌的窗口用自己的令牌销毁。 */
+        ds_memzero(&m, (u64)sizeof(m));
+        m.type = DS_MSG_DESTROY;
+        m.u.destroy.surface_id = v;
+        m.u.destroy.token = A_APP_TOKEN;
+        (void)a_send_ds(disp, &m, g_port);
+    }
+authz_done:
+    /* 清场：B 由创建者端口（g_port，token=0 的旧式窗口）销毁。 */
     ds_memzero(&m, (u64)sizeof(m));
     m.type = DS_MSG_DESTROY;
     m.u.destroy.surface_id = b;
@@ -1195,6 +1397,7 @@ static void a_attack_shm(u32 disp)
             "shm map", pages);
 
     /* 子进程越界写：应该被 #PF 杀掉，displayd 与父进程不受影响。 */
+    if (g_do_oob != 0)
     {
         char arg1[16];
         char arg2[16];
@@ -1511,6 +1714,10 @@ int a_main(long argc, char **argv)
         (void)a_parse_dec(argv[3], &pages);
         a_child_shm_oob(handle, pages);
         return 0;
+    }
+    /* 可选场景：`oob` 才跑会让当前内核 PANIC 的 ring3 越界写（见 g_do_oob）。 */
+    if (argc >= 2 && argv[1] != NULL && ds_streq(argv[1], "oob") != 0) {
+        g_do_oob = 1;
     }
 
     a_put("ng: audit ui start (pid=");
