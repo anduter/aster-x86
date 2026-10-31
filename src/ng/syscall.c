@@ -8,6 +8,8 @@
  *                往返自检用它）；
  *     1  exit：ring3 下置退出标志、记录 rdi 退出码并跳回内核恢复点；
  *     10..14 IPC（WP1-6）。
+ *   ABI 1.1（WP5-0a）：48..95 是 1.1 新号段（已冻结、未实现）；未分配号与
+ *     未实现号在 default 统一返回 -ENOSYS(-38)，不再返回 -1(EPERM)。
  *
  * 入口/返回路径在 isr.S：
  *   - SYSCALL 只改 CS/SS，不换栈 => 入口把用户 RSP 存到全局，再从
@@ -395,7 +397,12 @@ void syscall_dispatch(struct syscall_frame *f)
         f->rax = fbmap_sys_map(f->rdi, f->rsi);
         break;
     default:
-        f->rax = (u64)-1;
+        /*
+         * ABI 1.1（WP5-0a）：未分配号（2..9、15..19、28..29、36..39、96..）与
+         * 1.1 已分配但内核尚未实现的号（48..95）统一 -ENOSYS(-38)。
+         * 1.0 §10 第 1 项已声明未分配号行为不属于 1.0 契约，故不破坏 1.0。
+         */
+        f->rax = (u64)(i64)NG_SYS_ENOSYS;
         break;
     }
 
@@ -504,6 +511,37 @@ static int syscall_ring0_test(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* ABI 1.1（WP5-0a）：未分配号 / 未实现号 = -ENOSYS(-38)                       */
+/* ------------------------------------------------------------------------- */
+
+static int syscall_enosys_test(void)
+{
+    /* 1.0 未分配号 + 1.1 已分配但未实现的号：都必须落 default。 */
+    static const u64 nos[] = {
+        2u, 9u, 15u, 19u, 28u, 29u, 36u, 39u, 48u, 95u, 96u
+    };
+    struct syscall_frame f = {0};
+    u64 bad = 0;
+    u64 i;
+
+    for (i = 0; i < (u64)(sizeof(nos) / sizeof(nos[0])); i++) {
+        f.rax = nos[i];
+        syscall_dispatch(&f);
+        if (f.rax != (u64)(i64)NG_SYS_ENOSYS) {
+            bad++;
+        }
+    }
+    if (bad == 0 && (u64)(i64)NG_SYS_ENOSYS == 0xFFFFFFFFFFFFFFDAULL) {
+        serial_puts("ng: syscall ENOSYS ok (-38)\r\n");
+        return 0;
+    }
+    serial_puts("ng: syscall ENOSYS FAIL bad=");
+    serial_putdec(bad);
+    serial_puts("\r\n");
+    return 1;
+}
+
+/* ------------------------------------------------------------------------- */
 /* ring3 静态页往返（WP1-3 回归，保持原有证据行）                              */
 /* ------------------------------------------------------------------------- */
 
@@ -602,6 +640,7 @@ int syscall_selftest(void)
     int fails = 0;
 
     fails += syscall_ring0_test();
+    fails += syscall_enosys_test();
     fails += syscall_ring3_test();
     return fails;
 }

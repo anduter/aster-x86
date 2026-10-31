@@ -1,16 +1,21 @@
 ﻿# =============================================================================
-# abi-check.ps1 - ABI 1.0 冻结门禁（E4 / WP4-1）
+# abi-check.ps1 - ABI 门禁（WP4-1: ABI 1.0 冻结；WP5-0a: + ABI 1.1 只追加）
 #
-# 比对三处调用号与关键常量：
-#   docs/abi/abi-1.0.h          （冻结契约，机器可读）
-#   sdk/include/aster/syscall.h （SDK 消费端）
+# 比对调用号与关键常量：
+#   docs/abi/abi-1.0.h          （1.0 冻结契约，机器可读）
+#   docs/abi/abi-1.1.h          （1.1 增量：版本 1.1.0 + 新号 48–95；1.0 部分
+#                                由 #include "abi-1.0.h" 继承）
+#   sdk/include/aster/syscall.h （SDK 消费端，仍是 1.0）
 #   src/ng/syscall.h            （内核实现）
 #
 # 另外核对：
 #   - 错误码数值：ABI 头 vs SDK 头 vs 内核各模块的 E* 别名；
 #   - IPC/VFS/进程/共享内存/认证/日志/包/输入上限：ABI 头 vs 内核宏；
 #   - 结构体布局：vfs_stat / vfs_dirent / ipc_msg_hdr / ds_fb_info；
-#   - docs/abi/abi-1.0.md 存在且标记为冻结。
+#   - docs/abi/abi-1.0.md 存在且标记为冻结，并链接后继版本 abi-1.1.md；
+#   - ABI 1.1：版本 1.1.0、48–95 号段完整且不撞 1.0 号、ENOSYS(-38) 语义、
+#     内核 default 分支返回 NG_SYS_ENOSYS；
+#   - docs/abi/abi-1.1.md 存在且标记为草案（DRAFT）。
 #
 # 任何一项不一致 -> 打印差异并 exit 1。供 tools/release-ng.ps1 与 CI 调用。
 #
@@ -36,18 +41,21 @@ $root = (Resolve-Path -LiteralPath $Repo).Path
 $files = @{
     Abi = Join-Path $root 'docs/abi/abi-1.0.h'
     AbiDoc = Join-Path $root 'docs/abi/abi-1.0.md'
+    Abi11 = Join-Path $root 'docs/abi/abi-1.1.h'
+    Abi11Doc = Join-Path $root 'docs/abi/abi-1.1.md'
     Sdk = Join-Path $root 'sdk/include/aster/syscall.h'
     Src = Join-Path $root 'src/ng/syscall.h'
 }
-foreach ($k in @('Abi', 'AbiDoc', 'Sdk', 'Src')) {
+foreach ($k in @('Abi', 'AbiDoc', 'Abi11', 'Abi11Doc', 'Sdk', 'Src')) {
     if (-not (Test-Path -LiteralPath $files[$k])) {
         Fail ("missing {0}: {1}" -f $k, $files[$k])
     }
 }
 
-Write-Host '=== abi-check (WP4-1: ABI 1.0 freeze) ==='
+Write-Host '=== abi-check (WP4-1: ABI 1.0 freeze + WP5-0a: ABI 1.1 additive) ==='
 Write-Host ("repo: {0}" -f $root)
 Write-Host ("abi:  {0}" -f $files.Abi)
+Write-Host ("abi11:{0}" -f $files.Abi11)
 Write-Host ("sdk:  {0}" -f $files.Sdk)
 Write-Host ("src:  {0}" -f $files.Src)
 
@@ -284,6 +292,7 @@ function Resolve-Macro([string]$name, [hashtable]$macros, [hashtable]$cache,
 # -----------------------------------------------------------------------------
 
 $abi = Read-Macros $files.Abi
+$abi11 = Read-Macros $files.Abi11
 $sdk = Read-Macros $files.Sdk
 $src = Read-Macros $files.Src
 
@@ -316,6 +325,25 @@ $abiCache = @{}
 $sdkCache = @{}
 $srcCache = @{}
 $kernelCache = @{}
+$abi11Cache = @{}
+
+# ABI 1.1 头 #include "abi-1.0.h"：机器上等价于“1.0 宏 + 1.1 增量”。
+# 这里用同样的模型求值：$abi11All = $abi 叠加 $abi11；1.0 的其它宏不允许被
+# 1.1 重定义（只有 5 个版本宏在 1.1 里覆盖为 1.1.0）。
+$versionMacros = @(
+    'ASTER_ABI_VERSION_MAJOR', 'ASTER_ABI_VERSION_MINOR',
+    'ASTER_ABI_VERSION_PATCH', 'ASTER_ABI_VERSION', 'ASTER_ABI_VERSION_STRING'
+)
+$abi11All = @{}
+foreach ($k in $abi.Keys) { $abi11All[$k] = $abi[$k] }
+foreach ($k in $abi11.Keys) {
+    if ($abi.ContainsKey($k) -and ($versionMacros -notcontains $k)) {
+        if ($abi[$k] -ne $abi11[$k]) {
+            Fail ("ABI 1.1 redefines 1.0 macro {0}: {1} -> {2}" -f $k, $abi[$k], $abi11[$k])
+        }
+    }
+    $abi11All[$k] = $abi11[$k]
+}
 
 function Val([string]$name, [hashtable]$macros, [hashtable]$cache) {
     $stack = New-Object System.Collections.Generic.List[string]
@@ -375,7 +403,8 @@ function Compare-KeySets([string[]]$actual, [string[]]$expected, [string]$what) 
 
 $expectedAbi = @($syscalls | ForEach-Object { 'ASTER_ABI_SYS_' + $_.Name })
 $expectedSdk = @($syscalls | ForEach-Object { 'ASTER_SYS_' + $_.Name })
-$expectedSrc = @($syscalls | ForEach-Object { 'NG_SYS_' + $_.Name })
+# 内核头额外有 NG_SYS_ENOSYS(-38)（ABI 1.1 的 default 返回值，不是调用号）。
+$expectedSrc = @($syscalls | ForEach-Object { 'NG_SYS_' + $_.Name }) + @('NG_SYS_ENOSYS')
 Compare-KeySets (Keys-With-Prefix $abi 'ASTER_ABI_SYS_') $expectedAbi 'ABI syscall set'
 Compare-KeySets (Keys-With-Prefix $sdk 'ASTER_SYS_') $expectedSdk 'SDK syscall set'
 Compare-KeySets (Keys-With-Prefix $src 'NG_SYS_') $expectedSrc 'kernel syscall set'
@@ -398,6 +427,12 @@ foreach ($s in $syscalls) {
     }
 }
 Write-Host ("[ok] {0} syscalls agree (ABI/SDK/kernel): 0/1, 10-14, 20-27, 30-35, 40-47" -f $syscalls.Count) -ForegroundColor DarkGreen
+
+# ABI 1.1 的 default 返回值（内核头常量；不在 $syscalls 里，因为它不是调用号）。
+if ((Val 'NG_SYS_ENOSYS' $src $srcCache) -ne -38) {
+    Fail ("kernel NG_SYS_ENOSYS={0}, expected -38" -f (Val 'NG_SYS_ENOSYS' $src $srcCache))
+}
+Write-Host '[ok] kernel NG_SYS_ENOSYS == -38 (ABI 1.1 unallocated/unimplemented)' -ForegroundColor DarkGreen
 
 # -----------------------------------------------------------------------------
 # 2. 错误码：ABI 全表 = 冻结值；SDK 镜像（缺 ESRCH/EINTR）；内核别名一致
@@ -662,7 +697,10 @@ $doc = [IO.File]::ReadAllText($files.AbiDoc)
 if ($doc -notmatch '状态：\*\*冻结' -or $doc -notmatch 'ABI 1\.0') {
     Fail 'docs/abi/abi-1.0.md is not marked as frozen ABI 1.0'
 }
-Write-Host '[ok] docs/abi/abi-1.0.md is marked frozen' -ForegroundColor DarkGreen
+if ($doc -notmatch 'abi-1\.1\.md') {
+    Fail 'docs/abi/abi-1.0.md must link successor version abi-1.1.md'
+}
+Write-Host '[ok] docs/abi/abi-1.0.md is marked frozen and links abi-1.1.md' -ForegroundColor DarkGreen
 
 # -----------------------------------------------------------------------------
 # 6. 版本
@@ -680,6 +718,151 @@ if ($version -ne 0x00010000) {
 }
 Write-Host ("[ok] ABI version {0}.{1}.{2} (0x{3:x8})" -f $major, $minor, $patch, $version) -ForegroundColor DarkGreen
 
-Write-Host ("abi-check: PASS ({0} syscalls, {1} errors, {2} constants, {3} struct sizes)" -f `
-    $syscalls.Count, $errors.Count, $constants.Count, $structs.Count) -ForegroundColor Green
+# -----------------------------------------------------------------------------
+# 7. ABI 1.1（只追加）：版本 1.1.0、号段 48–95、ENOSYS(-38)
+# -----------------------------------------------------------------------------
+
+$abi11Text = [IO.File]::ReadAllText($files.Abi11)
+if ($abi11Text -notmatch '#include\s+"abi-1\.0\.h"') {
+    Fail 'docs/abi/abi-1.1.h must #include "abi-1.0.h" (1.1 = 1.0 + delta)'
+}
+
+$syscalls11 = @(
+    @{ Name = 'FSTAT'; Nr = 48 },
+    @{ Name = 'LSEEK'; Nr = 49 },
+    @{ Name = 'DUP'; Nr = 50 },
+    @{ Name = 'DUP2'; Nr = 51 },
+    @{ Name = 'PIPE'; Nr = 52 },
+    @{ Name = 'CHDIR'; Nr = 53 },
+    @{ Name = 'GETCWD'; Nr = 54 },
+    @{ Name = 'GETUID'; Nr = 55 },
+    @{ Name = 'WAITPID'; Nr = 56 },
+    @{ Name = 'EXECVE'; Nr = 57 },
+    @{ Name = 'READLINK'; Nr = 58 },
+    @{ Name = 'RENAME'; Nr = 59 },
+    @{ Name = 'RMDIR'; Nr = 60 },
+    @{ Name = 'FCNTL'; Nr = 61 },
+    @{ Name = 'GETDENTS'; Nr = 62 },
+    @{ Name = 'BRK'; Nr = 63 },
+    @{ Name = 'MMAP'; Nr = 64 },
+    @{ Name = 'MUNMAP'; Nr = 65 },
+    @{ Name = 'MPROTECT'; Nr = 66 },
+    @{ Name = 'CLOCK_GETTIME'; Nr = 67 },
+    @{ Name = 'NANOSLEEP'; Nr = 68 },
+    @{ Name = 'GETRANDOM'; Nr = 69 },
+    @{ Name = 'SCHED_YIELD'; Nr = 70 },
+    @{ Name = 'RT_SIGACTION'; Nr = 71 },
+    @{ Name = 'RT_SIGPROCMASK'; Nr = 72 },
+    @{ Name = 'RT_SIGRETURN'; Nr = 73 },
+    @{ Name = 'SIGNAL_SEND'; Nr = 74 },
+    @{ Name = 'POLL'; Nr = 75 },
+    @{ Name = 'SOCKET'; Nr = 76 },
+    @{ Name = 'BIND'; Nr = 77 },
+    @{ Name = 'CONNECT'; Nr = 78 },
+    @{ Name = 'LISTEN'; Nr = 79 },
+    @{ Name = 'ACCEPT'; Nr = 80 },
+    @{ Name = 'SENDTO'; Nr = 81 },
+    @{ Name = 'RECVFROM'; Nr = 82 },
+    @{ Name = 'SETSOCKOPT'; Nr = 83 },
+    @{ Name = 'GETSOCKOPT'; Nr = 84 },
+    @{ Name = 'SHUTDOWN'; Nr = 85 },
+    @{ Name = 'GETPEERNAME'; Nr = 86 },
+    @{ Name = 'GETSOCKNAME'; Nr = 87 },
+    @{ Name = 'CLONE'; Nr = 88 },
+    @{ Name = 'FUTEX'; Nr = 89 },
+    @{ Name = 'SET_TID_ADDRESS'; Nr = 90 },
+    @{ Name = 'ARCH_PRCTL'; Nr = 91 },
+    @{ Name = 'EXIT_THREAD'; Nr = 92 },
+    @{ Name = 'GETTID'; Nr = 93 },
+    @{ Name = 'SHM_FREE'; Nr = 94 },
+    @{ Name = 'SPAWN_EX'; Nr = 95 }
+)
+
+$expectedAbi11 = @($syscalls11 | ForEach-Object { 'ASTER_ABI_SYS_' + $_.Name })
+Compare-KeySets (Keys-With-Prefix $abi11 'ASTER_ABI_SYS_') $expectedAbi11 'ABI 1.1 syscall set'
+
+# 1.1 号段完整：48..95 每个号都有且只有一个名字，且不与 1.0 的 29 个号冲突。
+$seen11 = @{}
+foreach ($s in $syscalls) { $seen11[$s.Nr] = $s.Name }
+foreach ($s in $syscalls11) {
+    if ($seen11.ContainsKey($s.Nr)) {
+        Fail ("1.1 syscall {0}={1} collides with frozen 1.0 name {2}" -f `
+            $s.Name, $s.Nr, $seen11[$s.Nr])
+    }
+    $seen11[$s.Nr] = $s.Name
+    $a = Val ('ASTER_ABI_SYS_' + $s.Name) $abi11All $abi11Cache
+    if ($a -ne $s.Nr) {
+        Fail ("ABI 1.1 syscall {0}={1}, frozen table says {2}" -f $s.Name, $a, $s.Nr)
+    }
+}
+if ($syscalls11.Count -ne 48) {
+    Fail ("ABI 1.1 syscall count {0}, expected 48 (48..95)" -f $syscalls11.Count)
+}
+for ($n = 48; $n -le 95; $n++) {
+    if (-not $seen11.ContainsKey($n)) {
+        Fail ("ABI 1.1 number {0} is neither assigned nor declared reserved" -f $n)
+    }
+}
+$lastNr = Val 'ASTER_ABI_LAST_ASSIGNED_NR' $abi11All $abi11Cache
+$nextNr = Val 'ASTER_ABI_NEXT_FREE_NR' $abi11All $abi11Cache
+if ($lastNr -ne 95 -or $nextNr -ne 96) {
+    Fail ("ABI 1.1 number bounds last={0} next={1}, expected 95/96" -f $lastNr, $nextNr)
+}
+
+# 1.0 的 29 个号经 1.1 头（#include abi-1.0.h）必须解析成同样的值。
+foreach ($s in $syscalls) {
+    $a = Val ('ASTER_ABI_SYS_' + $s.Name) $abi11All $abi11Cache
+    if ($a -ne $s.Nr) {
+        Fail ("ABI 1.1 inherits syscall {0}={1}, frozen 1.0 says {2}" -f $s.Name, $a, $s.Nr)
+    }
+}
+Write-Host ("[ok] 1.1: {0} syscalls ({1} legacy + {2} new 48-95), number segment frozen" -f `
+    ($syscalls.Count + $syscalls11.Count), $syscalls.Count, $syscalls11.Count) -ForegroundColor DarkGreen
+
+# 版本 1.1.0
+$major11 = Val 'ASTER_ABI_VERSION_MAJOR' $abi11All $abi11Cache
+$minor11 = Val 'ASTER_ABI_VERSION_MINOR' $abi11All $abi11Cache
+$patch11 = Val 'ASTER_ABI_VERSION_PATCH' $abi11All $abi11Cache
+$version11 = Val 'ASTER_ABI_VERSION' $abi11All $abi11Cache
+if ($major11 -ne 1 -or $minor11 -ne 1 -or $patch11 -ne 0) {
+    Fail ("ABI 1.1 version {0}.{1}.{2}, expected 1.1.0" -f $major11, $minor11, $patch11)
+}
+if ($version11 -ne 0x00010100) {
+    Fail ("ASTER_ABI_VERSION(1.1)=0x{0:x8}, expected 0x00010100" -f $version11)
+}
+Write-Host ("[ok] 1.1: version {0}.{1}.{2} (0x{3:x8})" -f `
+    $major11, $minor11, $patch11, $version11) -ForegroundColor DarkGreen
+
+# ENOSYS：1.0 的 -38 保留值不变；1.1 用它表示未分配/未实现号。
+$enosys10 = Val 'ASTER_ABI_ENOSYS' $abi $abiCache
+$enosys11 = Val 'ASTER_ABI_UNALLOCATED_ERR' $abi11All $abi11Cache
+if ($enosys10 -ne -38) {
+    Fail ("ABI 1.0 ENOSYS={0}, expected -38" -f $enosys10)
+}
+if ($enosys11 -ne -38) {
+    Fail ("ABI 1.1 unallocated errno={0}, expected -38 (ENOSYS)" -f $enosys11)
+}
+
+# 内核 default 必须返回 NG_SYS_ENOSYS（不是 -1）。
+$srcSyscallC = [IO.File]::ReadAllText((Join-Path $root 'src/ng/syscall.c'))
+if ($srcSyscallC -notmatch '(?s)default:.{0,800}?NG_SYS_ENOSYS') {
+    Fail 'src/ng/syscall.c default branch does not return NG_SYS_ENOSYS (-38)'
+}
+if ($srcSyscallC -match 'f->rax\s*=\s*\(u64\)-1;') {
+    Fail 'src/ng/syscall.c still returns (u64)-1 (must be NG_SYS_ENOSYS)'
+}
+Write-Host '[ok] 1.1: unallocated/unimplemented -> ENOSYS(-38); kernel default returns NG_SYS_ENOSYS' -ForegroundColor DarkGreen
+
+# 1.1 文本：草案 + 只追加 + ENOSYS/号段说明。
+$doc11 = [IO.File]::ReadAllText($files.Abi11Doc)
+if ($doc11 -notmatch '状态：\*\*草案' -or $doc11 -notmatch 'ABI 1\.1') {
+    Fail 'docs/abi/abi-1.1.md is not marked as DRAFT ABI 1.1'
+}
+if ($doc11 -notmatch 'ENOSYS' -or $doc11 -notmatch '48–95') {
+    Fail 'docs/abi/abi-1.1.md must document 48-95 and ENOSYS'
+}
+Write-Host '[ok] docs/abi/abi-1.1.md is marked DRAFT (48-95 + ENOSYS)' -ForegroundColor DarkGreen
+
+Write-Host ("abi-check: PASS ({0}+{1} syscalls, {2} errors, {3} constants, {4} struct sizes)" -f `
+    $syscalls.Count, $syscalls11.Count, $errors.Count, $constants.Count, $structs.Count) -ForegroundColor Green
 exit 0

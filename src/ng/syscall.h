@@ -52,6 +52,13 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
  * 不再是"本进程句柄"：ticket 可以交给别的进程；recv/close 要求调用者是端口
  * 的属主进程。进程自己的句柄表（proc_t.handles）记录"我拥有哪些端口"，
  * 退出/被 kill 时按表回收。
+ *
+ * ABI 1.1（WP5-0a，docs/abi/abi-1.1.h）：
+ *   - 48..95 是 1.1 新号段（已冻结分配，尚未实现）；未分配号（2..9、15..19、
+ *     28..29、36..39、96..）也不属于任何 ABI；
+ *   - 两者在 syscall_dispatch() 的 default 统一返回 -ENOSYS(-38)，不再是过去的
+ *     -1(EPERM)。1.0 §10 第 1 项已声明未分配号行为不属于 1.0 契约，故不破坏
+ *     1.0；已分配 0/1、10..14、20..27、30..35、40..47 的语义/错误码不变。
  */
 #define NG_SYS_WRITE 0u
 #define NG_SYS_EXIT 1u
@@ -82,6 +89,11 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
 #define NG_SYS_SHM_ALLOC 45u
 #define NG_SYS_SHM_MAP 46u
 #define NG_SYS_FB_MAP 47u
+/*
+ * ABI 1.1（WP5-0a）：未分配号与"1.1 已分配但未实现号"的统一返回值，数值沿用
+ * ABI 1.0 保留的 ENOSYS(-38)。默认分支只返回它，不返回 -1。
+ */
+#define NG_SYS_ENOSYS (-38)
 
 /* ring3 一次执行的统计（syscall_run_user 填）。 */
 struct ring3_result {

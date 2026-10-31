@@ -10,7 +10,8 @@
  *     len=0 / >256 是 EINVAL、256 字节边界成功）；
  *   - 1 exit：ring0 只打行；ring3 记录退出码并让 run_user 返回 0；
  *   - 10..14：参数（含 r10 的 timeout）原样搬给 ipc_sys_*()，返回值透传；
- *   - 未知调用号 = -1；
+ *   - 未知/未实现调用号 = -ENOSYS(-38)（ABI 1.1，WP5-0a）；1.0 已分配号的
+ *     坏参数仍返回原错误码（不被 ENOSYS 覆盖）；
  *   - run_user：入口/栈区间校验、per-run 统计清零、user_rsp/bad_writes 统计；
  *   - per-thread 内核栈：syscall_set_kernel_stack / set_thread_stack 同步
  *     syscall_kernel_rsp0 与 TSS.RSP0。
@@ -95,9 +96,11 @@ static void t_dispatch_basic(void)
 
     reset_env();
 
+    /* ABI 1.1：未知号 -> -ENOSYS(-38)（不再是 -1）。逐号用例见 t_dispatch_unknown。 */
     frame_init(&f, 99);
     syscall_dispatch(&f);
-    CHECK(f.rax == ~0ULL);
+    CHECK(f.rax == (u64)(i64)NG_SYS_ENOSYS);
+    CHECK(f.rax == 0xFFFFFFFFFFFFFFDAULL);
 
     frame_init(&f, NG_SYS_WRITE);
     f.rdi = 0;
@@ -124,6 +127,48 @@ static void t_dispatch_basic(void)
     syscall_dispatch(&f);
     CHECK(f.rax == 0x0061001EULL);
     CHECK(fake_input_readkey_calls() == 2);
+}
+
+/* ------------------------------------------------------------------------- */
+/* 1b. ABI 1.1（WP5-0a）：未分配号 / 未实现号 = -ENOSYS(-38)                  */
+/* ------------------------------------------------------------------------- */
+
+static void t_dispatch_unknown(void)
+{
+    /*
+     * 1.0 未分配号（2..9、15..19、28..29、36..39）+ 1.1 已分配但内核未实现
+     * 的号（48..95）+ 1.1 号段之后（96..）都必须落 default。
+     */
+    static const u64 nos[] = {
+        2u, 9u, 15u, 19u, 28u, 29u, 36u, 39u,
+        48u, 49u, 75u, 95u, 96u, 99u, 127u, 0xFFFFFFFFu
+    };
+    struct syscall_frame f;
+    u32 i;
+
+    reset_env();
+
+    /* 数值契约：-38，二补码高 32 位全 1。 */
+    CHECK(NG_SYS_ENOSYS == -38);
+    CHECK((u64)(i64)NG_SYS_ENOSYS == 0xFFFFFFFFFFFFFFDAULL);
+
+    for (i = 0; i < (u32)(sizeof(nos) / sizeof(nos[0])); i++) {
+        frame_init(&f, nos[i]);
+        syscall_dispatch(&f);
+        CHECK(f.rax == (u64)(i64)NG_SYS_ENOSYS);
+        CHECK(f.rax != ~0ULL); /* 不再是 EPERM(-1) */
+    }
+
+    /* 已分配 1.0 号的坏参数仍返回原错误码：ENOSYS 只属于 default 分支。 */
+    frame_init(&f, NG_SYS_WRITE);
+    f.rdi = 0x1000; /* 未映射用户页 */
+    f.rsi = 1;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)UACCESS_EFAULT);
+    fake_ipc_set_ret((u64)(i64)IPC_EBADF);
+    frame_init(&f, NG_SYS_PORT_CLOSE);
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)IPC_EBADF);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -272,6 +317,7 @@ static void t_dispatch_ipc(void)
 
 struct run_ctx {
     struct syscall_frame f[4];
+    u64 ret[4]; /* 每个 syscall 的返回（dispatch 后的 f.rax） */
     int n;
     u64 rsp;
 };
@@ -284,6 +330,7 @@ static void ring3_hook(void *ctx)
     for (i = 0; i < c->n; i++) {
         syscall_user_rsp = c->rsp;
         syscall_dispatch(&c->f[i]);
+        c->ret[i] = c->f[i].rax;
     }
 }
 
@@ -414,6 +461,20 @@ static void t_run_user_bad(void)
     CHECK(syscall_run_user(RING3_ENTRY, RING3_STACK_TOP, RING3_STACK_LO,
                            RING3_STACK_HI, &out) == 0);
     CHECK(strstr(fake_serial_text(), "ng: syscall write (ring3)\r\n") != NULL);
+
+    /* ring3 的未知号：rax=-ENOSYS，进程继续跑，随后 exit 仍生效。 */
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.n = 2;
+    ctx.rsp = RING3_STACK_TOP;
+    frame_init(&ctx.f[0], 48); /* 1.1 已分配、内核未实现 */
+    frame_init(&ctx.f[1], NG_SYS_EXIT);
+    fake_ring3_set(ring3_hook, &ctx);
+    memset(&out, 0, sizeof(out));
+    CHECK(syscall_run_user(RING3_ENTRY, RING3_STACK_TOP, RING3_STACK_LO,
+                           RING3_STACK_HI, &out) == 0);
+    CHECK(ctx.ret[0] == (u64)(i64)NG_SYS_ENOSYS);
+    CHECK(out.syscalls == 2);
+    CHECK(out.exited == 1);
 
     /* out 可为 NULL。 */
     memset(&ctx, 0, sizeof(ctx));
@@ -788,6 +849,7 @@ static void t_dispatch_mm(void)
 int test_syscall(void)
 {
     t_dispatch_basic();
+    t_dispatch_unknown();
     t_write_bounds();
     t_dispatch_ipc();
     t_dispatch_fs();
