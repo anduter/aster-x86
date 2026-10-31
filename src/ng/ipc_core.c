@@ -473,6 +473,12 @@ static int ipc_send_to_port(struct ipc_core *c, struct ipc_port *p,
 int ipc_core_port_create(struct ipc_core *c, u32 depth, u32 owner_uid,
                          u32 *out_handle)
 {
+    return ipc_core_port_create_pid(c, depth, owner_uid, 0, out_handle);
+}
+
+int ipc_core_port_create_pid(struct ipc_core *c, u32 depth, u32 owner_uid,
+                             u32 owner_pid, u32 *out_ticket)
+{
     struct ipc_port *p = NULL;
     struct ipc_msg **ring;
     u32 d;
@@ -481,7 +487,7 @@ int ipc_core_port_create(struct ipc_core *c, u32 depth, u32 owner_uid,
     int rc;
     u64 bytes;
 
-    if (c == NULL || c->env == NULL || out_handle == NULL) {
+    if (c == NULL || c->env == NULL || out_ticket == NULL) {
         return IPC_EINVAL;
     }
     ipc_reap_ports(c);
@@ -518,12 +524,101 @@ int ipc_core_port_create(struct ipc_core *c, u32 depth, u32 owner_uid,
     p->depth = d;
     p->ring = ring;
     p->owner_uid = owner_uid;
+    p->owner_pid = owner_pid;
     p->slot = handle_slot_of(handle);
     p->gen = handle_gen_of(handle);
     c->port_live++;
 
-    *out_handle = handle;
+    *out_ticket = handle;
     return IPC_OK;
+}
+
+u32 ipc_core_port_ticket(const struct ipc_port *p)
+{
+    if (p == NULL || !p->used || p->gen == 0) {
+        return 0;
+    }
+    return handle_make(p->gen, p->slot);
+}
+
+struct ipc_port *ipc_core_port_by_ticket(struct ipc_core *c, u32 ticket)
+{
+    void *obj = NULL;
+    struct ipc_port *p;
+
+    if (c == NULL || ticket == 0) {
+        return NULL;
+    }
+    if (handle_lookup(&c->handles, ticket, HANDLE_TYPE_PORT, &obj) !=
+            HANDLE_OK ||
+        obj == NULL) {
+        return NULL;
+    }
+    p = (struct ipc_port *)obj;
+    if (!p->used || p->closed || p->slot != handle_slot_of(ticket) ||
+        p->gen != handle_gen_of(ticket)) {
+        return NULL;
+    }
+    return p;
+}
+
+u32 ipc_core_port_owner_pid(const struct ipc_port *p)
+{
+    return (p == NULL) ? 0 : p->owner_pid;
+}
+
+u32 ipc_core_waiter_live(const struct ipc_core *c)
+{
+    u32 i;
+    u32 n = 0;
+
+    if (c == NULL) {
+        return 0;
+    }
+    for (i = 0; i < IPC_WAITER_MAX; i++) {
+        if (c->waiters[i].in_use) {
+            n++;
+        }
+    }
+    return n;
+}
+
+u32 ipc_core_cancel_thread(struct ipc_core *c, u32 tid)
+{
+    u32 i;
+    u32 removed = 0;
+
+    if (c == NULL || tid == 0) {
+        return 0;
+    }
+    for (i = 0; i < IPC_PORT_MAX; i++) {
+        struct ipc_port *p = &c->ports[i];
+        u32 kind;
+
+        if (!p->used) {
+            continue;
+        }
+        for (kind = 0; kind < 2; kind++) {
+            struct ipc_waiter **head =
+                (kind == 0) ? &p->recv_waiters : &p->send_waiters;
+            struct ipc_waiter **pp = head;
+
+            while (*pp != NULL) {
+                struct ipc_waiter *w = *pp;
+
+                if (w->tid != tid) {
+                    pp = &w->next;
+                    continue;
+                }
+                *pp = w->next;
+                w->next = NULL;
+                ipc_waiter_free(c, w);
+                removed++;
+            }
+        }
+    }
+    ipc_reap_ports(c);
+    return removed;
 }
 
 int ipc_core_send(struct ipc_core *c, u32 port_handle, const void *msg, u32 len,

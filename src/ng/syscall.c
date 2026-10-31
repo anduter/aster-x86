@@ -27,6 +27,7 @@
 #include "io.h"
 #include "ipc.h"
 #include "paging.h"
+#include "proc.h"
 #include "serial.h"
 #include "svc_syscall.h"
 #include "thread.h"
@@ -81,6 +82,7 @@ extern char syscall_entry[];
 extern char syscall_stack_top[];
 extern void syscall_ring0_stub(void);
 extern void ring3_enter(u64 user_rip, u64 user_rsp);
+extern void ring3_enter_args(u64 user_rip, u64 user_rsp, u64 argc, u64 argv);
 extern char user_prog_start[];
 extern char user_prog_end[];
 
@@ -92,22 +94,27 @@ u64 syscall_return_mode; /* 0 = SYSRETQ（ring3），1 = IRETQ（ring0 测试）
 u64 syscall_want_exit;   /* ring3 的 syscall 1：回内核而不是回用户态 */
 /* WP1-7：SYSCALL 入口装载的内核栈顶（== TSS.RSP0，随线程切换更新）。 */
 u64 syscall_kernel_rsp0;
+/* WP3-0：SYSCALL 入口的 CS（0x23 = CPL3）。只在入口窗口有效。 */
+u64 syscall_entry_cs;
 
 u64 kernel_resume_rsp;
 u64 kernel_resume_rip;
 
+/*
+ * WP3-0：per-thread 执行上下文。没有 TCB 时（WP1-3 的 ring0/ring3 自检发生在
+ * sched_init 之前、host 单测直接调 dispatch）回退到一份静态上下文。
+ */
+static struct thread_uctx g_boot_uctx;
+
+static struct thread_uctx *uctx_cur(void)
+{
+    thread_t *t = thread_self();
+
+    return (t != NULL) ? &t->uctx : &g_boot_uctx;
+}
+
 /* ---- 状态 ----------------------------------------------------------------- */
 static volatile u64 syscall_count;
-static volatile u64 ring3_syscalls;
-static volatile u64 ring3_writes;
-static volatile u64 ring3_bytes;
-static volatile u64 ring3_exit_code;
-static volatile u64 ring3_bad_writes;
-static volatile u64 ring3_fs_calls;
-static volatile int syscall_from_ring3;
-static volatile int ring3_user_rsp_ok;
-static u64 ring3_stack_lo;
-static u64 ring3_stack_hi;
 
 static u8 user_code_page[USER_PAGE_SIZE] __attribute__((aligned(4096)));
 static u8 user_stack[USER_PAGE_SIZE] __attribute__((aligned(4096)));
@@ -160,6 +167,9 @@ void syscall_init(void)
 
 static u64 stack_top_of(const struct thread *t)
 {
+    if (t != NULL && t->syscall_top != NULL) {
+        return (u64)(usize)t->syscall_top;
+    }
     if (t != NULL && t->stack_top != NULL) {
         return (u64)(usize)t->stack_top;
     }
@@ -182,7 +192,7 @@ u64 syscall_kernel_stack_sync(void)
 /* 分发（isr.S 调用）                                                         */
 /* ------------------------------------------------------------------------- */
 
-static int syscall_user_write(u64 uva, u64 len)
+static int syscall_user_write(struct thread_uctx *u, u64 uva, u64 len)
 {
     char buf[USER_WRITE_MAX];
     u64 i;
@@ -198,44 +208,77 @@ static int syscall_user_write(u64 uva, u64 len)
     for (i = 0; i < len; i++) {
         serial_putc(buf[i]);
     }
-    ring3_writes++;
-    ring3_bytes += len;
+    u->writes++;
+    u->bytes += len;
     return (int)len;
+}
+
+/*
+ * syscall 入口的"收集"：汇编在换栈之前把用户 RSP/RCX/R11/CS 写进全局，这里
+ * 一次性把它们存进当前线程的上下文。入口到此处之间没有调度点，所以全局是
+ * 可靠的；dispatch 一返回，这些状态就只存在于 TCB 里。
+ */
+static void syscall_enter_ctx(struct thread_uctx *u)
+{
+    if (syscall_user_rsp != 0) {
+        u->user_rsp = syscall_user_rsp;
+    }
+    u->saved_rip = syscall_saved_rip;
+    u->saved_flags = syscall_saved_flags;
+    u->from_ring3 = ((syscall_entry_cs & 3u) == 3u || u->run_user) ? 1u : 0u;
+}
+
+/*
+ * dispatch 返回前的"回写"：把本线程的状态写进汇编返回路径读的全局。这里到
+ * SYSRET/IRETQ 之间同样没有调度点，所以安全。
+ */
+static void syscall_prepare_return(struct thread_uctx *u)
+{
+    syscall_user_rsp = u->user_rsp;
+    syscall_saved_rip = u->saved_rip;
+    syscall_saved_flags = u->saved_flags;
+    syscall_return_mode = u->return_mode;
+    syscall_want_exit = u->want_exit;
+    kernel_resume_rsp = u->resume_rsp;
+    kernel_resume_rip = u->resume_rip;
 }
 
 void syscall_dispatch(struct syscall_frame *f)
 {
-    syscall_count++;
+    struct thread_uctx *u = uctx_cur();
 
-    if (syscall_from_ring3) {
-        ring3_syscalls++;
-        if (syscall_user_rsp >= ring3_stack_lo && syscall_user_rsp < ring3_stack_hi) {
-            ring3_user_rsp_ok = 1;
+    syscall_count++;
+    syscall_enter_ctx(u);
+
+    if (u->from_ring3) {
+        u->syscalls++;
+        if (u->user_rsp >= u->stack_lo && u->user_rsp < u->stack_hi) {
+            u->user_rsp_ok = 1;
         }
     }
 
     switch (f->rax) {
     case NG_SYS_WRITE:
         if (f->rdi != 0) {
-            int rc = syscall_user_write(f->rdi, f->rsi);
+            int rc = syscall_user_write(u, f->rdi, f->rsi);
 
-            if (rc < 0 && syscall_from_ring3) {
-                ring3_bad_writes++;
+            if (rc < 0 && u->from_ring3) {
+                u->bad_writes++;
             }
             f->rax = (u64)(i64)rc;
         } else {
             /* WP1-3 的往返自检：没有用户缓冲区，只打诊断行。 */
-            serial_puts(syscall_from_ring3 ? "ng: syscall write (ring3)\r\n"
-                                           : "ng: syscall write (ring0)\r\n");
+            serial_puts(u->from_ring3 ? "ng: syscall write (ring3)\r\n"
+                                      : "ng: syscall write (ring0)\r\n");
             f->rax = 0;
         }
         break;
     case NG_SYS_EXIT:
         serial_puts("ng: syscall exit test\r\n");
         f->rax = 0;
-        if (syscall_from_ring3) {
-            syscall_want_exit = 1;
-            ring3_exit_code = f->rdi;
+        if (u->from_ring3) {
+            u->want_exit = 1;
+            u->exit_code = f->rdi;
         }
         break;
     /* WP1-6：IPC / 句柄。用户指针与长度在 ipc_sys_*() 里校验。 */
@@ -256,50 +299,50 @@ void syscall_dispatch(struct syscall_frame *f)
         break;
     /* WP2-1：VFS/ramfs。用户指针在 fs_syscall.c 里经 uaccess 校验。 */
     case NG_SYS_OPEN:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_open(f->rdi, (u32)f->rsi, (u32)f->rdx);
         break;
     case NG_SYS_READ:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_read((u32)f->rdi, f->rsi, f->rdx);
         break;
     case NG_SYS_WRITE_FD:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_write((u32)f->rdi, f->rsi, f->rdx);
         break;
     case NG_SYS_CLOSE:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_close((u32)f->rdi);
         break;
     case NG_SYS_STAT:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_stat(f->rdi, f->rsi);
         break;
     case NG_SYS_LISTDIR:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_listdir(f->rdi, f->rsi, (u32)f->rdx);
         break;
     case NG_SYS_MKDIR:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_mkdir(f->rdi, (u32)f->rsi);
         break;
     case NG_SYS_UNLINK:
-        if (syscall_from_ring3) {
-            ring3_fs_calls++;
+        if (u->from_ring3) {
+            u->fs_calls++;
         }
         f->rax = (u64)(i64)fs_sys_unlink(f->rdi);
         break;
@@ -323,10 +366,28 @@ void syscall_dispatch(struct syscall_frame *f)
     case NG_SYS_PKG_VERIFY:
         f->rax = (u64)(i64)ng_sys_pkg_verify(f->rdi);
         break;
+    /* WP3-0：进程 / 跨进程 IPC。用户指针在 proc_sys_*() 里经 uaccess 校验。 */
+    case NG_SYS_SPAWN:
+        f->rax = proc_sys_spawn(f->rdi, f->rsi, f->rdx);
+        break;
+    case NG_SYS_WAIT:
+        f->rax = proc_sys_wait(f->rdi, f->rsi);
+        break;
+    case NG_SYS_GETPID:
+        f->rax = proc_sys_getpid();
+        break;
+    case NG_SYS_KILL:
+        f->rax = proc_sys_kill(f->rdi, f->rsi);
+        break;
+    case NG_SYS_GETPPID:
+        f->rax = proc_sys_getppid();
+        break;
     default:
         f->rax = (u64)-1;
         break;
     }
+
+    syscall_prepare_return(u);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -336,39 +397,71 @@ void syscall_dispatch(struct syscall_frame *f)
 int syscall_run_user(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
                      struct ring3_result *out)
 {
+    return syscall_run_user_args(entry, user_rsp, stack_lo, stack_hi, 0, 0, out);
+}
+
+int syscall_run_user_args(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
+                          u64 argc, u64 argv, struct ring3_result *out)
+{
+    struct thread_uctx *u = uctx_cur();
+
     if (entry == 0 || user_rsp < stack_lo || user_rsp >= stack_hi ||
         stack_hi <= stack_lo) {
         return -1;
     }
 
-    ring3_stack_lo = stack_lo;
-    ring3_stack_hi = stack_hi;
-    syscall_from_ring3 = 1;
+    u->stack_lo = stack_lo;
+    u->stack_hi = stack_hi;
+    u->run_user = 1;
+    u->from_ring3 = 1;
+    u->return_mode = 0;
+    u->want_exit = 0;
+    u->syscalls = 0;
+    u->writes = 0;
+    u->bytes = 0;
+    u->exit_code = 0;
+    u->bad_writes = 0;
+    u->fs_calls = 0;
+    u->user_rsp_ok = 0;
+    u->user_rsp = user_rsp;
+    u->resume_rsp = 0;
+    u->resume_rip = 0;
+    /* 汇编返回路径在 dispatch 之前读的全局也同步一份（host 单测直接看它们）。 */
     syscall_return_mode = 0;
     syscall_want_exit = 0;
-    ring3_syscalls = 0;
-    ring3_writes = 0;
-    ring3_bytes = 0;
-    ring3_exit_code = 0;
-    ring3_bad_writes = 0;
-    ring3_fs_calls = 0;
-    ring3_user_rsp_ok = 0;
 
-    ring3_enter(entry, user_rsp);
+    if (argc != 0 || argv != 0) {
+        ring3_enter_args(entry, user_rsp, argc, argv);
+    } else {
+        ring3_enter(entry, user_rsp);
+    }
     /* 走到这里说明 syscall 1 把控制权还给了内核恢复点。 */
-    syscall_from_ring3 = 0;
+    u->run_user = 0;
+    u->from_ring3 = 0;
 
     if (out != NULL) {
-        out->syscalls = ring3_syscalls;
-        out->writes = ring3_writes;
-        out->bytes = ring3_bytes;
-        out->fs_calls = ring3_fs_calls;
-        out->exit_code = ring3_exit_code;
-        out->exited = syscall_want_exit ? 1 : 0;
-        out->user_rsp_ok = ring3_user_rsp_ok;
-        out->bad_writes = ring3_bad_writes;
+        out->syscalls = u->syscalls;
+        out->writes = u->writes;
+        out->bytes = u->bytes;
+        out->fs_calls = u->fs_calls;
+        out->exit_code = u->exit_code;
+        out->exited = u->want_exit ? 1 : 0;
+        out->user_rsp_ok = u->user_rsp_ok;
+        out->bad_writes = u->bad_writes;
     }
-    return syscall_want_exit ? 0 : -1;
+    return u->want_exit ? 0 : -1;
+}
+
+/*
+ * WP3-0：ring3_enter 在 iretq 之前调用，把"回到 C 的恢复点"存进当前线程的
+ * 上下文（而不是全局）。多进程交替执行时，每个线程有各自的恢复点。
+ */
+void ring3_save_resume(u64 rsp, u64 rip)
+{
+    struct thread_uctx *u = uctx_cur();
+
+    u->resume_rsp = rsp;
+    u->resume_rip = rip;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -377,16 +470,19 @@ int syscall_run_user(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
 
 static int syscall_ring0_test(void)
 {
+    struct thread_uctx *u = uctx_cur();
     int fails = 0;
 
-    syscall_from_ring3 = 0;
-    syscall_return_mode = 1;
-    syscall_want_exit = 0;
+    u->from_ring3 = 0;
+    u->run_user = 0;
+    u->return_mode = 1;
+    u->want_exit = 0;
+    syscall_entry_cs = 0;
     syscall_count = 0;
 
     syscall_ring0_stub();
 
-    if (syscall_count == 1 && syscall_want_exit == 0) {
+    if (syscall_count == 1 && u->want_exit == 0 && syscall_return_mode == 1) {
         serial_puts("ng: syscall ring0 ok\r\n");
     } else {
         fails++;

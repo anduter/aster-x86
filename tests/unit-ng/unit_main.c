@@ -24,6 +24,7 @@ int test_auth(void);
 int test_log(void);
 int test_pkg(void);
 int test_shell(void);
+int test_proc(void);
 int test_parity(void);
 
 int ut_checks;
@@ -56,6 +57,7 @@ int main(void)
     test_log();
     test_pkg();
     test_shell();
+    test_proc();
     test_parity();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);

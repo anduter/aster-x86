@@ -111,6 +111,7 @@ struct ipc_port {
     u32 slot; /* 创建它的句柄槽位（ticket 交叉校验） */
     u32 gen;  /* 创建它的句柄 generation（ticket 交叉校验） */
     u32 owner_uid;
+    u32 owner_pid; /* ng WP3-0：属主进程（0 = 内核）。recv/close 只允许属主 */
     u32 flags; /* 预留：private 等 */
     struct ipc_msg **ring;
     struct ipc_waiter *recv_waiters;
@@ -160,6 +161,28 @@ void ipc_core_init(struct ipc_core *c, const struct ipc_env *env);
 /* 创建端口，*out_handle = (gen<<16)|slot；depth=0 → 默认 16。 */
 int ipc_core_port_create(struct ipc_core *c, u32 depth, u32 owner_uid,
                          u32 *out_handle);
+
+/*
+ * ng WP3-0：带属主 pid 的端口创建。返回的 *out_handle 就是 **ticket**
+ * （全局端口身份，(gen<<16)|slot），可以交给别的进程；进程自己的句柄表由
+ * proc.c 另记一份。
+ */
+int ipc_core_port_create_pid(struct ipc_core *c, u32 depth, u32 owner_uid,
+                             u32 owner_pid, u32 *out_ticket);
+
+/* ticket = 端口的全局身份；ticket == 0 表示"无来源"（单向消息）。 */
+u32 ipc_core_port_ticket(const struct ipc_port *p);
+/* 按 ticket 解析端口（校验槽位/generation）；无效返回 NULL。 */
+struct ipc_port *ipc_core_port_by_ticket(struct ipc_core *c, u32 ticket);
+u32 ipc_core_port_owner_pid(const struct ipc_port *p);
+
+/*
+ * ng WP3-0：把 tid 从所有端口的等待链上摘掉（kill 一个阻塞在 recv/send 的
+ * 进程时必须做，否则端口上的"已通知"等待者会吞掉后续唤醒）。返回摘除数。
+ */
+u32 ipc_core_cancel_thread(struct ipc_core *c, u32 tid);
+/* 诊断：正在使用中的等待者条数（自检里验证 kill 没有泄漏等待者）。 */
+u32 ipc_core_waiter_live(const struct ipc_core *c);
 
 /*
  * 发送/回复。msg 指向“头部 + payload”的完整消息，len 含头部。

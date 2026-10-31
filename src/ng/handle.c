@@ -161,6 +161,36 @@ u32 handle_live(const struct handle_table *t)
     return (t == NULL) ? 0 : t->live;
 }
 
+/*
+ * ng WP3-0：按 (type, obj) 找本表里的句柄。进程退出/被 kill 时用它把
+ * "我的端口"映射回表内句柄，从而只回收本进程拥有的对象（WP1-6 的单张
+ * 全局表做不到这一点）。
+ */
+int handle_find_obj(struct handle_table *t, u32 type, const void *obj,
+                    u32 *out_handle)
+{
+    u32 i;
+
+    if (t == NULL || obj == NULL) {
+        return HANDLE_EINVAL;
+    }
+    for (i = 0; i < HANDLE_MAX; i++) {
+        const struct handle_slot *s = &t->slots[i];
+
+        if (s->type == HANDLE_TYPE_NONE || s->obj != obj) {
+            continue;
+        }
+        if (type != HANDLE_TYPE_NONE && s->type != type) {
+            continue;
+        }
+        if (out_handle != NULL) {
+            *out_handle = handle_make(s->gen, i);
+        }
+        return HANDLE_OK;
+    }
+    return HANDLE_ENOENT;
+}
+
 u32 handle_peak(const struct handle_table *t)
 {
     return (t == NULL) ? 0 : t->peak;

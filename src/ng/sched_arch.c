@@ -8,6 +8,7 @@
 
 #include "heap.h"
 #include "io.h"
+#include "paging.h"
 #include "syscall.h"
 
 extern void switch_context(struct thread_context *old_ctx,
@@ -41,8 +42,21 @@ void sched_arch_switch(thread_t *prev, thread_t *next)
      * WP1-7：per-thread 内核栈。每个线程的 syscall 入口栈 / TSS.RSP0 都取自
      * 它自己的 TCB（boot 线程没有 TCB 栈，回退到 isr.S 的静态栈）。写的是
      * .bss/.data，可以在 IF=0 的调度点上安全做。
+     *
+     * WP3-0：多进程用户态。每个线程记录自己运行时的用户 PML4（内核线程为
+     * NULL）。切栈之前先写 CR3 —— 所有 AS 都映射了内核 0..1 GiB 恒等区，
+     * 内核代码/栈/TCB 在任何 AS 下都可访问，所以这个顺序是安全的；反过来
+     * （先切栈再切 CR3）会让新线程在自己的栈上短暂跑在旧 AS 里。
      */
     syscall_set_thread_stack(next);
+    {
+        u64 *want = (next->pml4 != NULL) ? (u64 *)(usize)next->pml4
+                                         : pg_kernel_pml4();
+
+        if (want != pg_current_pml4()) {
+            pg_switch_pml4(want);
+        }
+    }
     switch_context(&prev->ctx, &next->ctx);
 }
 

@@ -98,7 +98,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP2-7) ==='
+Write-Host '=== build-ng (WP3-0) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -321,6 +321,99 @@ if ($LASTEXITCODE -ne 0) { Fail 'shell ELF embed compile failed' }
 Write-Host ("user-shell: PASS ({0} bytes, {1} PT_LOAD, entry 0x{2:x}, end 0x{3:x})" -f $sb.Length, $sLoadCount, $sEntry, $sLoadEnd)
 Write-Host ''
 
+# ---- WP3-0：多进程/IPC 用户程序（src/apps/proc/proc.c）-> ELF64 -> .incbin --
+# 同一个 ELF 多个角色（hello/chain/relay/server/hold），由 argv 决定；内核
+# proc_init 把它种到 ramfs 的 /bin/proc，spawn 再从 VFS 读回来加载。
+Write-Host '=== user-proc (WP3-0) ==='
+$procSrc = Join-Path $Repo 'src/apps/proc/proc.c'
+$procObj = Join-Path $objDir 'user_proc.o'
+$procElf = Join-Path $objDir 'proc.elf'
+$procBlobObj = Join-Path $objDir 'proc_elf_blob.o'
+$procBlobAsm = Join-Path $objDir 'proc_elf_blob.S'
+if (-not (Test-Path -LiteralPath $procSrc)) { Fail ("missing proc source: {0}" -f $procSrc) }
+Write-Host ("  proc.c  -> {0}" -f 'obj-ng/user_proc.o')
+& $clang @($userCFlags + @($procSrc, '-o', $procObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'user proc.c compile failed' }
+Write-Host ("  link    -> {0}" -f 'obj-ng/proc.elf (base 0x40000000)')
+$procLinkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
+    ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
+    '-o', $procElf, $procObj)
+& $clang @procLinkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'user proc.elf link failed' }
+
+$pb = [IO.File]::ReadAllBytes($procElf)
+$pProblems = New-Object System.Collections.Generic.List[string]
+$pLoadCount = 0
+$pLoadEnd = 0
+$pEntry = 0
+if ($pb.Length -lt 64) {
+    $pProblems.Add('proc ELF smaller than ELF64 header')
+} elseif (-not ($pb[0] -eq 0x7F -and $pb[1] -eq 0x45 -and $pb[2] -eq 0x4C -and $pb[3] -eq 0x46)) {
+    $pProblems.Add('proc ELF bad magic')
+} else {
+    if ($pb[4] -ne 2) { $pProblems.Add(("proc ELF class={0}, want 2" -f $pb[4])) }
+    if ($pb[5] -ne 1) { $pProblems.Add(("proc ELF data={0}, want 1 (LSB)" -f $pb[5])) }
+    $pType = [BitConverter]::ToUInt16($pb, 16)
+    $pMachine = [BitConverter]::ToUInt16($pb, 18)
+    $pEntry = [BitConverter]::ToUInt64($pb, 24)
+    $pPhOff = [BitConverter]::ToUInt64($pb, 32)
+    $pPhEnt = [BitConverter]::ToUInt16($pb, 54)
+    $pPhNum = [BitConverter]::ToUInt16($pb, 56)
+    if ($pType -ne 2) { $pProblems.Add(("proc ELF e_type={0}, want 2 (ET_EXEC)" -f $pType)) }
+    if ($pMachine -ne 62) { $pProblems.Add(("proc ELF e_machine={0}, want 62" -f $pMachine)) }
+    if ($pPhEnt -ne 56) { $pProblems.Add(("proc ELF e_phentsize={0}, want 56" -f $pPhEnt)) }
+    if ($pPhNum -lt 1) { $pProblems.Add('proc ELF has no program headers') }
+    if ($pEntry -lt 0x40000000 -or $pEntry -ge 0x40010000) {
+        $pProblems.Add(("proc ELF e_entry=0x{0:x} outside 0x40000000..0x40010000" -f $pEntry))
+    }
+    for ($i = 0; $i -lt $pPhNum; $i++) {
+        $ph = [int]$pPhOff + ($i * $pPhEnt)
+        if ($ph + 56 -gt $pb.Length) { $pProblems.Add('proc ELF phdr outside file'); break }
+        if ([BitConverter]::ToUInt32($pb, $ph) -ne 1) { continue }  # PT_LOAD
+        $pLoadCount++
+        $pFlags = [BitConverter]::ToUInt32($pb, $ph + 4)
+        $pVaddr = [BitConverter]::ToUInt64($pb, $ph + 16)
+        $pFilesz = [BitConverter]::ToUInt64($pb, $ph + 32)
+        $pMemsz = [BitConverter]::ToUInt64($pb, $ph + 40)
+        $pAlign = [BitConverter]::ToUInt64($pb, $ph + 48)
+        if (($pVaddr % 4096) -ne 0) { $pProblems.Add(("proc PT_LOAD vaddr=0x{0:x} not 4 KiB aligned" -f $pVaddr)) }
+        if ($pAlign -lt 4096) { $pProblems.Add(("proc PT_LOAD align=0x{0:x} < 4096" -f $pAlign)) }
+        if ($pFilesz -gt $pMemsz) { $pProblems.Add('proc PT_LOAD filesz > memsz') }
+        # W^X：只要求 text 段（PF_X）可执行，data 段可写但不可执行。
+        if (($pFlags -band 3) -eq 3) { $pProblems.Add(("proc PT_LOAD 0x{0:x} is W+X (W^X violated)" -f $pVaddr)) }
+        if ($pVaddr -lt 0x40000000) { $pProblems.Add(("proc PT_LOAD vaddr=0x{0:x} below base" -f $pVaddr)) }
+        if (($pVaddr + $pMemsz) -gt 0x40010000) {
+            $pProblems.Add(("proc PT_LOAD ends 0x{0:x} above 0x40010000" -f ($pVaddr + $pMemsz)))
+        }
+        if (($pVaddr + $pMemsz) -gt $pLoadEnd) { $pLoadEnd = $pVaddr + $pMemsz }
+    }
+    # proc.c 很小，text+rodata 可能落在同一个 R+X 段：允许 2 段（W^X 仍强制）。
+    if ($pLoadCount -lt 2) {
+        $pProblems.Add(("proc PT_LOAD count {0} < 2" -f $pLoadCount))
+    }
+}
+if ($pProblems.Count -gt 0) {
+    foreach ($p in $pProblems) { Write-Host ("  ! {0}" -f $p) }
+    Fail 'user proc ELF verification failed'
+}
+$procInc = ($procElf -replace '\\', '/')
+$procBlobText = @"
+/* generated by tools/build-ng.ps1 (WP3-0): embed user proc ELF into .rodata */
+    .section .rodata
+    .align 16
+    .global ng_proc_elf_start
+ng_proc_elf_start:
+    .incbin "$procInc"
+    .global ng_proc_elf_end
+ng_proc_elf_end:
+    .align 16
+"@
+[IO.File]::WriteAllText($procBlobAsm, $procBlobText, (New-Object Text.UTF8Encoding $false))
+& $clang @($asmFlags + @($procBlobAsm, '-o', $procBlobObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'proc ELF embed compile failed' }
+Write-Host ("user-proc: PASS ({0} bytes, {1} PT_LOAD, entry 0x{2:x}, end 0x{3:x})" -f $pb.Length, $pLoadCount, $pEntry, $pLoadEnd)
+Write-Host ''
+
 # ---- WP2-2：FAT16 测试镜像 -> .incbin 嵌内核 .rodata ----------------------
 Write-Host '=== fat16 image (WP2-2) ==='
 $fatImg = Join-Path $objDir 'fat16.img'
@@ -423,7 +516,7 @@ Write-Host ''
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'parity_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'proc_table.c', 'proc.c', 'proc_selftest.c', 'parity_selftest.c', 'main.c')
 # L1 服务域源码（相对仓库根；-I src/ng 与各 src/services/*/include 已加）。
 $serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',
@@ -499,7 +592,7 @@ Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($shellParityObj, $userBlobObj, $shellBlobObj, $fatBlobObj)
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($shellParityObj, $userBlobObj, $shellBlobObj, $procBlobObj, $fatBlobObj)
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

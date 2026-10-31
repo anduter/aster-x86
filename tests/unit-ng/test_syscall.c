@@ -70,6 +70,7 @@ static void reset_env(void)
     fake_pg_reset();
     fake_serial_reset();
     fake_ipc_reset();
+    fake_proc_reset();
     fake_gdt_reset();
     fake_ring3_set(NULL, NULL);
     memset(arena, 0, sizeof(arena));
@@ -684,6 +685,60 @@ static void t_dispatch_svc(void)
 
 /* ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- */
+/* WP3-0：40..44 进程 syscall 的参数搬运                                     */
+/* ------------------------------------------------------------------------- */
+
+static void t_dispatch_proc(void)
+{
+    struct syscall_frame f;
+    const struct fake_proc_call *c;
+
+    reset_env();
+    fake_proc_set_ret(0);
+
+    frame_init(&f, NG_SYS_SPAWN);
+    f.rdi = 0x1000;
+    f.rsi = 0x2000;
+    f.rdx = 0x3000;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    CHECK(fake_proc_count() == 1);
+    c = fake_proc_get(0);
+    CHECK(c != NULL && c->fn == FAKE_PROC_SPAWN);
+    CHECK(c != NULL && c->a == 0x1000 && c->b == 0x2000 && c->c == 0x3000);
+
+    frame_init(&f, NG_SYS_WAIT);
+    f.rdi = 7;
+    f.rsi = 0x4000;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    c = fake_proc_get(1);
+    CHECK(c != NULL && c->fn == FAKE_PROC_WAIT);
+    CHECK(c != NULL && c->a == 7 && c->b == 0x4000);
+
+    frame_init(&f, NG_SYS_GETPID);
+    syscall_dispatch(&f);
+    CHECK(f.rax == 33);
+    CHECK(fake_proc_count() == 3);
+
+    frame_init(&f, NG_SYS_KILL);
+    f.rdi = 9;
+    f.rsi = 15;
+    fake_proc_set_ret((u64)(i64)(-3));
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)(-3));
+    c = fake_proc_get(3);
+    CHECK(c != NULL && c->fn == FAKE_PROC_KILL);
+    CHECK(c != NULL && c->a == 9 && c->b == 15);
+
+    frame_init(&f, NG_SYS_GETPPID);
+    fake_proc_set_ret(1);
+    syscall_dispatch(&f);
+    CHECK(f.rax == 1);
+    CHECK(fake_proc_count() == 5);
+}
+
 int test_syscall(void)
 {
     t_dispatch_basic();
@@ -691,6 +746,7 @@ int test_syscall(void)
     t_dispatch_ipc();
     t_dispatch_fs();
     t_dispatch_svc();
+    t_dispatch_proc();
     t_run_user_args();
     t_run_user_ok();
     t_run_user_bad();

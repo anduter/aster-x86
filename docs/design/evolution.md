@@ -187,11 +187,26 @@ E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5、WP2-6、WP
 
 | ID | 内容 | 主要路径 | 出口 |
 |---|---|---|---|
+| WP3-0 | **进程**（前置）：proc_t/进程表、spawn/wait/kill、per-process 句柄、跨进程 ticket IPC | src/ng/proc*.c、src/apps/proc | 3 进程链式 ping + shell 子进程 |
 | WP3-1 | display server：surface/buffer/焦点/扫描输出 | src/desktop/display | 一个窗口显示 |
 | WP3-2 | shell/WM：面板、启动器、任务切换 | src/desktop/shell | 可启动/切换应用 |
 | WP3-3 | session manager：应用生命周期/窗口表/角色令牌 | src/desktop/session | 应用不归 shell 管 |
 | WP3-4 | SDK alpha + demo app | sdk/、src/apps | 外部可编译 GUI app |
 | WP3-5 | S1 故障注入：杀 shell/输入 | tests/ | 应用存活、面板回来 |
+
+E3 进度（2026-10-31）：**WP3-0 完成**（多进程用户态 + 跨进程 IPC 前置）。
+`src/ng/proc.h` / `proc_table.c` / `proc.c` / `proc_selftest.c` 落地进程模型：
+每进程 1 AS + 1 主线程 + 1 张 64 槽句柄表；进程表 32 槽、pid 单调；
+syscall **40 spawn / 41 wait / 42 getpid / 43 kill / 44 getppid**；`spawn` 从
+VFS（ramfs `/bin/*`）读 ELF64 → `elf64_load` 新 AS → 新内核线程 → ring3；
+跨进程只经 **ticket**（端口全局身份）传递；`wait` 用 `thread_sleep` 阻塞、
+子进程退出 `thread_wake` 唤醒；`kill` 摘线程/摘 IPC 等待者/关端口/销毁 AS。
+`src/apps/proc/proc.c` 是一个 ELF 多角色（hello/relay/server/hold），
+自检跑出 **3 进程链式 ping**（hello→relay→server，ticket 经 argv + 消息 from
+两跳）与 AS 隔离/阻塞态 kill 证据；shell 新增 `spawn` / `wait` / `pid` 命令，
+run-ng 注入 `spawn /bin/proc hello` + `wait` 验证 shell 作为父进程。
+证据见 `docs/claims/ng-WP3-0.md`，设计见 `docs/design/proc-ng.md`。
+下一步：WP3-1 display server（fb/输入接 IRQ、surface/buffer、焦点路由）。
 
 ### E4
 

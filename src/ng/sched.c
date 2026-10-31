@@ -281,6 +281,57 @@ thread_t *sched_core_find(struct sched_core *c, u32 tid)
     return NULL;
 }
 
+/* 把 t 从 ready 或 blocked 链上摘下来（状态查询由调用方保证）。 */
+int sched_core_remove(struct sched_core *c, thread_t *t)
+{
+    thread_t **pp;
+
+    if (c == NULL || t == NULL) {
+        return THREAD_EBAD;
+    }
+    if (t->state == THREAD_READY) {
+        pp = &c->ready_head;
+        while (*pp != NULL && *pp != t) {
+            pp = &(*pp)->next;
+        }
+        if (*pp != t) {
+            return THREAD_EBAD;
+        }
+        *pp = t->next;
+        if (c->ready_tail == t) {
+            thread_t *q = c->ready_head;
+
+            c->ready_tail = NULL;
+            while (q != NULL) {
+                c->ready_tail = q;
+                q = q->next;
+            }
+        }
+        if (c->ready_count > 0) {
+            c->ready_count--;
+        }
+        t->next = NULL;
+        return THREAD_OK;
+    }
+    if (t->state == THREAD_BLOCKED) {
+        pp = &c->blocked_head;
+        while (*pp != NULL && *pp != t) {
+            pp = &(*pp)->next;
+        }
+        if (*pp != t) {
+            return THREAD_EBAD;
+        }
+        *pp = t->next;
+        t->next = NULL;
+        t->wake_tick = 0;
+        if (c->blocked_count > 0) {
+            c->blocked_count--;
+        }
+        return THREAD_OK;
+    }
+    return THREAD_EBAD;
+}
+
 /* ------------------------------------------------------------------------- */
 /* 内核胶水：调度点                                                           */
 /* ------------------------------------------------------------------------- */
@@ -294,6 +345,10 @@ static void sched_reap_zombies(thread_t *skip)
     while ((t = sched_core_reap(&sched, skip)) != NULL) {
         void *stack = t->stack_base;
         u64 size = t->stack_size;
+        /* WP3-0：用户进程线程的专用 SYSCALL 栈也在这里归还（它不属于
+         * 进程的 AS，proc.c 不在自己正在用的栈上释放）。 */
+        void *sys_stack = t->syscall_stack_base;
+        u64 sys_size = t->syscall_stack_size;
 
         ng_memzero(t, sizeof(*t)); /* 槽位回到 UNUSED，tid=0 */
         if (stack != NULL) {
@@ -301,6 +356,9 @@ static void sched_reap_zombies(thread_t *skip)
             if (thread_stack_live > 0) {
                 thread_stack_live--;
             }
+        }
+        if (sys_stack != NULL) {
+            sched_arch_stack_free(sys_stack, sys_size);
         }
     }
 }
@@ -489,6 +547,26 @@ int thread_wake(u32 tid)
     if (sched_core_wake(&sched, t, THREAD_WAKE_EXPLICIT) != THREAD_OK) {
         return THREAD_EBAD;
     }
+    return THREAD_OK;
+}
+
+int sched_kill_thread(u32 tid)
+{
+    thread_t *t = sched_core_find(&sched, tid);
+
+    if (t == NULL) {
+        return THREAD_ENOENT;
+    }
+    if (t == sched.current || t->state == THREAD_RUNNING) {
+        return THREAD_EBAD; /* 自己：必须走 thread_exit() */
+    }
+    if (t->state == THREAD_DEAD) {
+        return THREAD_OK;
+    }
+    if (sched_core_remove(&sched, t) != THREAD_OK) {
+        return THREAD_EBAD;
+    }
+    sched_core_zombie(&sched, t);
     return THREAD_OK;
 }
 

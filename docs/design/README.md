@@ -13,9 +13,10 @@
 
 - main：冻结在 69ab006（旧 32 位，305/305）。
 - 开发分支：ng（64 位内核）。
-- 当前阶段：**E2 完成，待打 tag `ng-e2`**。WP2-1（VFS/ramfs）+ WP2-2（FAT16）
-  + WP2-3（显示/输入）+ WP2-4（ATA PIO 块设备 + 真实磁盘 FAT16）+
-  WP2-5（auth/log/pkg）+ WP2-6（用户态 shell）+ WP2-7（parity 100 项）全部完成。
+- 当前阶段：**E3 进行中（WP3-0 完成）**。E2（WP2-1…WP2-7）已全部完成并打
+  tag `ng-e2`（`d3a5671`）；E3 的前置 **WP3-0（多进程用户态 + 跨进程 IPC）**
+  落地：进程表/spawn/wait/kill、per-process 句柄表、ticket 跨进程 IPC、
+  shell 作为父进程。
 - 门禁：`tools/ci-ng.ps1` 一条命令跑 check-domains / check-deps / unit-ng /
   build-ng / run-ng / parity-ng / 旧 32 位 `build.ps1 -Test`，全绿输出
   `=== NG CI PASS ===`（`-Quick` 跳 QEMU/legacy）；CI 见
@@ -23,12 +24,13 @@
 - 出口证据：ring3 `ng: ring3 hello` + VFS/FAT/disk/svc demo +
   `ng: ring3 input ok` + 用户态 shell（`ng: shell ready` / 各命令证据行 /
   `ng: WP2-6 selftest PASS`）+ **parity 100/100**
-  （`ng: parity 100/100 PASS`，host 95/95）；host 单测
-  **3203 checks, 0 failures**；旧 32 位 305/305；check-domains / check-deps
-  0 违规（`docs/claims/ng-WP2-1.md` … `ng-WP2-7.md`，100 项逐条表在
-  `ng-WP2-7.md`）。
-- 下一步：打 tag `ng-e2`（负责人）；然后 E3（display server / shell-WM /
-  session manager / SDK alpha），见 evolution.md。
+  （`ng: parity 100/100 PASS`，host 95/95）+ **WP3-0 多进程**
+  （`ng: proc spawn/wait/ipc cross/kill/as isolated` /`ng: WP3-0 selftest PASS`）；
+  host 单测 **4043 checks, 0 failures**；旧 32 位 305/305；
+  check-domains / check-deps 0 违规（`docs/claims/ng-WP2-1.md` …
+  `ng-WP2-7.md`、`ng-WP3-0.md`）。
+- 下一步：E3 主体（WP3-1 display server / WP3-2 shell-WM / WP3-3 session
+  manager / WP3-4 SDK alpha），见 evolution.md。
 
 ## 执行规则
 
@@ -57,5 +59,6 @@
 | block-ng.md | WP2-4 ATA PIO / blk_env 适配 / 8MB 磁盘镜像 / /mnt/disk |
 | auth-log-pkg-ng.md | WP2-5 auth（salt+SHA-256 迭代）/ 64 KiB log 环 / pkg 清单与校验 / syscall 31..35 |
 | shell-ng.md | WP2-6 用户态 shell（L3）：命令/行编辑/重定向/cwd/证据行/run-ng 注入 |
+| proc-ng.md | WP3-0 进程模型：pid/进程表、spawn/wait/kill、per-process 句柄、ticket 跨进程 IPC |
 | `tests/parity/parity_cases.h` / `parity_body.inc` | WP2-7 parity 100 项的唯一 case 表与共享断言体（kernel/host 同源） |
 | domains/ | 每域一页 |

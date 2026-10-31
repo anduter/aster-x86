@@ -67,6 +67,32 @@ void fake_ipc_set_ret(u64 ret);
 u32 fake_ipc_count(void);
 const struct fake_ipc_call *fake_ipc_get(u32 i);
 
+/* ---- fake 进程 syscall 胶水（WP3-0：40..44）------------------------------ */
+/*
+ * syscall.c 现在会调 proc_sys_*()；host 单测只验证分发/参数搬运，所以这里
+ * 记录调用与参数，返回固定值（不建真进程/真线程）。
+ */
+enum fake_proc_fn {
+    FAKE_PROC_SPAWN = 40,
+    FAKE_PROC_WAIT = 41,
+    FAKE_PROC_GETPID = 42,
+    FAKE_PROC_KILL = 43,
+    FAKE_PROC_GETPPID = 44
+};
+
+struct fake_proc_call {
+    u32 fn;
+    u64 a;
+    u64 b;
+    u64 c;
+};
+
+void fake_proc_reset(void);
+void fake_proc_set_ret(u64 ret);
+void fake_proc_set_pid(u64 pid);
+u32 fake_proc_count(void);
+const struct fake_proc_call *fake_proc_get(u32 i);
+
 /* ---- fake readkey（WP2-3：syscall 30 胶水）--------------------------------- */
 /* 默认返回 NG_EAGAIN；fake_input_set_readkey 设定下一次（以及之后）的返回值。 */
 void fake_input_reset(void);

@@ -232,3 +232,68 @@ int fs_sys_unlink(u64 upath)
     }
     return vfs_unlink(&g_ctx, path);
 }
+
+/* ------------------------------------------------------------------------- */
+/* ng WP3-0：内核侧文件接口（spawn 读 ELF / 启动时种 /bin）                  */
+/* ------------------------------------------------------------------------- */
+/*
+ * 这两个接口只给内核用（参数是内核指针 + 绝对路径），不经过 uaccess：
+ *   - seed：把嵌入在内核 .rodata 的用户 ELF 种子进 ramfs；
+ *   - read：spawn 从 VFS 读出 ELF 镜像（ramfs 和 FAT16 都经过同一条 VFS 路径）。
+ * 单次 read/write 直接交给 vfs_*()，长度上限由调用方（PROC_ELF_MAX）控制。
+ */
+int fs_sys_seed_file(const char *path, const void *data, u64 size)
+{
+    int fd;
+    int n;
+
+    if (g_ready == 0 || path == NULL || data == NULL || size == 0) {
+        return VFS_EINVAL;
+    }
+    fd = vfs_open(&g_ctx, path, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC, 0644);
+    if (fd < 0) {
+        return fd;
+    }
+    n = vfs_write(&g_ctx, fd, data, size);
+    (void)vfs_close(&g_ctx, fd);
+    return (n == (int)size) ? VFS_OK : ((n < 0) ? n : VFS_EIO);
+}
+
+int fs_sys_read_file(const char *path, void *buf, u64 cap, u64 *out_size)
+{
+    int fd;
+    int n;
+    u64 total = 0;
+
+    if (out_size != NULL) {
+        *out_size = 0;
+    }
+    if (g_ready == 0 || path == NULL || buf == NULL || cap == 0) {
+        return VFS_EINVAL;
+    }
+    fd = vfs_open(&g_ctx, path, VFS_O_RDONLY, 0);
+    if (fd < 0) {
+        return fd;
+    }
+    while (total < cap) {
+        u64 want = cap - total;
+
+        if (want > FS_SYS_IO_MAX) {
+            want = FS_SYS_IO_MAX;
+        }
+        n = vfs_read(&g_ctx, fd, (u8 *)buf + total, want);
+        if (n < 0) {
+            (void)vfs_close(&g_ctx, fd);
+            return n;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += (u64)n;
+    }
+    (void)vfs_close(&g_ctx, fd);
+    if (out_size != NULL) {
+        *out_size = total;
+    }
+    return VFS_OK;
+}

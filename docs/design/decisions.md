@@ -271,4 +271,39 @@
   测不全，否决；per-CPU 系统调用栈（syscall 时切到 CPU 栈）——仍是单栈，
   阻塞式 syscall 并发时一样坏，且 TSS.RSP0 与 syscall 入口要维护两份栈，
   否决。
+## ADR-020：进程用「1 AS + 1 主线程 + 1 张句柄表」；ticket 是端口的全局身份，句柄是进程私有引用
 
+- **决策**：WP3-0 起每个用户进程有一个独立 PML4（复用 WP1-7 的 `user_as`）、
+  一个内核主线程（`thread_t.pml4/proc/syscall_top`）、一张 64 槽句柄表
+  （`struct handle_table`）。进程表静态 32 槽，pid 从 1 单调递增（槽位复用、
+  pid 不复用），pid 1 是内核 init（boot 线程，无用户 AS），孤儿重挂到它。
+  syscall 追加 40 spawn / 41 wait / 42 getpid / 43 kill / 44 getppid；退出状态
+  正常 = 0..255，被 kill = `0x100|sig`。端口对象在**全局端口池**里，有两个名字：
+  - **handle** = `(generation<<16)|slot`：进程私有引用（PORT/THREAD/FILE），
+    spawn 不继承，退出/被 kill 时按它回收自己拥有的端口；
+  - **ticket** = `(port_generation<<16)|port_slot`：端口的**全局身份**，唯一
+    允许跨进程传递的名字。`send/reply` 凭 ticket，`recv/close` 还要求
+    `caller pid == owner pid`。
+- **理由**：跨进程命名必须有一个"不依赖某张进程表"的名字，否则 B 拿到 A 的
+  句柄数值无法解析；而进程私有回收又必须知道"哪些端口是我的"，所以句柄表
+  并不能省——两者是两个正交的命名空间。选择 `ticket` 同时是 capability
+  （知道即可 send），是因为本 WP 不做 cap 表；把 recv/close 绑到 owner pid，
+  让 ticket 泄露的后果限制在"能往你端口发消息"，不会丢消息/关端口。进程表
+  pid 不复用是为了让 stale pid（wait/kill 之后）一定 ESRCH，而不是误伤新进程。
+- **影响**：`src/ng/proc.[ch]`、`proc_table.c`、`proc_selftest.[ch]` 新增；
+  `thread.[ch]` 增加 `struct thread_uctx`/`pml4`/`proc`/syscall 栈与
+  `sched_kill_thread()`；`sched.c` 增加 `sched_core_remove()`；`sched_arch.c`
+  切换前写 CR3；`syscall.[ch]`/`isr.S` 把 ring3 状态从全局搬进 TCB 并新增
+  `ring3_enter_args`；`ipc.[ch]`/`ipc_core.c` 增加 `owner_pid`/ticket 解析/
+  `ipc_core_cancel_thread`；`handle.[ch]` 增加 `handle_find_obj()`；
+  `fs_syscall.[ch]` 增加内核侧 seed/read；`wp26_selftest.c` 把 shell 改成进程；
+  `main.c` 加 `proc_init()` 与 WP3-0 自检；`src/apps/proc/proc.c` 新增多角色
+  用户程序；`src/apps/shell/shell.c` 加 `spawn`/`wait`/`pid`；`build-ng.ps1`
+  新增 `proc.elf` 嵌入与 3 个内核源（55 步）；`run-ng.ps1` 加 8 条期望行；
+  `tests/unit-ng/test_proc.c` 新增（host 单测 3203→4043）。
+- **替代**：`fork` 复制 AS——需要写时复制/页引用计数，属于 D1，否决；把所有
+  进程共用一个句柄表（WP1-6 原样）——A 退出会关掉 B 的端口，且无法做
+  "每进程命名空间"，否决；ticket 直接用 `(pid<<16)|slot`——pid 复用/端口槽
+  复用都会撞车，且要求全局 pid→端口表，否决；wait 用忙等——破坏协作式语义且
+  烧 CPU，否决；kill 只置标志等目标自己退出——阻塞在 recv 的目标永远不会退出，
+  否决。

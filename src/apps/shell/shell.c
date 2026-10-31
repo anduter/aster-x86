@@ -64,6 +64,11 @@ typedef long long i64;
 #define SH_SYS_LOG_WRITE 33
 #define SH_SYS_PKG_LIST 34
 #define SH_SYS_PKG_VERIFY 35
+#define SH_SYS_SPAWN 40
+#define SH_SYS_WAIT 41
+#define SH_SYS_GETPID 42
+#define SH_SYS_KILL 43
+#define SH_SYS_GETPPID 44
 
 /* ---- errno（与 src/services/fs/include/vfs.h 同值）---------------------- */
 #define SH_EPERM (-1)
@@ -349,6 +354,7 @@ static const char *sh_errstr(i64 e)
 }
 
 static u32 g_status; /* 上一条命令的状态（0 = 成功） */
+static u32 g_child_pid; /* 最近一次 spawn 的子进程 pid（0 = 无） */
 
 /*
  * 友好错误行：`cmd: arg: message`（arg 为空时省略）。只改状态，不退出。
@@ -577,6 +583,9 @@ static int sh_cmd_help(const struct sh_tokens *t)
     sh_puts("  pkg list             list packages\r\n");
     sh_puts("  pkg verify <name>    verify a package (manifest + sha256)\r\n");
     sh_puts("  login <user> <pass>  authenticate\r\n");
+    sh_puts("  spawn <path> [args]  start a child process (WP3-0)\r\n");
+    sh_puts("  wait [pid]           wait for a child, print its status\r\n");
+    sh_puts("  pid                  print this shell's pid / ppid\r\n");
     sh_puts("  clear                clear the screen\r\n");
     sh_puts("  exit [code]          leave the shell\r\n");
     sh_puts("keys: Enter run, Backspace edit, Ctrl-L clear, Ctrl-C cancel, "
@@ -1102,6 +1111,94 @@ static int sh_cmd_clear(const struct sh_tokens *t)
     return 0;
 }
 
+/* ========================================================================== */
+/* WP3-0：进程命令（spawn / wait / pid）                                      */
+/* ========================================================================== */
+
+static int sh_cmd_spawn(const struct sh_tokens *t)
+{
+    char path[SH_PATH_MAX];
+    char *argv[SH_ARG_MAX + 1];
+    u32 pid = 0;
+    i64 rc;
+    u32 i;
+
+    if (t->argc < 2) {
+        sh_usage("spawn: usage: spawn <path> [args]");
+        return 1;
+    }
+    if (sh_resolve(t->argv[1], path, (u32)sizeof(path)) != 0) {
+        sh_usage("spawn: path too long");
+        return 1;
+    }
+    /* 子进程的 argv[0] 就是它自己的路径。 */
+    argv[0] = path;
+    for (i = 2; (int)i < t->argc; i++) {
+        argv[i - 1] = t->argv[i];
+    }
+    argv[t->argc - 1] = 0;
+    rc = sh_sys(SH_SYS_SPAWN, (i64)path, (i64)argv, (i64)&pid, 0);
+    if (rc < 0) {
+        sh_error("spawn", t->argv[1], rc);
+        return 1;
+    }
+    g_child_pid = pid;
+    sh_puts("ng: shell spawn ok (pid=");
+    sh_putdec((u64)pid);
+    sh_puts(" path=");
+    sh_puts(path);
+    sh_puts(")\r\n");
+    g_status = 0;
+    return 0;
+}
+
+static int sh_cmd_wait(const struct sh_tokens *t)
+{
+    u32 pid = g_child_pid;
+    int status = 0;
+    i64 rc;
+
+    if (t->argc > 2) {
+        sh_usage("wait: usage: wait [pid]");
+        return 1;
+    }
+    if (t->argc == 2 && (!sh_parse_u32(t->argv[1], &pid) || pid == 0)) {
+        sh_usage("wait: pid must be a positive number");
+        return 1;
+    }
+    if (pid == 0) {
+        sh_usage("wait: no child (use 'spawn' first or 'wait <pid>')");
+        return 1;
+    }
+    rc = sh_sys(SH_SYS_WAIT, (i64)pid, (i64)&status, 0, 0);
+    if (rc < 0) {
+        sh_error("wait", "", rc);
+        return 1;
+    }
+    if (pid == g_child_pid) {
+        g_child_pid = 0;
+    }
+    sh_puts("ng: shell wait ok (pid=");
+    sh_putdec((u64)pid);
+    sh_puts(" status=");
+    sh_putdec((u64)(u32)status);
+    sh_puts(")\r\n");
+    g_status = (status == 0) ? 0u : 1u;
+    return 0;
+}
+
+static int sh_cmd_pid(const struct sh_tokens *t)
+{
+    (void)t;
+    sh_puts("pid=");
+    sh_putdec((u64)sh_sys(SH_SYS_GETPID, 0, 0, 0, 0));
+    sh_puts(" ppid=");
+    sh_putdec((u64)sh_sys(SH_SYS_GETPPID, 0, 0, 0, 0));
+    sh_puts("\r\n");
+    g_status = 0;
+    return 0;
+}
+
 static int sh_cmd_exit(const struct sh_tokens *t)
 {
     u32 code = g_status;
@@ -1137,7 +1234,8 @@ static const struct sh_cmd g_cmds[] = {
     {"echo", sh_cmd_echo},   {"mkdir", sh_cmd_mkdir}, {"rm", sh_cmd_rm},
     {"cd", sh_cmd_cd},       {"pwd", sh_cmd_pwd},     {"stat", sh_cmd_stat},
     {"dmesg", sh_cmd_dmesg}, {"log", sh_cmd_log},     {"pkg", sh_cmd_pkg},
-    {"login", sh_cmd_login}, {"clear", sh_cmd_clear}, {"exit", sh_cmd_exit},
+    {"login", sh_cmd_login}, {"spawn", sh_cmd_spawn}, {"wait", sh_cmd_wait},
+    {"pid", sh_cmd_pid},     {"clear", sh_cmd_clear}, {"exit", sh_cmd_exit},
 };
 
 static void sh_run_line(char *line)

@@ -82,6 +82,13 @@ u32 handle_live(const struct handle_table *t);
 u32 handle_peak(const struct handle_table *t);
 int handle_is_valid(struct handle_table *t, u32 handle);
 
+/*
+ * ng WP3-0：按 (type, obj) 找表内句柄（type=HANDLE_TYPE_NONE 表示任意类型）。
+ * 找到返回 HANDLE_OK 并写 *out_handle；没有返回 HANDLE_ENOENT。
+ */
+int handle_find_obj(struct handle_table *t, u32 type, const void *obj,
+                    u32 *out_handle);
+
 /* 编码/解码 helper（ticket 与 handle 同构：ticket = (gen<<16)|slot）。 */
 static inline u32 handle_make(u32 gen, u32 slot)
 {

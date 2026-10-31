@@ -22,6 +22,7 @@
 #include "heap.h"
 #include "io.h"
 #include "paging.h"
+#include "proc.h"
 #include "thread.h"
 #include "uaccess.h"
 
@@ -92,7 +93,25 @@ struct ipc_core *ipc_core_global(void)
 
 int ipc_port_create(u32 depth, u32 *out_handle)
 {
-    return ipc_core_port_create(&g_ipc, depth, IPC_UID_ROOT, out_handle);
+    struct proc *p = proc_current();
+    u32 ticket = 0;
+    int rc;
+
+    rc = ipc_core_port_create_pid(&g_ipc, depth, IPC_UID_ROOT,
+                                  (p != NULL) ? p->pid : 0, &ticket);
+    if (rc != IPC_OK) {
+        return rc;
+    }
+    if (p != NULL &&
+        proc_port_install(p, ticket, ipc_core_port_by_ticket(&g_ipc, ticket)) !=
+            IPC_OK) {
+        (void)ipc_core_close(&g_ipc, ticket, IPC_UID_ROOT);
+        return IPC_ENOSPC;
+    }
+    if (out_handle != NULL) {
+        *out_handle = ticket;
+    }
+    return IPC_OK;
 }
 
 int ipc_port_send(u32 port, const void *msg, u32 len, u64 timeout)
@@ -102,6 +121,23 @@ int ipc_port_send(u32 port, const void *msg, u32 len, u64 timeout)
 
 int ipc_port_recv(u32 port, void *buf, u32 max, u64 timeout, u32 *out_len)
 {
+    struct proc *p = proc_current();
+
+    /*
+     * WP3-0：ticket 可以跨进程传递，但**接收**只能是属主进程（否则任何拿到
+     * ticket 的进程都能把消息从别人端口里取走）。内核上下文（pid=0）仍可
+     * 接收内核自己创建的端口 —— WP1-6 的自检依赖这一点。
+     */
+    if (p != NULL) {
+        struct ipc_port *pt = ipc_core_port_by_ticket(&g_ipc, port);
+
+        if (pt == NULL) {
+            return IPC_EBADF;
+        }
+        if (ipc_core_port_owner_pid(pt) != p->pid) {
+            return IPC_EPERM;
+        }
+    }
     return ipc_core_recv(&g_ipc, port, buf, max, IPC_UID_ROOT, timeout, out_len);
 }
 
@@ -112,7 +148,26 @@ int ipc_port_reply(u32 ticket, const void *msg, u32 len, u64 timeout)
 
 int ipc_port_close(u32 port)
 {
-    return ipc_core_close(&g_ipc, port, IPC_UID_ROOT);
+    struct proc *p = proc_current();
+    struct ipc_port *pt;
+    int rc;
+
+    if (p != NULL) {
+        pt = ipc_core_port_by_ticket(&g_ipc, port);
+        if (pt == NULL) {
+            return IPC_EBADF;
+        }
+        if (ipc_core_port_owner_pid(pt) != p->pid) {
+            return IPC_EPERM;
+        }
+    } else {
+        pt = ipc_core_port_by_ticket(&g_ipc, port);
+    }
+    rc = ipc_core_close(&g_ipc, port, IPC_UID_ROOT);
+    if (rc == IPC_OK && p != NULL && pt != NULL) {
+        (void)proc_port_release(p, pt);
+    }
+    return rc;
 }
 
 /* ------------------------------------------------------------------------- */

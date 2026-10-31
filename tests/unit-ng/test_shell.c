@@ -127,6 +127,8 @@ static void keys_reset(void)
     g_eof_sent = 0;
 }
 
+static void proc_fake_reset(void);
+
 static int env_reset(void)
 {
     vfs_reset();
@@ -151,6 +153,7 @@ static int env_reset(void)
     }
     out_reset();
     keys_reset();
+    proc_fake_reset();
     g_exit_code = -1;
     g_exited = 0;
     return 1;
@@ -185,6 +188,40 @@ static int file_exists(const char *path)
     return (vfs_stat(&g_ctx, path, &st) == VFS_OK) ? 1 : 0;
 }
 
+/* ---- WP3-0：spawn/wait/getpid 的 fake 后端 ------------------------------ */
+static char g_spawn_path[64];
+static char g_spawn_argv0[64];
+static char g_spawn_argv1[64];
+static int g_spawn_argc;
+static int g_spawn_calls;
+static u32 g_spawn_pid;
+static u32 g_wait_pid;
+static int g_wait_status;
+static int g_wait_calls;
+
+static void proc_fake_reset(void)
+{
+    g_spawn_path[0] = '\0';
+    g_spawn_argv0[0] = '\0';
+    g_spawn_argv1[0] = '\0';
+    g_spawn_argc = 0;
+    g_spawn_calls = 0;
+    g_spawn_pid = 21;
+    g_wait_pid = 0;
+    g_wait_status = 0;
+    g_wait_calls = 0;
+}
+
+static void copy_str(char *dst, const char *src, int cap)
+{
+    int i = 0;
+
+    while (src != 0 && src[i] != '\0' && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
 /* ---- host syscall 后端 --------------------------------------------------- */
 long long sh_host_syscall(long long nr, long long a1, long long a2, long long a3,
                           long long a4)
@@ -250,6 +287,40 @@ long long sh_host_syscall(long long nr, long long a1, long long a2, long long a3
         int rc = log_write((const char *)(void *)a1, (const char *)(void *)a2);
         return (rc < 0) ? (long long)rc : 0;
     }
+    case 40: { /* spawn(path, argv, &pid) */
+        const char *path = (const char *)(void *)a1;
+        char *const *argv = (char *const *)(usize)a2;
+
+        g_spawn_calls++;
+        copy_str(g_spawn_path, path, 64);
+        g_spawn_argc = 0;
+        if (argv != NULL) {
+            while (g_spawn_argc < 8 && argv[g_spawn_argc] != NULL) {
+                if (g_spawn_argc == 0) {
+                    copy_str(g_spawn_argv0, argv[0], 64);
+                } else if (g_spawn_argc == 1) {
+                    copy_str(g_spawn_argv1, argv[1], 64);
+                }
+                g_spawn_argc++;
+            }
+        }
+        *(u32 *)(void *)a3 = g_spawn_pid;
+        return 0;
+    }
+    case 41: { /* wait(pid, &status) */
+        int *st = (int *)(void *)a2;
+
+        g_wait_calls++;
+        g_wait_pid = (u32)a1;
+        if (st != NULL) {
+            *st = g_wait_status;
+        }
+        return 0;
+    }
+    case 42:
+        return 8;
+    case 44:
+        return 1;
     case 34:
         return pkg_list((char *)(void *)a1, (u32)a2);
     case 35:
@@ -978,6 +1049,60 @@ static void t_ls_truncate(void)
     CHECK(vfs_fd_live(&g_ctx) == 0);
 }
 
+/* ========================================================================== */
+/* 18. WP3-0：spawn / wait / pid                                             */
+/* ========================================================================== */
+
+static void t_proc_cmds(void)
+{
+    int rc;
+
+    /* spawn：路径解析 + argv[0]=路径，子进程 pid 由内核写回。 */
+    CHECK(env_reset() == 1);
+    rc = run("spawn /bin/proc hello\nwait\npid\nexit\n");
+    CHECK(rc == 0);
+    CHECK(g_spawn_calls == 1);
+    CHECK(strcmp(g_spawn_path, "/bin/proc") == 0);
+    CHECK(g_spawn_argc == 2);
+    CHECK(strcmp(g_spawn_argv0, "/bin/proc") == 0);
+    CHECK(strcmp(g_spawn_argv1, "hello") == 0);
+    CHECK(out_has("ng: shell spawn ok (pid=21 path=/bin/proc)"));
+    CHECK(g_wait_calls == 1);
+    CHECK(g_wait_pid == 21u);
+    CHECK(out_has("ng: shell wait ok (pid=21 status=0)"));
+    CHECK(out_has("pid=8 ppid=1"));
+
+    /* spawn 缺参数：用法错误，不调用内核。 */
+    CHECK(env_reset() == 1);
+    rc = run("spawn\nexit\n");
+    CHECK(rc == 1);
+    CHECK(g_spawn_calls == 0);
+    CHECK(out_has("sh: spawn: usage: spawn <path> [args]"));
+
+    /* 没有子进程的 wait：用法错误，不调用内核。 */
+    CHECK(env_reset() == 1);
+    rc = run("wait\nexit\n");
+    CHECK(rc == 1);
+    CHECK(g_wait_calls == 0);
+    CHECK(out_has("sh: wait: no child"));
+
+    /* wait <pid> 指定进程；非零状态把 $? 置 1。 */
+    CHECK(env_reset() == 1);
+    g_wait_status = 265; /* 0x100|9：被 kill 的进程 */
+    rc = run("wait 7\nexit\n");
+    CHECK(rc == 1);
+    CHECK(g_wait_calls == 1);
+    CHECK(g_wait_pid == 7u);
+    CHECK(out_has("ng: shell wait ok (pid=7 status=265)"));
+
+    /* wait 0 / 非数字：用法错误。 */
+    CHECK(env_reset() == 1);
+    rc = run("wait 0\nwait abc\nexit\n");
+    CHECK(rc == 1);
+    CHECK(g_wait_calls == 0);
+    CHECK(out_has("wait: pid must be a positive number"));
+}
+
 int test_shell(void)
 {
     t_tokenize();
@@ -997,5 +1122,6 @@ int test_shell(void)
     t_errors();
     t_eagain();
     t_ls_truncate();
+    t_proc_cmds();
     return 0;
 }

@@ -244,7 +244,15 @@ if ($Panic) {
         'ng: ring3 svc ok',
         'ng: WP2-5 selftest PASS',
         'ng: parity 100/100 PASS',
-        'ng: WP2-7 selftest PASS'
+        'ng: WP2-7 selftest PASS',
+        'ng: proc bin ok (shell=/bin/shell proc=/bin/proc hello=/bin/hello)',
+        'ng: proc table ok (max=32 init=pid 1',
+        'ng: proc spawn ok (pid=',
+        'ng: proc wait ok (status=0 pid=',
+        'ng: proc ipc cross ok (pid=',
+        'ng: proc as isolated ok (va=0x40010000',
+        'ng: proc kill ok (pids=',
+        'ng: WP3-0 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -333,6 +341,8 @@ if ($Panic) {
             'ng: shell write ok',
             'ng: shell dmesg ok',
             'ng: shell pkg ok',
+            'ng: shell spawn ok',
+            'ng: shell wait ok (pid=',
             'ng: shell exit ok',
             'ng: shell session ok (exit=0 rsp=ok)',
             'ng: shell session file ok (s.txt=3)',
@@ -386,6 +396,8 @@ if ($Panic) {
         'ng: shell .* FAIL',
         'ng: WP2-6 selftest FAIL',
         'ng: WP2-7 selftest FAIL',
+        'ng: proc .* FAIL',
+        'ng: WP3-0 selftest FAIL',
         'ng: parity FAIL',
         '(?m)^parity: [0-9]+/100 .* \.\.\. FAIL'
     )
@@ -460,7 +472,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP2-6) ==='
+Write-Host '=== run-ng (WP3-0) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("disk: {0} ({1} bytes, ide)" -f $disk, (Get-Item -LiteralPath $disk).Length)
 Write-Host ("shell: {0}" -f $(if ($Smoke) { 'skipped (-Smoke)' } elseif ($NoQmp) { 'no QMP injection (-NoQmp)' } else { 'QMP command script' }))
@@ -606,6 +618,8 @@ function Send-ShellScript($Qmp) {
         @{ cmd = 'cat /tmp/s.txt';       expect = 'ng: shell cat ok';     count = 2 },
         @{ cmd = 'dmesg -n 3';           expect = 'ng: shell dmesg ok';   count = 1 },
         @{ cmd = 'pkg list';             expect = 'ng: shell pkg ok';     count = 1 },
+        @{ cmd = 'spawn /bin/proc hello'; expect = 'ng: shell spawn ok'; count = 1 },
+        @{ cmd = 'wait'; expect = 'ng: shell wait ok'; count = 1 },
         @{ cmd = 'exit';                 expect = 'ng: shell exit ok';    count = 1 }
     )
     foreach ($step in $steps) {

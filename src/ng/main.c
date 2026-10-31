@@ -42,6 +42,8 @@
 #include "mem_selftest.h"
 #include "paging.h"
 #include "parity_selftest.h"
+#include "proc.h"
+#include "proc_selftest.h"
 #include "sched_selftest.h"
 #include "serial.h"
 #include "syscall.h"
@@ -303,6 +305,9 @@ void kmain(u64 mb_info)
     /* WP1-7：ELF64 加载器 + ring3 hello。需要 PMM/heap/调度器（per-thread
      * syscall 内核栈用一个真实线程验证），所以排在最后。 */
     if (mem_fails == 0 && fails == 0) {
+        /* WP3-0：进程表初始化（pid 1 = 内核 init；把 /bin/shell、/bin/proc、
+         * /bin/hello 种进 ramfs）。必须在 WP1-7/WP2-6 之前，后两者要用它。 */
+        proc_init();
         fails += elf_selftest();
     } else {
         fails += 1;
@@ -318,6 +323,26 @@ void kmain(u64 mb_info)
         serial_puts(")\r\n");
     }
     log_wp("WP1-7", fails);
+
+    /* WP3-0：多进程用户态 + 跨进程 IPC（spawn/wait/getpid/kill/getppid、
+     * 每进程句柄表、ticket 跨进程、AS 隔离）。依赖 WP1-7 的 ELF/用户 AS、
+     * WP2-1 的 ramfs（/bin）、WP1-5 的调度器（wait 阻塞）。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += proc_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP3-0 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP3-0 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+    log_wp("WP3-0", fails);
 
     /* WP2-6：用户态 shell（L3）。默认启动顺序：所有自检 -> ring3 hello ->
      * shell（交互，直到 exit/Ctrl-D）。`build-ng.ps1 -Smoke` 编出的内核跳过

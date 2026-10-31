@@ -267,6 +267,18 @@ void ring3_enter(u64 user_rip, u64 user_rsp)
     }
 }
 
+/* WP3-0：带 argc/argv 的入口在 host 上同样只触发 hook（不真的进 ring3）。 */
+void ring3_enter_args(u64 user_rip, u64 user_rsp, u64 argc, u64 argv)
+{
+    (void)user_rip;
+    (void)user_rsp;
+    (void)argc;
+    (void)argv;
+    if (f_hook != NULL) {
+        f_hook(f_hook_ctx);
+    }
+}
+
 /* syscall.c 只把这两个当作“地址”用（LSTAR / boot 内核栈顶）。 */
 char syscall_entry[16];
 char syscall_stack_top[64];
@@ -359,6 +371,93 @@ u64 ipc_sys_reply(u64 ticket, u64 user_msg, u64 len, u64 timeout)
 u64 ipc_sys_close(u64 handle)
 {
     return fake_ipc_record(FAKE_IPC_CLOSE, handle, 0, 0, 0);
+}
+
+/* ------------------------------------------------------------------------- */
+/* fake 进程 syscall 胶水（WP3-0：40..44）                                    */
+/* ------------------------------------------------------------------------- */
+
+#define FAKE_PROC_MAX 8u
+
+static struct fake_proc_call fproc_calls[FAKE_PROC_MAX];
+static u32 fproc_count;
+static u64 fproc_ret;
+static u64 fproc_pid = 33;
+
+void fake_proc_reset(void)
+{
+    u32 i;
+
+    for (i = 0; i < FAKE_PROC_MAX; i++) {
+        fproc_calls[i].fn = 0;
+        fproc_calls[i].a = 0;
+        fproc_calls[i].b = 0;
+        fproc_calls[i].c = 0;
+    }
+    fproc_count = 0;
+    fproc_ret = 0;
+    fproc_pid = 33;
+}
+
+void fake_proc_set_ret(u64 ret)
+{
+    fproc_ret = ret;
+}
+
+void fake_proc_set_pid(u64 pid)
+{
+    fproc_pid = pid;
+}
+
+u32 fake_proc_count(void)
+{
+    return fproc_count;
+}
+
+const struct fake_proc_call *fake_proc_get(u32 i)
+{
+    if (i >= fproc_count || i >= FAKE_PROC_MAX) {
+        return NULL;
+    }
+    return &fproc_calls[i];
+}
+
+static u64 fake_proc_record(u32 fn, u64 a, u64 b, u64 c)
+{
+    if (fproc_count < FAKE_PROC_MAX) {
+        fproc_calls[fproc_count].fn = fn;
+        fproc_calls[fproc_count].a = a;
+        fproc_calls[fproc_count].b = b;
+        fproc_calls[fproc_count].c = c;
+    }
+    fproc_count++;
+    return fproc_ret;
+}
+
+u64 proc_sys_spawn(u64 upath, u64 uargv, u64 upid)
+{
+    return fake_proc_record(FAKE_PROC_SPAWN, upath, uargv, upid);
+}
+
+u64 proc_sys_wait(u64 pid, u64 ustatus)
+{
+    return fake_proc_record(FAKE_PROC_WAIT, pid, ustatus, 0);
+}
+
+u64 proc_sys_getpid(void)
+{
+    (void)fake_proc_record(FAKE_PROC_GETPID, 0, 0, 0);
+    return fproc_pid;
+}
+
+u64 proc_sys_kill(u64 pid, u64 sig)
+{
+    return fake_proc_record(FAKE_PROC_KILL, pid, sig, 0);
+}
+
+u64 proc_sys_getppid(void)
+{
+    return fake_proc_record(FAKE_PROC_GETPPID, 0, 0, 0);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -37,8 +37,18 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
  *  33  log_write(tag, msg)                 -> 0 / -err          （WP2-5）
  *  34  pkg_list(buf, max)                  -> 包数 / -err       （WP2-5）
  *  35  pkg_verify(name)                    -> 0 / -err          （WP2-5）
+ *  40  spawn(path, argv, &pid)              -> 0 / -err          （WP3-0）
+ *  41  wait(pid, &status)                   -> 0 / -err          （WP3-0，阻塞）
+ *  42  getpid()                             -> pid               （WP3-0）
+ *  43  kill(pid, sig)                       -> 0 / -err          （WP3-0）
+ *  44  getppid()                            -> ppid              （WP3-0）
  * 其中 msg/buf/path/stat 是用户指针（内核做 U/S 页校验 + SMAP copyin/copyout）；
  * timeout 单位是 TSC tick（0 = 非阻塞，~0 = 永久）。
+ *
+ * WP3-0 起 10..14 的参数是 **ticket**（端口在全局端口池里的身份，(gen<<16)|slot），
+ * 不再是"本进程句柄"：ticket 可以交给别的进程；recv/close 要求调用者是端口
+ * 的属主进程。进程自己的句柄表（proc_t.handles）记录"我拥有哪些端口"，
+ * 退出/被 kill 时按表回收。
  */
 #define NG_SYS_WRITE 0u
 #define NG_SYS_EXIT 1u
@@ -61,6 +71,11 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
 #define NG_SYS_LOG_WRITE 33u
 #define NG_SYS_PKG_LIST 34u
 #define NG_SYS_PKG_VERIFY 35u
+#define NG_SYS_SPAWN 40u
+#define NG_SYS_WAIT 41u
+#define NG_SYS_GETPID 42u
+#define NG_SYS_KILL 43u
+#define NG_SYS_GETPPID 44u
 
 /* ring3 一次执行的统计（syscall_run_user 填）。 */
 struct ring3_result {
@@ -89,6 +104,13 @@ int syscall_run_user(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
                      struct ring3_result *out);
 
 /*
+ * ng WP3-0：带初始 argc/argv 的版本（进程入口 ABI：用户态 rdi=argc、
+ * rsi=argv）。argc=0/argv=0 等价于 syscall_run_user()。
+ */
+int syscall_run_user_args(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
+                          u64 argc, u64 argv, struct ring3_result *out);
+
+/*
  * WP1-7：per-thread 内核栈。syscall_set_thread_stack() 在每次上下文切换前
  * 被 sched_arch.c 调用；syscall_kernel_stack_sync() 把"当前线程"的栈顶同步
  * 到 syscall 入口与 TSS.RSP0，并返回该栈顶。
@@ -96,5 +118,8 @@ int syscall_run_user(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
 void syscall_set_kernel_stack(u64 top);
 void syscall_set_thread_stack(struct thread *t);
 u64 syscall_kernel_stack_sync(void);
+
+/* WP3-0：ring3_enter 在 iretq 前调用，把恢复点存进当前线程（isr.S 调用）。 */
+void ring3_save_resume(u64 rsp, u64 rip);
 
 #endif /* NG_SYSCALL_H */

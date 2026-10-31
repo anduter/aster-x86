@@ -99,6 +99,39 @@ _Static_assert(__builtin_offsetof(struct thread_context, rsp) == 48,
 _Static_assert(__builtin_offsetof(struct thread_context, rip) == 56,
                "ctx.rip offset");
 
+/*
+ * ng WP3-0：每个线程的 ring3 / syscall 执行上下文。
+ *
+ * WP1-7 把这些状态放在 syscall.c 的全局变量里，因为当时只有"一个用户程序在
+ * 一个内核线程上跑"。多进程之后两个进程会交替执行（A 在 syscall 里阻塞、
+ * B 在 ring3 跑），全局状态会被覆盖（最典型的：B 的 exit 把 want_exit 置 1，
+ * A 的下一次 syscall 返回就会错误地跳回内核）。所以这里把"谁在 ring3、
+ * 用户 RSP、恢复点、退出标志、统计"全部搬到 TCB。
+ *
+ * 汇编仍通过 syscall.c 的少量全局与 C 交互，但那些全局只在"syscall 入口 ->
+ * dispatch"和"prepare_return -> SYSRET/IRET"两段无调度点的窗口里有效。
+ */
+struct thread_uctx {
+    u64 user_rsp;     /* 最近一次 SYSCALL 入口的 RSP（用户栈） */
+    u64 saved_rip;    /* SYSCALL 的 RCX（返回 RIP） */
+    u64 saved_flags;  /* SYSCALL 的 R11（返回 RFLAGS） */
+    u64 resume_rsp;   /* ring3_enter 保存的内核恢复点（C 栈） */
+    u64 resume_rip;
+    u64 stack_lo; /* syscall_run_user 声明的用户栈区间 */
+    u64 stack_hi;
+    u64 syscalls;
+    u64 writes;
+    u64 bytes;
+    u64 fs_calls;
+    u64 exit_code;
+    u32 from_ring3;     /* 本次 syscall 来自 CPL3（or run_user 窗口内） */
+    u32 run_user;       /* 处在 syscall_run_user 的 ring3 窗口里 */
+    u32 user_rsp_ok;
+    u32 bad_writes;
+    u32 return_mode;    /* 0 = SYSRETQ（ring3），1 = IRETQ（ring0 测试） */
+    u32 want_exit;      /* syscall 1：回内核恢复点而不是回用户态 */
+};
+
 typedef struct thread {
     u32 tid;
     u32 state; /* enum thread_state */
@@ -110,6 +143,22 @@ typedef struct thread {
     void *stack_base; /* 低地址；canary 在头 16 字节 */
     u64 stack_size;
     void *stack_top;
+    /*
+     * WP3-0：用户进程相关。
+     *   pml4        - 该线程运行时的用户 PML4（NULL = 内核地址空间），
+     *                 调度切换前由 sched_arch_switch() 写 CR3。
+     *   proc        - 所属进程（struct proc *，NULL = 内核线程）。
+     *   syscall_top - SYSCALL 入口用的专用栈顶（NULL = 用 stack_top）。
+     *                 用户线程的 ring3_enter 恢复点保存在 C 栈上，如果
+     *                 SYSCALL 入口也用同一个栈顶就会覆盖恢复点，所以用户
+     *                 进程线程需要一条独立的 syscall 栈。
+     */
+    void *pml4;
+    void *proc;
+    void *syscall_stack_base;
+    u64 syscall_stack_size;
+    void *syscall_top;
+    struct thread_uctx uctx;
     u64 wake_tick;   /* BLOCKED 的到期 TSC；0 = 只等显式唤醒 */
     u64 switches;    /* 被选中运行的次数 */
     struct thread *next;     /* ready / blocked / zombie 链 */
@@ -159,6 +208,8 @@ void sched_core_zombie(struct sched_core *c, thread_t *t);
 /* 取一个 zombie（跳过 skip，通常是当前正在跑的线程）；NULL = 没有可回收。 */
 thread_t *sched_core_reap(struct sched_core *c, thread_t *skip);
 thread_t *sched_core_find(struct sched_core *c, u32 tid);
+/* 从 ready/blocked 链上摘除（不改状态）；kill 一个暂停线程时用。 */
+int sched_core_remove(struct sched_core *c, thread_t *t);
 
 /* ---- 内核调度器 ---------------------------------------------------------- */
 void sched_init(void);  /* 建 boot 线程 TCB，清空队列（heap 就绪后调用） */
@@ -169,6 +220,14 @@ void sched_tick(void); /* 给未来的 tick IRQ 用：只做到期唤醒 */
 void thread_exit(void) __attribute__((noreturn));
 int thread_sleep(u64 ticks); /* 返回 THREAD_WAKE_*；ticks=0 等价 yield */
 int thread_wake(u32 tid);
+
+/*
+ * ng WP3-0：终止一个**不在运行**的线程（kill 一个阻塞在 syscall 里的进程）。
+ * 把 tid 从 ready/blocked 链上摘下来、直接置 DEAD 挂 zombie（栈由别的线程
+ * 下一次调度回收），从此它不会再被调度。返回 THREAD_OK / THREAD_ENOENT /
+ * THREAD_EBAD（它是当前线程，必须走 thread_exit 而不是这里）。
+ */
+int sched_kill_thread(u32 tid);
 
 thread_t *thread_self(void);
 struct sched_core *sched_core_state(void); /* 诊断/自检读队列状态 */

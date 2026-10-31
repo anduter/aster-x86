@@ -34,4 +34,13 @@ int fs_sys_listdir(u64 upath, u64 uents, u32 max);
 int fs_sys_mkdir(u64 upath, u32 mode);
 int fs_sys_unlink(u64 upath);
 
+/*
+ * ng WP3-0：内核侧文件接口（内核指针 + 绝对路径，不走 uaccess）。
+ *   - fs_sys_seed_file：把嵌入内核的用户 ELF 种子到 ramfs（/bin/ 下的三个程序）；
+ *   - fs_sys_read_file：spawn 从 VFS 读 ELF 镜像（ramfs/FAT16 同一条路径）。
+ * 返回 VFS_OK 或负 errno；*out_size 是实际读到的字节数。
+ */
+int fs_sys_seed_file(const char *path, const void *data, u64 size);
+int fs_sys_read_file(const char *path, void *buf, u64 cap, u64 *out_size);
+
 #endif /* NG_FS_SYSCALL_H */

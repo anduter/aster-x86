@@ -184,6 +184,12 @@ gdt_load:
 
 # ---- syscall 入口（LSTAR 指向这里）----------------------------------------
 # 进入时：RCX = 返回 RIP，R11 = 返回 RFLAGS；CPL 已是 0，RSP 仍是调用者栈。
+#
+# WP3-0：入口的四个值（用户 RSP / 返回 RIP / 返回 RFLAGS / CS）先写进全局，
+# 换到内核栈之后由 syscall_dispatch() 的入口代码一次性搬进**当前线程**的
+# TCB（syscall.c: syscall_enter_ctx）。入口到 dispatch 之间没有调度点，所以
+# 这几个全局是安全的；dispatch 返回前会把本线程的状态写回来（prepare_return），
+# 于是多进程交替执行时不会互相覆盖。
     .global syscall_entry
     .type syscall_entry, @function
 syscall_entry:
@@ -215,6 +221,11 @@ syscall_entry:
     pushq %rdx
     pushq %rcx
     pushq %rax
+    # WP3-0：把入口 CS 记进全局（0x23 = CPL3）。用户寄存器已经全部压栈，
+    # 这里可以安全借用 rax。dispatch 的入口代码会把它搬进当前线程的 TCB。
+    xorl %eax, %eax
+    movw %cs, %ax
+    movq %rax, syscall_entry_cs(%rip)
 
     movq %rsp, %rdi
     movq %rsp, %rbx
@@ -272,12 +283,12 @@ syscall_ring0_stub:
 # ---- 进 ring3：保存内核恢复点，构造 iretq 帧 ------------------------------
 #   rdi = 用户 RIP，rsi = 用户 RSP
 #
-# WP2-6 修正：ring3 期间内核的 callee-saved 寄存器（rbx/rbp/r12..r15）必须
-# 保持不变 —— syscall 返回路径会把**用户**的寄存器值弹回来，如果直接把控制
-# 权交回 ring3_enter 的调用者，C 代码会拿用户态的 rbx/rbp 当自己的局部变量
-# （shell 退出时 rbx 指向用户栈，syscall_run_user 写 *out 就 #PF）。
-# 这里在保存 kernel_resume_rsp 之前把这些寄存器压到内核栈，ring3_resume 再
-# 弹回去，syscall_run_user 看到的寄存器与调用前一致。
+# WP3-0：恢复点保存到**当前线程**的 TCB（syscall.c 的 ring3_save_resume），
+# 不再用全局 —— 进程 A 在 syscall 里阻塞、进程 B 进 ring3 时，各有各的恢复点。
+# WP2-6：ring3 期间内核的 callee-saved 寄存器（rbx/rbp/r12..r15）必须保持
+# 不变 —— syscall 返回路径会把**用户**的寄存器值弹回来，所以这里先把它们压到
+# 内核栈，ring3_resume 再弹回去；r12/r13 借来在调用 C helper 时暂存用户
+# rip/rsp（这两个值本身已压在栈上）。
     .global ring3_enter
     .type ring3_enter, @function
 ring3_enter:
@@ -287,14 +298,16 @@ ring3_enter:
     pushq %r13
     pushq %r14
     pushq %r15
-    movq %rsp, kernel_resume_rsp(%rip)
-    leaq ring3_resume(%rip), %rax
-    movq %rax, kernel_resume_rip(%rip)
+    movq %rdi, %r12                       # user rip
+    movq %rsi, %r13                       # user rsp
+    movq %rsp, %rdi
+    leaq ring3_resume(%rip), %rsi
+    call ring3_save_resume
     pushq $0x1b                           # SS：用户数据（RPL3）
-    pushq %rsi                            # RSP
+    pushq %r13                            # RSP
     pushq $0x2                            # RFLAGS（IF=0）
     pushq $0x23                           # CS：用户代码（RPL3）
-    pushq %rdi                            # RIP
+    pushq %r12                            # RIP
     iretq
 ring3_resume:
     popq %r15
@@ -305,6 +318,36 @@ ring3_resume:
     popq %rbx
     ret
     .size ring3_enter, . - ring3_enter
+
+# ---- WP3-0：带 argc/argv 的 ring3 入口 ------------------------------------
+#   rdi = 用户 RIP，rsi = 用户 RSP，rdx = argc，rcx = argv
+# 进程初始寄存器 ABI：rdi=argc、rsi=argv（用户程序 _start 直接当参数用）。
+# ring3_enter 保持两参数版本（WP1-7 的 hello / WP1-3 的静态页 / host 单测）。
+    .global ring3_enter_args
+    .type ring3_enter_args, @function
+ring3_enter_args:
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rdi, %r12                       # user rip
+    movq %rsi, %r13                       # user rsp
+    movq %rdx, %r14                       # argc
+    movq %rcx, %r15                       # argv
+    movq %rsp, %rdi
+    leaq ring3_resume(%rip), %rsi
+    call ring3_save_resume
+    pushq $0x1b
+    pushq %r13
+    pushq $0x2
+    pushq $0x23
+    pushq %r12
+    movq %r14, %rdi                       # iretq 之后用户态看到的 rdi/rsi
+    movq %r15, %rsi
+    iretq
+    .size ring3_enter_args, . - ring3_enter_args
 
 # ---- 用户态测试程序（拷进用户页后执行）------------------------------------
     .section .rodata

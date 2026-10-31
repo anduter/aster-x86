@@ -88,6 +88,7 @@ $sources = @(
     'src/ng/sched.c',
     'src/ng/handle.c',
     'src/ng/ipc_core.c',
+    'src/ng/proc_table.c',
     'src/ng/elf.c',
     'src/ng/uaccess.c',
     'src/ng/syscall.c',
@@ -127,6 +128,7 @@ $sources = @(
     'tests/unit-ng/test_log.c',
     'tests/unit-ng/test_pkg.c',
     'tests/unit-ng/test_shell.c',
+    'tests/unit-ng/test_proc.c',
     'tests/unit-ng/test_parity.c'
 )
 $srcPaths = @()
