@@ -1,6 +1,6 @@
 # 设计文档索引
 
-> 给实现会话的入口。先读这一页，再按顺序读三份基线。
+> 给实现会话的入口。先读这一页，再按顺序读基线。
 
 ## 阅读顺序
 
@@ -8,12 +8,15 @@
 2. evolution.md —— ng 分支、E0–E5 阶段、工作包（WP）、门禁、第一周 checklist。
 3. decisions.md —— ADR 集合（含 64 位相关决策），改架构前先看这里。
 4. three-layer.md —— 历史迁移记录（已被取代，只看 P1–P4 的事实）。
+5. domains/_index.md —— 7 个域的职责/接口/失败/manifest/状态，以及**已知漂移**；
+   实现会话按域读对应页面，再读接口的 `../abi/abi-1.0-draft.md`。
 
 ## 当前状态
 
-- main：冻结在 69ab006（旧 32 位，305/305）。
+- main：**代码**冻结在 69ab006（旧 32 位，305/305）；main 顶端 `d62bccb` 是
+  7 域架构基线的设计文档提交，不含功能改动。
 - 开发分支：ng（64 位内核）。
-- 当前阶段：**E3 进行中（WP3-0、WP3-1、WP3-2 完成）**。E2（WP2-1…WP2-7）已全部完成
+- 当前阶段：**E3 进行中（WP3-0…WP3-2 完成，WP3-3 进行中）**。E2（WP2-1…WP2-7）已全部完成
   并打 tag `ng-e2`（`d3a5671`）；E3 的前置 **WP3-0（多进程用户态 + 跨进程
   IPC）**、**WP3-1（display server，L2a）** 与 **WP3-2（shell/WM，L2b +
   协议 v2）** 落地：进程表/spawn/wait/kill、per-process 句柄表、ticket 跨进程
@@ -38,8 +41,9 @@
   host 单测 **4684 checks, 0 failures**；旧 32 位 305/305；
   check-domains / check-deps 0 违规（`docs/claims/ng-WP2-1.md` …
   `ng-WP2-7.md`、`ng-WP3-0.md`、`ng-WP3-1.md`、`ng-WP3-2.md`）。
-- 下一步：E3 主体（WP3-3 session manager / WP3-4 SDK alpha / WP3-5 S1 故障
-  注入），见 evolution.md。
+- 下一步：**WP3-3 session manager 进行中**（应用生命周期/窗口表/角色令牌）；
+  WP3-4 SDK alpha、WP3-5 S1 故障注入待开始，见 evolution.md。
+  域文档与已知漂移见 `domains/_index.md`；ABI 草案见 `../abi/abi-1.0-draft.md`。
 
 ## 执行规则
 
@@ -71,4 +75,5 @@
 | proc-ng.md | WP3-0 进程模型：pid/进程表、spawn/wait/kill、per-process 句柄、ticket 跨进程 IPC |
 | display-server-ng.md | WP3-1 display server（L2a）：syscall 45/46/47、共享内存 refcount、协议、surface/z-order/合成、输入路由、QMP 像素断言；WP3-2 追加协议 v2 与 L2b WM（第 13 节） |
 | `tests/parity/parity_cases.h` / `parity_body.inc` | WP2-7 parity 100 项的唯一 case 表与共享断言体（kernel/host 同源） |
-| domains/ | 每域一页 |
+| domains/ | 每域一页：`l0-kernel.md`、`l1-services.md`、`l1d-drivers.md`、`l2-desktop.md`、`l3-apps.md`、`a-platform.md`、`b-lifecycle.md`；`_index.md` 定义 manifest 五元组与**已知漂移** |
+| ../abi/abi-1.0-draft.md | native ABI 1.0 草案（syscall 表/句柄/错误码/指针与长度/版本策略；E4 冻结） |
