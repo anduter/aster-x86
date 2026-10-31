@@ -28,6 +28,7 @@
 #include "ipc.h"
 #include "paging.h"
 #include "serial.h"
+#include "svc_syscall.h"
 #include "thread.h"
 #include "uaccess.h"
 #include "wp23.h"
@@ -305,6 +306,22 @@ void syscall_dispatch(struct syscall_frame *f)
     /* WP2-3：非阻塞 readkey。无键返回 -EAGAIN，用户态自己决定重试/超时。 */
     case NG_SYS_READKEY:
         f->rax = ng_input_readkey();
+        break;
+    /* WP2-5：auth/log/pkg。用户指针在 svc_syscall.c 里经 uaccess 校验。 */
+    case NG_SYS_LOGIN:
+        f->rax = (u64)(i64)ng_sys_login(f->rdi, f->rsi);
+        break;
+    case NG_SYS_DMESG:
+        f->rax = (u64)(i64)ng_sys_dmesg(f->rdi, f->rsi);
+        break;
+    case NG_SYS_LOG_WRITE:
+        f->rax = (u64)(i64)ng_sys_log_write(f->rdi, f->rsi);
+        break;
+    case NG_SYS_PKG_LIST:
+        f->rax = (u64)(i64)ng_sys_pkg_list(f->rdi, f->rsi);
+        break;
+    case NG_SYS_PKG_VERIFY:
+        f->rax = (u64)(i64)ng_sys_pkg_verify(f->rdi);
         break;
     default:
         f->rax = (u64)-1;

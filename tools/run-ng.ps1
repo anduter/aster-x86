@@ -69,6 +69,12 @@
 #   ng: disk fat16 mount ok (clusters=...) / ng: disk file rw ok /
 #   ng: WP2-4 selftest PASS
 #   <用户态> ng: fs disk read ok / write ok / stat ok
+# WP2-5 追加（auth/log/pkg + ring3 svc demo）：
+#   ng: auth users ok (2) / ng: auth login root ok (uid=0) /
+#   ng: auth login alice ok (uid=1000) / ng: auth bad password rejected /
+#   ng: log ring ok (bytes=...) / ng: dmesg syscall ok /
+#   ng: pkg list ok (n=1) / ng: pkg verify ok / ng: WP2-5 selftest PASS
+#   <用户态> ng: ring3 auth ok / ng: ring3 pkg ok / ng: ring3 svc ok
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
 # ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数、
 # FAT16 簇数/链边界/坏 BPB 计数、ATA 型号/扇区数、磁盘 FAT16 簇数。
@@ -199,7 +205,19 @@ if ($Panic) {
         'ng: fs disk read ok',
         'ng: fs disk write ok',
         'ng: fs disk stat ok',
-        'ng: WP2-4 selftest PASS'
+        'ng: WP2-4 selftest PASS',
+        'ng: auth users ok (2)',
+        'ng: auth login root ok (uid=0)',
+        'ng: auth login alice ok (uid=1000)',
+        'ng: auth bad password rejected',
+        'ng: log ring ok',
+        'ng: dmesg syscall ok',
+        'ng: pkg list ok',
+        'ng: pkg verify ok',
+        'ng: ring3 auth ok',
+        'ng: ring3 pkg ok',
+        'ng: ring3 svc ok',
+        'ng: WP2-5 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -228,7 +246,9 @@ if ($Panic) {
         'ng: ata timeout rejected \(n=[0-9]+\)',
         'ng: disk fat16 mount ok \(clusters=[0-9]+\)',
         'ng: disk file rw ok \(bytes=600\)',
-        'ng: ata stat reads=[0-9]+ writes=[0-9]+ timeouts=[0-9]+ errors=[0-9]+'
+        'ng: ata stat reads=[0-9]+ writes=[0-9]+ timeouts=[0-9]+ errors=[0-9]+',
+        'ng: log ring ok \(bytes=[0-9]+\)',
+        'ng: pkg list ok \(n=1\)'
     )
 
     # WP2-3：显示/输入证据行。stdvga 与 -vga none 降级路径各取一套。
@@ -291,6 +311,10 @@ if ($Panic) {
         'ng: ata .* FAIL',
         'ng: disk .* FAIL',
         'ng: WP2-4 selftest FAIL',
+        'ng: auth .* FAIL',
+        'ng: log .* FAIL',
+        'ng: pkg .* FAIL',
+        'ng: WP2-5 selftest FAIL',
         'ng: WP2-3 selftest FAIL',
         'ng: pci vga .* FAIL',
         'ng: vbe .* FAIL',
@@ -371,7 +395,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP2-4) ==='
+Write-Host '=== run-ng (WP2-5) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("disk: {0} ({1} bytes, ide)" -f $disk, (Get-Item -LiteralPath $disk).Length)
 Write-Host ("qemu: {0}" -f $qemu)

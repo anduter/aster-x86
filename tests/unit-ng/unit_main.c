@@ -20,6 +20,9 @@ int test_vfs(void);
 int test_fat16(void);
 int test_ata(void);
 int test_drivers(void);
+int test_auth(void);
+int test_log(void);
+int test_pkg(void);
 
 int ut_checks;
 int ut_failures;
@@ -47,6 +50,9 @@ int main(void)
     test_fat16();
     test_ata();
     test_drivers();
+    test_auth();
+    test_log();
+    test_pkg();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);
     return (ut_failures == 0) ? 0 : 1;

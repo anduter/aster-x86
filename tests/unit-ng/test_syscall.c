@@ -18,9 +18,12 @@
 #include <string.h>
 
 #include "fake_ng_env.h"
+#include "auth.h"
 #include "fs_syscall.h"
 #include "ipc.h"
+#include "log.h"
 #include "paging.h"
+#include "pkg.h"
 #include "serial.h"
 #include "syscall.h"
 #include "test_util.h"
@@ -591,6 +594,95 @@ static void t_dispatch_fs(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* 7. WP2-5：31..35 auth/log/pkg 分发（真实 L1 + 用户指针 uaccess）            */
+/* ------------------------------------------------------------------------- */
+
+static void t_dispatch_svc(void)
+{
+    struct syscall_frame f;
+    struct fs_env env;
+    char *str = (char *)(usize)ubuf;
+    char *msg = (char *)(usize)(ubuf + 128);
+    char *logbuf = (char *)(usize)(ubuf + 256);
+    char *pkgbuf = (char *)(usize)(ubuf + 512);
+
+    reset_env();
+    fake_fs_reset();
+    fake_fs_env(&env);
+    CHECK(fs_sys_init(&env) == VFS_OK);
+    CHECK(auth_init(fs_sys_ctx()) == AUTH_OK);
+    CHECK(log_init() == 0);
+    CHECK(pkg_init(fs_sys_ctx()) == PKG_OK);
+
+    /* 31 login：root -> 0、alice -> 1000、错口令 -> -EACCES。 */
+    strcpy(str, "root");
+    strcpy(str + 16, "root");
+    frame_init(&f, NG_SYS_LOGIN);
+    f.rdi = ubuf;
+    f.rsi = ubuf + 16;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    strcpy(str, "alice");
+    strcpy(str + 16, "alice");
+    frame_init(&f, NG_SYS_LOGIN);
+    f.rdi = ubuf;
+    f.rsi = ubuf + 16;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 1000);
+    strcpy(str + 16, "wrong");
+    frame_init(&f, NG_SYS_LOGIN);
+    f.rdi = ubuf;
+    f.rsi = ubuf + 16;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)AUTH_EACCES);
+    frame_init(&f, NG_SYS_LOGIN);
+    f.rdi = 0x1000;
+    f.rsi = ubuf + 16;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)VFS_EFAULT);
+
+    /* 33 log_write；32 dmesg 读回；长度 0 是 EINVAL。 */
+    strcpy(str, "ring");
+    strcpy(msg, "hello from host");
+    frame_init(&f, NG_SYS_LOG_WRITE);
+    f.rdi = ubuf;
+    f.rsi = ubuf + 128;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    memset(logbuf, 0, 64);
+    frame_init(&f, NG_SYS_DMESG);
+    f.rdi = ubuf + 256;
+    f.rsi = 64;
+    syscall_dispatch(&f);
+    CHECK((int)f.rax > 0);
+    CHECK(strstr(logbuf, "ring: hello from host") != NULL);
+    frame_init(&f, NG_SYS_DMESG);
+    f.rdi = ubuf + 256;
+    f.rsi = 0;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)VFS_EINVAL);
+
+    /* 34 pkg_list -> 1；35 pkg_verify("hello") -> 0。 */
+    memset(pkgbuf, 0, 64);
+    frame_init(&f, NG_SYS_PKG_LIST);
+    f.rdi = ubuf + 512;
+    f.rsi = 128;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 1);
+    CHECK(strstr(pkgbuf, "hello 1.0.0") != NULL);
+    strcpy(str, "hello");
+    frame_init(&f, NG_SYS_PKG_VERIFY);
+    f.rdi = ubuf;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    strcpy(str, "nope");
+    frame_init(&f, NG_SYS_PKG_VERIFY);
+    f.rdi = ubuf;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)PKG_ENOENT);
+}
+
+/* ------------------------------------------------------------------------- */
 
 int test_syscall(void)
 {
@@ -598,6 +690,7 @@ int test_syscall(void)
     t_write_bounds();
     t_dispatch_ipc();
     t_dispatch_fs();
+    t_dispatch_svc();
     t_run_user_args();
     t_run_user_ok();
     t_run_user_bad();

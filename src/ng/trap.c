@@ -13,6 +13,7 @@
 
 #include "gdt.h"
 #include "io.h"
+#include "log.h"
 #include "paging.h"
 #include "serial.h"
 
@@ -156,6 +157,7 @@ int trap_init(void)
 static void panic(struct trap_frame *f, u64 cr2)
 {
     cpu_cli();
+    (void)log_write("panic", "unrecoverable exception");
     serial_puts("PANIC: vec=");
     serial_puthex(f->vector);
     serial_puts(" err=");

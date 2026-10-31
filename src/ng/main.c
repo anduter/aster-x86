@@ -36,6 +36,7 @@
 #include "gdt.h"
 #include "ipc.h"
 #include "ipc_selftest.h"
+#include "log.h"
 #include "mem_selftest.h"
 #include "paging.h"
 #include "sched_selftest.h"
@@ -45,6 +46,27 @@
 #include "types.h"
 #include "wp23.h"
 #include "wp24.h"
+#include "wp25.h"
+
+/* WP2-5：把每个 WP 的 PASS/FAIL 写进 64 KiB log 环（启动关键路径证据）。 */
+static void log_wp(const char *wp, int fails)
+{
+    char msg[32];
+    const char *tail = (fails == 0) ? "PASS" : "FAIL";
+    u32 i = 0;
+    u32 j = 0;
+
+    while (wp[i] != '\0' && i < 20u) {
+        msg[i] = wp[i];
+        i++;
+    }
+    msg[i++] = ' ';
+    while (tail[j] != '\0' && i + 1u < (u32)sizeof(msg)) {
+        msg[i++] = tail[j++];
+    }
+    msg[i] = '\0';
+    (void)log_write("selftest", msg);
+}
 
 void kmain(u64 mb_info)
 {
@@ -53,7 +75,9 @@ void kmain(u64 mb_info)
     int fails;
 
     serial_init();
+    (void)log_init();
     serial_puts("ng: hello 64-bit\r\n");
+    (void)log_write("boot", "ng: hello 64-bit");
     ipc_init();
 
     /* WP1-4 前半：内存图 + PMM。必须在建页表之前（页表页从 PMM 来）。 */
@@ -61,6 +85,7 @@ void kmain(u64 mb_info)
 
     fails = mem_fails;
     fails += pg_init();
+    (void)log_write("boot", "paging 4-level ok");
 
     serial_puts("ng: WP1-2 selftest ");
     if (fails == 0) {
@@ -70,6 +95,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP1-2", fails);
 
     if (fails == 0) {
         gdt_init();
@@ -92,6 +118,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP1-3", fails);
 
     /* WP1-4 后半：heap 与页表池。PMM 没起来就跳过（避免用 0 地址扩堆）。 */
     late_fails = 0;
@@ -112,6 +139,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP1-4", fails);
 
     /* WP1-5：线程模型 / 上下文切换 / 调度器。依赖 heap（栈）与 PMM，且
      * 调度点全是显式调用（协作式），前面有失败就不冒险进调度。 */
@@ -130,6 +158,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP1-5", fails);
 
     /* WP1-6：句柄表 + 端口 + 阻塞/超时/close 唤醒 + 用户指针校验。
      * 需要 WP1-5 的调度器（阻塞用 thread_sleep，唤醒用 thread_wake）。 */
@@ -148,6 +177,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP1-6", fails);
 
     /* WP2-1：VFS 核心 + ramfs。数据页走 PMM（fs_env 注入），不需要 heap；
      * 排在 ELF64/ring3 之前，因为 ring3 demo 要调 20..27 的 fs syscall。 */
@@ -166,6 +196,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP2-1", fails);
 
     /* WP2-2：嵌入的 1.44MB FAT16 镜像 -> PMM RAM 盘 -> /mnt/fat。ring3 demo
      * 要读 /mnt/fat/HELLO.TXT、建 NEW.TXT，所以排在 ELF64/ring3 之前。 */
@@ -184,6 +215,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP2-2", fails);
 
     /* WP2-4：ATA PIO + 真实磁盘镜像上的 FAT16（/mnt/disk）。ring3 demo 要读
      * HELLO.TXT、写 DISK.TXT，所以排在 ELF64/ring3 之前。 */
@@ -202,6 +234,27 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP2-4", fails);
+
+    /* WP2-5：auth/log/pkg（L1）。auth_init 往 ramfs 种 /etc/passwd，pkg_init
+     * 种 /System/Packages/hello/1.0.0；31..35 的成功路径用一页临时 U=1 映射
+     * 走真实 uaccess。它不依赖显示/输入，但排在 ring3 前（ring3 svc demo 用）。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += wp25_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP2-5 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP2-5 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+    log_wp("WP2-5", fails);
 
     /* WP2-3：PCI/VBE/帧缓冲控制台 + PS/2 键盘。显示不可用时回退 VGA 文本；
      * 键盘/输入自检独立于显示。ring3 demo 的 readkey 依赖它，所以排在
@@ -221,6 +274,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP2-3", fails);
 
     /* WP1-7：ELF64 加载器 + ring3 hello。需要 PMM/heap/调度器（per-thread
      * syscall 内核栈用一个真实线程验证），所以排在最后。 */
@@ -239,6 +293,7 @@ void kmain(u64 mb_info)
         serial_putdec((u64)fails);
         serial_puts(")\r\n");
     }
+    log_wp("WP1-7", fails);
 
     for (;;) {
         /* idle 点轮询 PS/2：没有 IRQ 时也不会把键盘字节丢在控制器里。 */

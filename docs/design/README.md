@@ -14,16 +14,16 @@
 - main：冻结在 69ab006（旧 32 位，305/305）。
 - 开发分支：ng（64 位内核）。
 - 当前阶段：**E2 进行中，WP2-1（VFS/ramfs）+ WP2-2（FAT16）+ WP2-3（显示/输入）
-  + WP2-4（ATA PIO 块设备 + 真实磁盘 FAT16）完成**。
+  + WP2-4（ATA PIO 块设备 + 真实磁盘 FAT16）+ WP2-5（auth/log/pkg）完成**。
 - 门禁：`tools/ci-ng.ps1` 一条命令跑 check-domains / check-deps / unit-ng /
   build-ng / run-ng / 旧 32 位 `build.ps1 -Test`，全绿输出
   `=== NG CI PASS ===`（`-Quick` 跳 QEMU/legacy）；CI 见
   `.github/workflows/ng.yml`。
-- 出口证据：ring3 `ng: ring3 hello` + VFS/FAT/disk demo + `ng: ring3 input ok`；
-  host 单测 **2522 checks, 0 failures**；旧 32 位 305/305；check-domains /
-  check-deps 0 违规（`docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、`ng-WP2-3.md`、
-  `ng-WP2-4.md`）。
-- 下一步：E2 / WP2-5（auth/log/pkg）或 WP2-6（shell），见 evolution.md。
+- 出口证据：ring3 `ng: ring3 hello` + VFS/FAT/disk/svc demo +
+  `ng: ring3 input ok`；host 单测 **2791 checks, 0 failures**；旧 32 位
+  305/305；check-domains / check-deps 0 违规（`docs/claims/ng-WP2-1.md`、
+  `ng-WP2-2.md`、`ng-WP2-3.md`、`ng-WP2-4.md`、`ng-WP2-5.md`）。
+- 下一步：E2 / WP2-6（shell）与 WP2-7（parity），见 evolution.md。
 
 ## 执行规则
 
@@ -50,4 +50,5 @@
 | fat16-ng.md | WP2-2 块设备抽象 / FAT16 / 镜像与 RAM 盘 |
 | display-input-ng.md | WP2-3 PCI/VBE/帧缓冲控制台 / VGA 文本兜底 / PS/2 / readkey |
 | block-ng.md | WP2-4 ATA PIO / blk_env 适配 / 8MB 磁盘镜像 / /mnt/disk |
+| auth-log-pkg-ng.md | WP2-5 auth（salt+SHA-256 迭代）/ 64 KiB log 环 / pkg 清单与校验 / syscall 31..35 |
 | domains/ | 每域一页 |

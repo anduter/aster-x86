@@ -75,9 +75,9 @@ E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP
 | WP2-6 | shell 移植 | src/apps | 64 位 shell 可交互 |
 | WP2-7 | parity 套件 100 项 | tests/ | 100 项通过 |
 
-E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4 完成**（tag 待 E2 收口时打）。
-`src/services/fs` 成为第一个真正落地的 L1 服务域；`src/drivers` 成为第一个
-L1D 设备域：
+E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5 完成**（tag 待 E2
+收口时打）。`src/services/fs` 成为第一个真正落地的 L1 服务域；`src/drivers`
+成为第一个 L1D 设备域；`src/services/{auth,log,pkg}` 补齐 L1 认证/日志/包最小集：
 
 - VFS 核心（挂载/节点/路径/fd/权限，负 errno）+ ramfs（节点/目录项/页链，
   1 MiB/文件）+ syscall 20..27（用户指针经 uaccess）+ ring3 demo
@@ -114,14 +114,31 @@ L1D 设备域：
   `ata write ok` / `ata timeout rejected` / `disk fat16 mount ok (clusters=8143)` /
   `disk file rw ok` / `ng: WP2-4 selftest PASS`；run-ng **80 条期望行 + 34 条正则**
   （`-Fallback` 为 79/28）；
+- WP2-5 auth/log/pkg（`src/services/auth`、`log`、`pkg`，L1）：
+  - auth：root(0)/alice(1000)，16 字节 salt + SHA-256 **4096 轮**迭代（自实现，
+    不依赖内核/OpenSSL），`auth_init` 种入 `/etc/passwd`
+    （`name:uid:salt_hex:hash_hex:iterations`），`auth_login` 返回 uid /
+    -ENOENT / -EACCES，连续 5 次失败锁定；
+  - log：64 KiB 按行环形缓冲（满时丢最旧整行），`log_write(tag,msg)` /
+    `log_read(buf,max)`；内核启动/每个 WP 汇总/panic 写入 log；
+  - pkg：ramfs `/System/Packages/hello/1.0.0/{manifest,bin/hello}` 种子，
+    严格 key=value 清单（name/version/type/entry/sha256），`pkg_list` /
+    `pkg_verify`（重算文件 SHA-256），不做签名/RSA（D1）；
+  - syscall **31 login / 32 dmesg / 33 log_write / 34 pkg_list / 35 pkg_verify**
+    （用户指针全部走 uaccess；内核自检用临时 U=1 页跑成功路径，ring3 demo
+    再走一遍），证据行 `ng: auth users ok (2)` / `ng: auth login root ok
+    (uid=0)` / `ng: auth login alice ok (uid=1000)` / `ng: auth bad password
+    rejected` / `ng: log ring ok (bytes=...)` / `ng: dmesg syscall ok` /
+    `ng: pkg list ok (n=1)` / `ng: pkg verify ok` / `ng: WP2-5 selftest PASS`；
 - host 单测 1085 → 1438（WP2-1）→ 1824（WP2-2）→ 2290（WP2-3，+466）→
-  **2522 checks**（WP2-4 +232，含 `tests/unit-ng/test_ata.c` 的寄存器/LBA
-  编码、BSY/DRQ/ERR/超时状态机、ata_blk_env、fake ATA 盘上的 FAT16 读写）；
+  2522（WP2-4 +232）→ **2791 checks**（WP2-5 +269，含 SHA-256 标准向量/1M
+  字节、auth 登录/锁定、log 精确 64 KiB 溢出、pkg 清单解析/哈希/篡改）；
   旧 32 位 305/305；
 - 设计/限制见 `docs/design/vfs-ng.md`、`fat16-ng.md`、`display-input-ng.md`、
-  `block-ng.md`，证据见 `docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、
-  `ng-WP2-3.md`、`ng-WP2-4.md`。块设备（WP2-4）完成，shell（WP2-6）与
-  auth/log/pkg（WP2-5）未动；fb/输入不做 IRQ/鼠标（E3/C 之后）。
+  `block-ng.md`、`auth-log-pkg-ng.md`，证据见 `docs/claims/ng-WP2-1.md`、
+  `ng-WP2-2.md`、`ng-WP2-3.md`、`ng-WP2-4.md`、`ng-WP2-5.md`。
+  auth/log/pkg 完成；下一步 shell（WP2-6）与 parity（WP2-7）；fb/输入不做
+  IRQ/鼠标（E3/C 之后）。
 
 ### E3
 

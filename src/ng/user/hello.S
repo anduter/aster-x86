@@ -332,6 +332,83 @@ _start:
     jne .Lfail
     PRINT_MSG disk_msg_stat, disk_msg_stat_len
 
+    # ---- WP2-5：auth/login（31）、log（32/33）、pkg（34/35） --------------
+    # 31 login("root","root") -> uid 0
+    leaq svc_root(%rip), %rdi
+    leaq svc_root(%rip), %rsi
+    movl $31, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    # 31 login("alice","alice") -> uid 1000
+    leaq svc_alice(%rip), %rdi
+    leaq svc_alice(%rip), %rsi
+    movl $31, %eax
+    syscall
+    cmpq $1000, %rax
+    jne .Lfail
+    # 31 login("root","wrong") -> -EACCES(-13)
+    leaq svc_root(%rip), %rdi
+    leaq svc_wrong(%rip), %rsi
+    movl $31, %eax
+    syscall
+    cmpq $-13, %rax
+    jne .Lfail
+    PRINT_MSG svc_msg_login, svc_msg_login_len
+
+    # 33 log_write("ring", "hello from ring3") -> 0
+    leaq svc_tag(%rip), %rdi
+    leaq svc_logmsg(%rip), %rsi
+    movl $33, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+
+    # 32 dmesg(buf, 256) -> >0；dmesg 返回最近的行，最后一行必须是刚写的。
+    leaq svc_buf(%rip), %rdi
+    movl $256, %esi
+    movl $32, %eax
+    syscall
+    testq %rax, %rax
+    jle .Lfail
+    movq %rax, %rdx
+    leaq svc_buf(%rip), %rdi
+    addq %rdx, %rdi
+    subq $svc_logline_len, %rdi
+    leaq svc_logline(%rip), %rsi
+    movl $svc_logline_len, %ecx
+    cld
+    repe cmpsb
+    jne .Lfail
+
+    # 34 pkg_list(buf, 256) -> 1，内容 "hello 1.0.0\n"
+    leaq svc_buf(%rip), %rdi
+    movl $256, %esi
+    movl $34, %eax
+    syscall
+    cmpq $1, %rax
+    jne .Lfail
+    leaq svc_buf(%rip), %rdi
+    leaq svc_pkgline(%rip), %rsi
+    movl $svc_pkgline_len, %ecx
+    cld
+    repe cmpsb
+    jne .Lfail
+
+    # 35 pkg_verify("hello") -> 0；35 pkg_verify("nope") -> -ENOENT(-2)
+    leaq svc_hello(%rip), %rdi
+    movl $35, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    leaq svc_nope(%rip), %rdi
+    movl $35, %eax
+    syscall
+    cmpq $-2, %rax
+    jne .Lfail
+    PRINT_MSG svc_msg_pkg, svc_msg_pkg_len
+    PRINT_MSG svc_msg_ok, svc_msg_ok_len
+
     # ---- WP2-3：readkey（30）非阻塞轮询 -----------------------------------
     # 先打印 ready，run-ng 用 QMP input-send-event 注入 'a'；没有注入时走超时分支。
     # 返回 (flags<<24)|(ascii<<16)|scancode；-EAGAIN(-11) 继续重试。
@@ -420,6 +497,35 @@ disk_msg_write:
 disk_msg_stat:
     .ascii "ng: fs disk stat ok (size=6)\r\n"
     .set disk_msg_stat_len, . - disk_msg_stat
+svc_msg_login:
+    .ascii "ng: ring3 auth ok\r\n"
+    .set svc_msg_login_len, . - svc_msg_login
+svc_msg_pkg:
+    .ascii "ng: ring3 pkg ok\r\n"
+    .set svc_msg_pkg_len, . - svc_msg_pkg
+svc_msg_ok:
+    .ascii "ng: ring3 svc ok\r\n"
+    .set svc_msg_ok_len, . - svc_msg_ok
+svc_root:
+    .asciz "root"
+svc_alice:
+    .asciz "alice"
+svc_wrong:
+    .asciz "wrong"
+svc_tag:
+    .asciz "ring"
+svc_logmsg:
+    .asciz "hello from ring3"
+svc_logline:
+    .ascii "ring: hello from ring3\n"
+    .set svc_logline_len, . - svc_logline
+svc_hello:
+    .asciz "hello"
+svc_nope:
+    .asciz "nope"
+svc_pkgline:
+    .ascii "hello 1.0.0\n"
+    .set svc_pkgline_len, . - svc_pkgline
 input_ready_msg:
     .ascii "ng: ring3 input ready\r\n"
     .set input_ready_msg_len, . - input_ready_msg
@@ -476,3 +582,5 @@ fs_statbuf:
     .zero 24
 fs_dirents:
     .zero 320
+svc_buf:
+    .zero 512

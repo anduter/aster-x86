@@ -28,6 +28,10 @@
 #   - src/drivers/block/ata.c + src/ng/ata_blk.c : WP2-4 的 ATA PIO 驱动与
 #                blk_env 适配（寄存器/LBA/BSY-DRQ-ERR-超时状态机、FAT16 在
 #                fake ATA 盘上读写，tests/unit-ng/test_ata.c）
+#   - src/services/auth/{sha256,auth}.c + log/log.c + pkg/pkg.c +
+#                src/ng/svc_syscall.c : WP2-5 的 SHA-256/登录/64KB log 环/
+#                包清单校验与 31..35 胶水（test_auth/test_log/test_pkg +
+#                test_syscall 的 SVC 分发用例）
 # 这些模块不 include 串口/端口 IO，所以能脱离内核直接跑。
 #
 # 输出必须包含 `N checks, M failures`；M=0 且 N>=20 才算 PASS。
@@ -80,9 +84,14 @@ $sources = @(
     'src/ng/uaccess.c',
     'src/ng/syscall.c',
     'src/ng/fs_syscall.c',
+    'src/ng/svc_syscall.c',
     'src/services/fs/vfs.c',
     'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',
+    'src/services/auth/sha256.c',
+    'src/services/auth/auth.c',
+    'src/services/log/log.c',
+    'src/services/pkg/pkg.c',
     'src/ng/ata_blk.c',
     'src/drivers/block/ata.c',
     'src/drivers/pci/pci.c',
@@ -104,7 +113,10 @@ $sources = @(
     'tests/unit-ng/test_vfs.c',
     'tests/unit-ng/test_fat16.c',
     'tests/unit-ng/test_ata.c',
-    'tests/unit-ng/test_drivers.c'
+    'tests/unit-ng/test_drivers.c',
+    'tests/unit-ng/test_auth.c',
+    'tests/unit-ng/test_log.c',
+    'tests/unit-ng/test_pkg.c'
 )
 $srcPaths = @()
 foreach ($s in $sources) { $srcPaths += (Join-Path $Repo $s) }
@@ -114,6 +126,9 @@ $ccArgs = @(
     '-DNG_HOST_TEST=1',
     '-I', (Join-Path $Repo 'src/ng'),
     '-I', (Join-Path $Repo 'src/services/fs/include'),
+    '-I', (Join-Path $Repo 'src/services/auth/include'),
+    '-I', (Join-Path $Repo 'src/services/log/include'),
+    '-I', (Join-Path $Repo 'src/services/pkg/include'),
     '-I', (Join-Path $Repo 'src/drivers/include'),
     '-I', (Join-Path $Repo 'tests/unit-ng'),
     '-o', $exe

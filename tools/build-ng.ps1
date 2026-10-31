@@ -1,9 +1,10 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP2-4: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
+# build-ng.ps1 - ng WP2-5: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
 #               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello
 #               + VFS/ramfs（L1 服务域）+ FAT16（L1，RAM 盘镜像）+
 #               PCI/VBE/帧缓冲控制台 + PS/2 键盘（L1D 设备域）+
-#               ATA PIO 块设备 + 真实磁盘镜像上的 FAT16（L1D/L0，WP2-4））
+#               ATA PIO 块设备 + 真实磁盘镜像上的 FAT16（L1D/L0，WP2-4）+
+#               auth/log/pkg（L1，WP2-5））
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
@@ -21,7 +22,11 @@
 #       src/ng/wp23_selftest.c（WP2-3：PCI/VBE/fb/PS2 接线 + 自检）、
 #       src/ng/ata_blk.c + src/ng/wp24_selftest.c（WP2-4：ATA -> blk_env 适配
 #         + PCI PIIX3/真盘挂载自检）、src/drivers/block/ata.c（L1D：ATA PIO）、
+#       src/ng/svc_syscall.c + src/ng/wp25_selftest.c（WP2-5：31..35 胶水 +
+#         auth/log/pkg 自检）、
 #       src/services/fs/vfs.c + ramfs.c + fat16.c（L1：VFS/ramfs/FAT16）、
+#       src/services/auth/{sha256,auth}.c + log/log.c + pkg/pkg.c（L1：
+#         SHA-256 / 用户登录 / 64KB log 环 / 包清单与校验）、
 #       src/drivers/pci/pci.c + video/vbe.c + video/fb.c + video/font8x16.c
 #         + video/vga_text.c + input/ps2.c（L1D：PCI/VBE/帧缓冲/PS2）、
 #       src/ng/main.c（64 位 C 入口）、src/ng/link.ld。
@@ -87,7 +92,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP2-3) ==='
+Write-Host '=== build-ng (WP2-5) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -104,6 +109,9 @@ $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-fno-pic', '-fno-pie', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
     '-I', $srcDir,
     '-I', (Join-Path $Repo 'src/services/fs/include'),
+    '-I', (Join-Path $Repo 'src/services/auth/include'),
+    '-I', (Join-Path $Repo 'src/services/log/include'),
+    '-I', (Join-Path $Repo 'src/services/pkg/include'),
     '-I', (Join-Path $Repo 'src/drivers/include'),
     '-c')
 if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
@@ -305,9 +313,12 @@ Write-Host ''
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'main.c')
-# L1 服务域源码（相对仓库根；-I src/ng 与 -I src/services/fs/include 已加）。
-$serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c', 'src/services/fs/fat16.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'main.c')
+# L1 服务域源码（相对仓库根；-I src/ng 与各 src/services/*/include 已加）。
+$serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c',
+    'src/services/fs/fat16.c',
+    'src/services/auth/sha256.c', 'src/services/auth/auth.c',
+    'src/services/log/log.c', 'src/services/pkg/pkg.c')
 # L1D 设备域源码（相对仓库根；-I src/drivers/include 已加）。
 $driverSources = @('src/drivers/pci/pci.c', 'src/drivers/video/vbe.c',
     'src/drivers/video/fb.c', 'src/drivers/video/font8x16.c',
