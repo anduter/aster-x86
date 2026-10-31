@@ -20,7 +20,7 @@
 | E1 64 位核心 | boot、long mode、页表、trap、syscall、PMM/heap、调度、IPC、ELF64 | **6 周（硬上限）** | ring3 hello + host 单测 |
 | E2 服务/驱动移植 | VFS/ramfs、FAT16、fb/input/blk、auth/log/pkg、shell | 8 周 | 64 位 shell + 100 项 parity |
 | E3 桌面会话 S1 | display server、shell/WM、session manager、SDK alpha、demo | 8 周 | ✅ 杀 shell 应用不死（tag ng-e3；WM 死循环为已知限制） |
-| E4 D0 收口 | 故障注入、外部开发者测试、ABI 冻结、文档/发布 | 4 周 | D0 出口（见 architecture.md） |
+| E4 D0 收口 | 故障注入、外部开发者测试、ABI 冻结、文档/发布 | 4 周 | ✅ D0 出口（tag ng-e4） |
 | E5 D1 | POSIX Profile、TLS/HTTP、浏览器 B0、真实硬件、8h 浸泡 | 按 D1 计划 | D1 出口 |
 
 E1 是硬时间盒：6 周内没跑到 ring3，停下来重新评估（增加移植、缩范围或调整架构），不要无限期调页表。
@@ -308,9 +308,9 @@ alpha 骨架升到 **display 协议 v3 + session 通道**：
 | WP4-1 | ABI 1.0 冻结文档 | docs/abi | 版本/句柄/错误码定稿 |
 | WP4-2 | 外部开发者测试 | docs/、sdk/ | 一天内写出 GUI app |
 | WP4-3 | D0 文档 + 发布 | docs/、dist/ | D0 可交付 |
-| WP4-4 | 1h smoke（D1 再 8h） | tools/ | 无 panic/停滞 |
+| WP4-4 | 1h smoke（D1 再 8h） | tools/ | ✅ 60.17min / 0 panic / 6/6 cmds |
 
-E4 进度（2026-10-31）：**WP4-1、WP4-2、WP4-3 完成；E4 剩 WP4-4**。
+E4 进度（2026-10-31）：**WP4-1…WP4-4 全部完成；D0 关闭，tag `ng-e4`**。
 
 - **WP4-1 完成（ABI 1.0 冻结，v1.0.0）**：`docs/abi/abi-1.0.h` 机器可读头
   （29 个调用号、28 个错误码、64 个关键常量、4 个结构体大小）+
@@ -329,7 +329,7 @@ E4 进度（2026-10-31）：**WP4-1、WP4-2、WP4-3 完成；E4 剩 WP4-4**。
   `RELEASE-NOTES.md`、`SHA256SUMS`）并逐文件 SHA-256 自检；只本地，
   不 push/签名/打 tag。说明见 `docs/release/d0.md`，证据见
   `docs/claims/ng-WP4-3.md`。
-- **未完成**：WP4-4（1 小时 smoke，无 panic/停滞）尚无证据；D0 总出口按
+- **已完成**：WP4-4（1 小时 smoke，无 panic/停滞）PASS；D0 总出口按
   `architecture.md` §10 仍待这一项收口。E4 状态：**进行中（3/4 WP 完成）**。
 - 冻结后仍保留的已知缺口（不阻塞 D0，D1 前处理）：未分配号 `ENOSYS`、
   IPC 时间单位、cap/revoke、每进程 uid/fd、用户态 fault 隔离、运行时 ABI

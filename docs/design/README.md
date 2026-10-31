@@ -16,7 +16,7 @@
 - main：**代码**冻结在 69ab006（旧 32 位，305/305）；main 顶端 `d62bccb` 是
   7 域架构基线的设计文档提交，不含功能改动。
 - 开发分支：ng（64 位内核）。阶段 tag：`ng-e1`、`ng-e2`、`ng-e3`。
-- 当前阶段：**E4 收口（D0）**。
+- 当前阶段：**E4 完成（D0）**，tag `ng-e4`。
   - **WP4-1 完成**：native ABI **1.0 冻结**（v1.0.0）——
     `docs/abi/abi-1.0.md` 定稿 + `docs/abi/abi-1.0.h` 机器可读头；
     调用号/错误码/四类命名空间/上限/版本策略冻结，15 项冻结前待决项给出
@@ -30,7 +30,7 @@
     `abi-check` + `build-ng`，生成 `dist-ng/release/d0/`（ELF、disk.img、
     SDK 头、示例、ABI 1.0、文档、`RELEASE-NOTES.md`、`SHA256SUMS`）并逐文件
     校验；只本地，不 push、不签名、不打 tag。说明见 `../release/d0.md`。
-  - **E4 未整体关闭**：WP4-4（1 小时 smoke）尚无证据；D0 总出口以
+  - **E4 已关闭（4/4）**：WP4-4 1h smoke PASS（60.17min、0 panic、6/6 命令响应）；D0 总出口以
     `architecture.md` §10 为准。
 - E1/E2/E3 出口（已完成）：
   - E1：64 位 long mode、页表、trap/syscall、PMM/heap、调度、IPC/句柄、
@@ -47,7 +47,7 @@
     64 constants / 4 struct sizes）。
   - `tools/sdk-check.ps1`：SDK 头/示例语法 + 237 host checks。
   - `tools/release-ng.ps1`：D0 发布包 + SHA256 自检。
-- 下一步：**WP4-4 1h smoke**（无 panic/停滞），然后 E4 出口评审；
+- 下一步：D1（POSIX Profile、TLS/HTTP、真实硬件、8h 浸泡）；
   D1 见 `evolution.md`。
 - ABI 规范：冻结版 `../abi/abi-1.0.md`；机器头 `../abi/abi-1.0.h`；
   历史草案 `../abi/abi-1.0-draft.md`（已被取代，仅供追溯）。
