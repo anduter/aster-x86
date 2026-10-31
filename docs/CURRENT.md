@@ -20,7 +20,7 @@
 ## 3. 当前门禁
 
 - **8h：证据未闭合**。`ng-d0-final`（a44e896）上的 8h 于 21:04 起跑（QEMU 3420），尚无 8h 报告/claim；完成前 D0 只能写“**功能关闭、验收未闭合**”。
-- `ci-ng -Quick`：**干净 HEAD `cc3f231` 上 PASS**（4 passed / 3 skipped，20.5s，临时 worktree 已验证）；当前工作树含他人 WIP（`main.c`/`sched.c`/`syscall.*`/`ps2.c`/`displayd.c`），WIP 未提交前工作树门禁归 WIP 所有者。
+- `ci-ng -Quick`：**干净 HEAD `7db7ac8` 上 PASS**（4 passed / 3 skipped，20.2s，临时 worktree 已验证）；当前工作树含他人 WIP（`main.c`/`sched.c`/`syscall.*`/`ps2.c`/`displayd.c`），WIP 未提交前工作树门禁归 WIP 所有者。
 - tag：`ng-e1`…`ng-e4`、`ng-d0-final`。
 
 ## 4. 禁止事项
