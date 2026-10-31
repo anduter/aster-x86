@@ -793,7 +793,20 @@ static void d_handle_register_hotkey(const struct ds_msg *m, u32 from)
     g_hotkey_client = from;
     g_hotkey_surface = surface;
     g_hotkey_key = key;
-    d_reply_status(from, DS_MSG_REGISTER_HOTKEY, DS_OK, m->seq);
+    /*
+     * v3 审计加固（第二轮）：**不回 ack**。
+     *
+     * 以前每次注册都 d_reply_status(from, ...) 回一条消息。看起来无害，但
+     * 客户端的端口只有 16 深：一个客户端连着发 N 条 REGISTER_HOTKEY 却不读
+     * 回复，就能把它自己（或者 —— 因为 IPC 的 `from` 是发送方自己填的，
+     * 内核只校验 ticket 存活 —— **别人的**）端口队列塞满；之后 displayd 给
+     * 那个端口发的 CREATE_REPLY / LIST_REPLY 会被非阻塞 port_reply 直接丢掉，
+     * 客户端的所有请求静默超时。
+     *
+     * 协议本来就没有 REGISTER_HOTKEY 的回复约定（ds_protocol.h 只定义
+     * "注册全局热键"；wm.c 发了就走，从不读回复），所以直接去掉 ack：
+     * 最便宜的队列投毒原语没了。
+     */
     g_hotkey_ok++;
     if (g_hotkey_ok <= D_MAX_PRINTS) {
         d_put("ng: hotkey registered ok (surface=");
