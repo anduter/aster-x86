@@ -519,6 +519,31 @@ static int child_main(long argc, char **argv)
         (void)sys3(SYS_WAIT, (i64)gpid, (i64)(usize)&gst, 0); /* 阻塞 */
         put_str("AUDIT: child waitblock returned (BUG)\n");
         return 0;
+    } else if (str_eq(mode, "selfkillfb")) {
+        u64 va = 0;
+        struct audit_fb_info info;
+        i64 rcm = sys3(SYS_FB_MAP, (i64)(usize)&va, (i64)(usize)&info, 0);
+
+        put_str("AUDIT: child selfkillfb map=");
+        (void)put_s64(num, (u32)sizeof(num), rcm);
+        put_str(num);
+        put_str("\n");
+        (void)sys3(SYS_KILL, (i64)sys3(SYS_GETPID, 0, 0, 0), 9, 0);
+        return 3;
+    } else if (str_eq(mode, "selfkillshm")) {
+        u64 va = 0;
+        u32 hh = 0;
+        i64 rcm = sys3(SYS_SHM_ALLOC, 4, (i64)(usize)&va, (i64)(usize)&hh);
+
+        if (rcm == 0) {
+            *(volatile u32 *)(usize)va = 0x1234u;
+        }
+        put_str("AUDIT: child selfkillshm alloc=");
+        (void)put_s64(num, (u32)sizeof(num), rcm);
+        put_str(num);
+        put_str("\n");
+        (void)sys3(SYS_KILL, (i64)sys3(SYS_GETPID, 0, 0, 0), 9, 0);
+        return 3;
     } else if (str_eq(mode, "sender") && argc >= 7) {
         u32 ticket = parse_u32(argv[4]);
         u32 count = parse_u32(argv[5]);
@@ -1633,6 +1658,102 @@ static void test_ipc2(void)
         }
     }
 
+    /*
+     * 深队列：depth=64、每条 4112 字节（堆上约 257 KiB）。close 必须释放
+     * 全部排队消息；同一槽位立刻重建再填满，验证 kfree 后复用不会坏堆。
+     */
+    {
+        struct audit_hdr *hbig = (struct audit_hdr *)(void *)g_big;
+        u32 cycle;
+
+        for (i = 0; i < 4112u; i++) {
+            g_big[i] = 0;
+        }
+        hbig->type = 0xD1;
+        hbig->len = 4096;
+        hbig->from = 0;
+        hbig->flags = 0;
+        for (cycle = 0; cycle < 2u; cycle++) {
+            i64 p = sys3(SYS_PORT_CREATE, 64, 0, 0);
+            u32 k;
+            u32 sent = 0;
+
+            expect_true("ipc2.deep_create", p > 0, p);
+            if (p <= 0) {
+                break;
+            }
+            for (k = 0; k < 64u; k++) {
+                if (sys4(SYS_PORT_SEND, p, (i64)(usize)g_big, 4112, 0) != 0) {
+                    break;
+                }
+                sent++;
+            }
+            expect("ipc2.deep_fill64", (i64)sent, 64);
+            expect("ipc2.deep_eagain",
+                   sys4(SYS_PORT_SEND, p, (i64)(usize)g_big, 4112, 0),
+                   E_AGAIN);
+            expect("ipc2.deep_recv1",
+                   sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, 4112, 0), 4112);
+            expect("ipc2.deep_close", sys3(SYS_PORT_CLOSE, p, 0, 0), 0);
+        }
+        put_str("AUDIT: info ipc deep queue recycle ok\n");
+    }
+
+    /*
+     * waiter/port/thread 池饱和：10 个 block 子进程各自建端口并阻塞 recv。
+     * 允许的结果：0x109（真阻塞后被 kill）/2（recv 立刻 EAGAIN）/
+     * 1（端口池满，子进程建端口失败）。全部 wait 后系统必须仍可用。
+     */
+    {
+        u32 wp[12];
+        u32 wmade = 0;
+        u32 wblocked = 0;
+        u32 weagain = 0;
+        u32 wother = 0;
+
+        av[0] = g_self;
+        av[1] = (char *)"child";
+        av[2] = (char *)"66";
+        av[3] = (char *)"block";
+        av[4] = NULL;
+        for (i = 0; i < 10u; i++) {
+            pid = 0;
+            rc = spawn_argv(av, &pid);
+            if (rc != 0) {
+                break;
+            }
+            wp[wmade++] = pid;
+        }
+        expect_true("ipc2.wsaturate_made", wmade >= 1, (i64)wmade);
+        sleep_ticks(300000000);
+        for (i = 0; i < wmade; i++) {
+            (void)sys3(SYS_KILL, (i64)wp[i], 9, 0);
+        }
+        for (i = 0; i < wmade; i++) {
+            st = -1;
+            expect("ipc2.wsaturate_wait", wait_status((i64)wp[i], &st), 0);
+            if (st == 0x109) {
+                wblocked++;
+            } else if (st == 2) {
+                weagain++;
+            } else {
+                wother++;
+            }
+        }
+        expect_true("ipc2.wsaturate_classified",
+                    wblocked + weagain + wother == wmade, (i64)wother);
+        put_str("AUDIT: info ipc waiter pool ok blocked=");
+        (void)put_s64(ticket, (u32)sizeof(ticket), (i64)wblocked);
+        put_str(ticket);
+        put_str(" eagain=");
+        (void)put_s64(ticket, (u32)sizeof(ticket), (i64)weagain);
+        put_str(ticket);
+        put_str(" other=");
+        (void)put_s64(ticket, (u32)sizeof(ticket), (i64)wother);
+        put_str(ticket);
+        put_str("\n");
+    }
+
     /* 端口池：持满后 ENOSPC；全部关闭后能重建。 */
     {
         i64 held[32];
@@ -1673,6 +1794,58 @@ static void test_fs2(void)
 
     section("fs2");
 
+    /*
+     * ramfs 节点池余量：启动内容（/bin 7 个 ELF + /System + /run）已占
+     * 30/32 个节点，原实现 ring3 只剩 1~2 个 O_CREAT 余量。这里创建到
+     * ENOSPC 记录余量，再全部删除，保证后续用例有干净的工作区。
+     */
+    {
+        u32 made = 0;
+        u32 k;
+
+        rc = 0;
+        for (k = 0; k < 80u; k++) {
+            char nm[16];
+
+            nm[0] = '/';
+            nm[1] = 't';
+            nm[2] = 'm';
+            nm[3] = 'p';
+            nm[4] = '/';
+            nm[5] = 'h';
+            nm[6] = (char)('a' + (int)(k % 26u));
+            nm[7] = (char)('a' + (int)((k / 26u) % 26u));
+            nm[8] = '\0';
+            fd = open_file(nm, O_CREAT | O_RDWR, 0644);
+            if (fd < 0) {
+                rc = fd;
+                break;
+            }
+            (void)sys3(SYS_CLOSE, fd, 0, 0);
+            made++;
+        }
+        expect("fs2.ramfs_node_enospc", rc, E_NOSPC);
+        expect_true("fs2.ramfs_headroom", made >= 2, (i64)made);
+        for (k = 0; k < made; k++) {
+            char nm[16];
+
+            nm[0] = '/';
+            nm[1] = 't';
+            nm[2] = 'm';
+            nm[3] = 'p';
+            nm[4] = '/';
+            nm[5] = 'h';
+            nm[6] = (char)('a' + (int)(k % 26u));
+            nm[7] = (char)('a' + (int)((k / 26u) % 26u));
+            nm[8] = '\0';
+            (void)sys3(SYS_UNLINK, (i64)(usize)nm, 0, 0);
+        }
+        (void)put_s64((char *)(void *)g_buf, 24, (i64)made);
+        put_str("AUDIT: info ramfs headroom=");
+        put_str((const char *)(void *)g_buf);
+        put_str("\n");
+    }
+
     /* fd 表上限（VFS_FD_MAX=16）：填满后 EMFILE，spawn 也不能再 open ELF。 */
     rc = 0;
     for (i = 0; i < 20u; i++) {
@@ -1706,6 +1879,58 @@ static void test_fs2(void)
                sys3(SYS_WRITE_FD, fd, (i64)(usize)g_buf, 4), -9);
         (void)sys3(SYS_CLOSE, fd, 0, 0);
     }
+
+    /*
+     * fd 表满时 open() 失败必须无副作用：不截断、不创建文件。
+     * 旧实现先做 O_TRUNC/创建，后分配 fd —— EMFILE 时文件已被破坏/残留。
+     */
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-trunc", 0, 0);
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-leak", 0, 0);
+    fd = open_file("/tmp/audit-trunc", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    expect_true("fs2.trunc_seed", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        g_buf[0] = 'h';
+        g_buf[1] = 'e';
+        g_buf[2] = 'l';
+        g_buf[3] = 'l';
+        g_buf[4] = 'o';
+        expect("fs2.trunc_seed_write",
+               sys3(SYS_WRITE_FD, fd, (i64)(usize)g_buf, 5), 5);
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+    nfd = 0;
+    rc = 0;
+    for (i = 0; i < 20u; i++) {
+        fd = open_file("/bin/shell", O_RDONLY, 0);
+        if (fd < 0) {
+            rc = fd;
+            break;
+        }
+        fds[nfd++] = fd;
+    }
+    expect("fs2.trunc_fill", rc, E_MFILE);
+    expect("fs2.trunc_emfile",
+           open_file("/tmp/audit-trunc", O_RDWR | O_TRUNC, 0), E_MFILE);
+    expect("fs2.create_emfile",
+           open_file("/tmp/audit-leak", O_CREAT | O_RDWR, 0644), E_MFILE);
+    expect("fs2.create_emfile_fat",
+           open_file("/mnt/disk/AUDIT.LEK", O_CREAT | O_RDWR, 0644),
+           E_MFILE);
+    for (i = 0; i < nfd; i++) {
+        (void)sys3(SYS_CLOSE, fds[i], 0, 0);
+    }
+    expect("fs2.trunc_stat",
+           sys3(SYS_STAT, (i64)(usize)"/tmp/audit-trunc",
+                (i64)(usize)&g_st, 0), 0);
+    expect("fs2.trunc_preserved", (i64)g_st.size, 5);
+    expect("fs2.create_absent",
+           sys3(SYS_STAT, (i64)(usize)"/tmp/audit-leak",
+                (i64)(usize)&g_st, 0), E_NOENT);
+    expect("fs2.create_fat_absent",
+           sys3(SYS_STAT, (i64)(usize)"/mnt/disk/AUDIT.LEK",
+                (i64)(usize)&g_st, 0), E_NOENT);
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/mnt/disk/AUDIT.LEK", 0, 0);
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-trunc", 0, 0);
 
     /* stat / listdir 的页边界 + 只读页写检查。 */
     expect("fs2.stat_page_tail",
@@ -1766,6 +1991,44 @@ static void test_fs2(void)
            open_file("/tmp/audit-excl", O_CREAT | O_EXCL, 0644), E_EXIST);
     expect("fs2.excl_unlink",
            sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-excl", 0, 0), 0);
+
+    /* unlink 打开中的 ramfs 文件：deleted 标记，数据保留到最后一个 close。 */
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-hold", 0, 0);
+    fd = open_file("/tmp/audit-hold", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    expect_true("fs2.hold_create", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        i64 fd2;
+        u32 k;
+
+        g_buf[0] = 'a';
+        g_buf[1] = 'b';
+        g_buf[2] = 'c';
+        expect("fs2.hold_write",
+               sys3(SYS_WRITE_FD, fd, (i64)(usize)g_buf, 3), 3);
+        fd2 = open_file("/tmp/audit-hold", O_RDONLY, 0);
+        expect_true("fs2.hold_reopen", fd2 >= 0x10000, fd2);
+        expect("fs2.hold_unlink",
+               sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-hold", 0, 0), 0);
+        expect("fs2.hold_stat_gone",
+               sys3(SYS_STAT, (i64)(usize)"/tmp/audit-hold",
+                    (i64)(usize)&g_st, 0), E_NOENT);
+        if (fd2 >= 0) {
+            for (k = 0; k < 8u; k++) {
+                g_big[k] = 0;
+            }
+            expect("fs2.hold_read",
+                   sys3(SYS_READ, fd2, (i64)(usize)g_big, 3), 3);
+            expect_true("fs2.hold_content",
+                        g_big[0] == 'a' && g_big[1] == 'b' &&
+                            g_big[2] == 'c',
+                        (i64)g_big[0]);
+            (void)sys3(SYS_CLOSE, fd2, 0, 0);
+        }
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+        expect("fs2.hold_stat_gone2",
+               sys3(SYS_STAT, (i64)(usize)"/tmp/audit-hold",
+                    (i64)(usize)&g_st, 0), E_NOENT);
+    }
 
     /* ---- FAT16（/mnt/disk）：读 + listdir + 写/截断/删除 ---- */
     expect("fs2.fat_stat",
@@ -2122,6 +2385,28 @@ static void test_proc2(void)
         expect("proc2.selfkill255_status", st, 0x1FF);
     }
 
+    /* 自杀时 AS 仍是当前 CR3，且带 LFB / SHM 映射：as_destroy 顺序回归。 */
+    av[3] = (char *)"selfkillfb";
+    av[4] = NULL;
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.selfkillfb_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("proc2.selfkillfb_wait", wait_status((i64)pid, &st), 0);
+        expect("proc2.selfkillfb_status", st, 0x109);
+    }
+    av[3] = (char *)"selfkillshm";
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.selfkillshm_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("proc2.selfkillshm_wait", wait_status((i64)pid, &st), 0);
+        expect("proc2.selfkillshm_status", st, 0x109);
+        put_str("AUDIT: info self-kill with shm/fb ok\n");
+    }
+
     /* wait/kill 的 status 指针边界、null status、已死进程的幂等 kill。 */
     av[3] = (char *)"block";
     av[4] = NULL;
@@ -2348,6 +2633,91 @@ static void test_shm_fb2(void)
  * send 的子进程。故意留一个 blocked sender 不 kill/wait，让它跨过探针的
  * 退出路径；子进程随后应打印 `sender fail rc=-125`（ECANCELED）。
  */
+/*
+ * 确定性伪随机（fuzz 用；不用 libc）。
+ */
+static u32 g_rng;
+
+static u32 rnd_u32(void)
+{
+    g_rng = g_rng * 1664525u + 1013904223u;
+    return g_rng;
+}
+
+/*
+ * 结构化 fuzz（只做只读 syscall 与有界消息，避免副作用）：
+ *   - VFS：1500 条随机路径 -> stat / open(RDONLY) / listdir；
+ *   - IPC：合法用户缓冲 + 随机长度/头字段，隔一条发一条合法消息（堆分配/
+ *     释放 + 满队列 EAGAIN），任何输入都必须返回错误码而不是 panic。
+ */
+static void test_fuzz(void)
+{
+    static const char k_chars[] = "/.abcde0123456789";
+    i64 fd;
+    i64 rc;
+    u32 i;
+    u32 j;
+
+    section("fuzz");
+
+    g_rng = 0x5EED1234u;
+    for (i = 0; i < 1500u; i++) {
+        u32 len = 1u + (rnd_u32() % 250u);
+
+        for (j = 0; j < len; j++) {
+            g_path[j] = k_chars[rnd_u32() % (u32)(sizeof(k_chars) - 1u)];
+        }
+        g_path[len] = '\0';
+        (void)sys3(SYS_STAT, (i64)(usize)g_path, (i64)(usize)&g_st, 0);
+        fd = open_file(g_path, O_RDONLY, 0);
+        if (fd >= 0) {
+            (void)sys3(SYS_READ, fd, (i64)(usize)g_buf, 8);
+            (void)sys3(SYS_CLOSE, fd, 0, 0);
+        }
+        (void)sys3(SYS_LISTDIR, (i64)(usize)g_path, (i64)(usize)g_ents_raw,
+                   1);
+    }
+    expect_true("fuzz.vfs_paths", 1, 1);
+    put_str("AUDIT: info vfs path fuzz ok\n");
+
+    {
+        i64 p = sys3(SYS_PORT_CREATE, 8, 0, 0);
+        struct audit_hdr *h = (struct audit_hdr *)(void *)g_big;
+        u32 sends = 0;
+
+        expect_true("fuzz.ipc_create", p > 0, p);
+        if (p > 0) {
+            for (i = 0; i < 500u; i++) {
+                u32 len = 16u + (rnd_u32() % (4112u - 16u + 1u));
+                u32 max = rnd_u32() % 5001u;
+
+                if ((i & 1u) != 0) {
+                    h->type = 0x2000u + (rnd_u32() % 8u);
+                    h->len = len - 16u;
+                    h->from = 0;
+                    h->flags = 0;
+                } else {
+                    h->type = rnd_u32();
+                    h->len = rnd_u32() % 5000u;
+                    h->from = ((rnd_u32() & 3u) != 0u) ? 0u : rnd_u32();
+                    h->flags = ((rnd_u32() & 1u) != 0u) ? 0u : rnd_u32();
+                }
+                rc = sys4(SYS_PORT_SEND, p, (i64)(usize)g_big, (i64)len, 0);
+                if (rc == 0) {
+                    sends++;
+                }
+                (void)sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, (i64)max, 0);
+            }
+            for (i = 0; i < 16u; i++) {
+                (void)sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, 4112, 0);
+            }
+            expect_true("fuzz.ipc_progress", sends >= 1, (i64)sends);
+            expect("fuzz.ipc_close", sys3(SYS_PORT_CLOSE, p, 0, 0), 0);
+            put_str("AUDIT: info ipc msg fuzz ok\n");
+        }
+    }
+}
+
 static void arm_exit_cleanup(void)
 {
     struct audit_hdr h;
@@ -2433,6 +2803,7 @@ int audit_main(long argc, char **argv)
     test_proc2();
     test_shm_fb();
     test_shm_fb2();
+    test_fuzz();
     arm_exit_cleanup();
 
     put_str("AUDIT: summary pass=");

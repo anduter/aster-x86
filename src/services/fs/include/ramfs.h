@@ -22,8 +22,14 @@
 
 #include "vfs.h"
 
-#define RAMFS_MAX_NODES 32u
-#define RAMFS_MAX_ENTS 64u
+/*
+ * 节点/目录项池。启动后 /bin（7 个 ELF）+ /System/Packages + /run 等
+ * 常驻内容已占 ~30 个节点（wp33 打印 nodes=30）；原 32/64 的池子让 ring3
+ * 用户程序几乎没有 O_CREAT 余量（实测只剩 1~2 个）。扩到 64/128 后
+ * 实测余量 ~34（audit-sys 的 AUDIT: info ramfs headroom=N 证据）。
+ */
+#define RAMFS_MAX_NODES 64u
+#define RAMFS_MAX_ENTS 128u
 #define RAMFS_MAX_DATA_PAGES 512u
 #define RAMFS_MAX_FILE_PAGES 256u
 #define RAMFS_MAX_FILE_BYTES (RAMFS_MAX_FILE_PAGES * 4096ULL) /* 1 MiB */

@@ -91,7 +91,7 @@ $target = '--target=x86_64-elf'
 $cflags = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
     '-fno-stack-protector', '-fcf-protection=none', '-mno-sse',
     '-mgeneral-regs-only', '-fno-builtin', '-fno-pic', '-fno-pie',
-    '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+    '-std=c11', '-Os', '-Wall', '-Wextra', '-Werror',
     '-ffunction-sections', '-fdata-sections',
     '-I', (Join-Path $Repo 'src/ng'), '-c')
 $probeSrc = Join-Path $Repo 'tests/audit-ng/sys/audit_sys.c'
@@ -423,6 +423,20 @@ try {
                 ($t.Contains('AUDIT: info kill blocked-in-wait ok'))
             Check 'boundary: normal-exit shm/fb release' `
                 ($t.Contains('AUDIT: info normal-exit shm/fb release ok'))
+            Check 'boundary: self-kill with shm/fb' `
+                ($t.Contains('AUDIT: info self-kill with shm/fb ok'))
+            Check 'boundary: ipc deep queue recycle' `
+                ($t.Contains('AUDIT: info ipc deep queue recycle ok'))
+            Check 'boundary: ipc waiter pool saturation' `
+                ($t.Contains('AUDIT: info ipc waiter pool ok'))
+            Check 'boundary: vfs path fuzz' `
+                ($t.Contains('AUDIT: info vfs path fuzz ok'))
+            Check 'boundary: ipc msg fuzz' `
+                ($t.Contains('AUDIT: info ipc msg fuzz ok'))
+            $headroom = [regex]::Match($t, 'AUDIT: info ramfs headroom=(\d+)')
+            Check 'boundary: ramfs node headroom >= 8' `
+                ($headroom.Success -and [int]$headroom.Groups[1].Value -ge 8) `
+                ("(headroom={0})" -f $(if ($headroom.Success) { $headroom.Groups[1].Value } else { '?' }))
             Check 'boundary: exit cleanup armed' `
                 ($t.Contains('AUDIT: info exit cleanup armed'))
             # Probe exit closes its port and must wake the blocked sender; the
