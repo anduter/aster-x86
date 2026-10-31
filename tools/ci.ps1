@@ -202,7 +202,7 @@ try {
     # =========================================================================
     # 静态检查 1/4：工作区干净
     # =========================================================================
-    Phase 'static 1/5: worktree'
+    Phase 'static 1/6: worktree'
     $dirty = @(& git -c core.quotepath=false status --porcelain)
     $dirtyOk = ($dirty.Count -eq 0)
     if (-not $dirtyOk -and $AllowDirty) {
@@ -221,7 +221,7 @@ try {
     # =========================================================================
     # 静态检查 2/4：*.ps1/*.psm1 必须有 UTF-8 BOM 且能被解析
     # =========================================================================
-    Phase 'static 2/5: BOM + parse'
+    Phase 'static 2/6: BOM + parse'
     $trackedPs = @(& git -c core.quotepath=false ls-files '*.ps1' '*.psm1')
 
     if ($FixBom) {
@@ -283,7 +283,7 @@ try {
     # =========================================================================
     # 静态检查 3/4：禁用文件（构建产物 / 日志）
     # =========================================================================
-    Phase 'static 3/5: forbidden files'
+    Phase 'static 3/6: forbidden files'
     $trackedAll = @(& git -c core.quotepath=false ls-files)
     $badFiles = @()
     foreach ($rel in $trackedAll) {
@@ -297,7 +297,7 @@ try {
     # =========================================================================
     # 静态检查 4/5：模块边界
     # =========================================================================
-    Phase 'static 4/5: module boundaries (check-deps)'
+    Phase 'static 4/6: module boundaries (check-deps)'
     $depScript = Join-Path $root 'tools/check-deps.ps1'
     $depLog = Join-Path $tmpRoot 'check-deps.log'
     $depCode = Invoke-Script $psHost (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $depScript, '-Repo', $root)) $depLog
@@ -315,9 +315,29 @@ try {
     }
 
     # =========================================================================
-    # 静态检查 5/5：host 单元测试（不启动 QEMU）
+    # 静态检查 5/6：域边界（check-domains，向上依赖必须失败）
+# =========================================================================
+Phase 'static 5/6: domain boundaries (check-domains)'
+$domScript = Join-Path $root 'tools/check-domains.ps1'
+$domLog = Join-Path $tmpRoot 'check-domains.log'
+$domCode = Invoke-Script $psHost (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $domScript, '-Repo', $root)) $domLog
+$domText = if (Test-Path $domLog) { [IO.File]::ReadAllText($domLog) } else { '' }
+$domViol = '?'
+$dm = [regex]::Match($domText, 'domain include violations:\s*(\d+)')
+if ($dm.Success) { $domViol = $dm.Groups[1].Value }
+$domOk = ($domCode -eq 0 -and $domViol -eq '0')
+Report 'check-domains 0 violations' $domOk ("exit={0}, violations={1}" -f $domCode, $domViol)
+if (-not $domOk) {
+    foreach ($line in ($domText -split "`r?`n")) { if ($line.Trim()) { Sub $line } }
+} else {
+    $dm2 = [regex]::Match($domText, '(?m)^checked:.*$')
+    if ($dm2.Success) { Sub $dm2.Value }
+}
+
+# =========================================================================
+# 静态检查 6/6：host 单元测试（不启动 QEMU）
     # =========================================================================
-    Phase 'static 5/5: unit (host)'
+    Phase 'static 6/6: unit (host)'
     if ($NoUnit) {
         Note '-NoUnit：跳过 host 单元测试（tools/unit.ps1）'
     } else {
