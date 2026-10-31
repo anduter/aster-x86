@@ -9,14 +9,27 @@
 3. decisions.md —— ADR 集合（含 64 位相关决策），改架构前先看这里。
 4. three-layer.md —— 历史迁移记录（已被取代，只看 P1–P4 的事实）。
 5. domains/_index.md —— 7 个域的职责/接口/失败/manifest/状态，以及**已知漂移**；
-   实现会话按域读对应页面，再读接口的 `../abi/abi-1.0-draft.md`。
+   实现会话按域读对应页面，再读接口的 `../abi/abi-1.0.md`。
+6. d1/d1-plan.md —— D1（可用桌面）的目标拆解、依赖/顺序、M1–M6、范围围栏；
+   再读 d1/wps.md（31 个 WP5 子包）、d1/risks.md（风险/回退）、
+   d1/posix-profile.md（POSIX→native 映射，WP5-1a 的设计输入）。
 
 ## 当前状态
 
 - main：**代码**冻结在 69ab006（旧 32 位，305/305）；main 顶端 `d62bccb` 是
   7 域架构基线的设计文档提交，不含功能改动。
-- 开发分支：ng（64 位内核）。阶段 tag：`ng-e1`、`ng-e2`、`ng-e3`。
-- 当前阶段：**E4 完成（D0）**，tag `ng-e4`。
+- 开发分支：ng（64 位内核）。阶段 tag：`ng-e1`、`ng-e2`、`ng-e3`、`ng-e4`、
+  **`ng-d0-final`**。
+- 当前阶段：**D0 完成，D1 规划中（8h 浸泡进行中）**。
+  - D0 关闭：tag `ng-d0-final`，HEAD `a44e896`；ABI 1.0 冻结、SDK alpha、
+    1h smoke PASS。
+  - 8h 浸泡：D0 基线的长跑由并行会话在最终 HEAD 上执行中
+    （`obj-ng/soak-final/`，gitignore；**本阶段文档会话不跑 QEMU/构建**）。
+  - D1 计划：`d1/d1-plan.md`（目标拆解/依赖/M1–M6/不做）、`d1/wps.md`
+    （WP5-0…WP5-6，31 个子包）、`d1/risks.md`（风险/回退/“先验证什么”）、
+    `d1/posix-profile.md`（POSIX→native syscall/errno 映射）。
+  - 第一个开工建议：**WP5-0a**（ABI 1.1 + `ENOSYS`），并行跑 **S1**
+    （newlib 交叉构建预检）；两者决定 POSIX/网络/浏览器的编号与底座。
   - **WP4-1 完成**：native ABI **1.0 冻结**（v1.0.0）——
     `docs/abi/abi-1.0.md` 定稿 + `docs/abi/abi-1.0.h` 机器可读头；
     调用号/错误码/四类命名空间/上限/版本策略冻结，15 项冻结前待决项给出
@@ -47,8 +60,9 @@
     64 constants / 4 struct sizes）。
   - `tools/sdk-check.ps1`：SDK 头/示例语法 + 237 host checks。
   - `tools/release-ng.ps1`：D0 发布包 + SHA256 自检。
-- 下一步：D1（POSIX Profile、TLS/HTTP、真实硬件、8h 浸泡）；
-  D1 见 `evolution.md`。
+- 下一步：D1 按 `d1/d1-plan.md` 执行——先 **WP5-0a + S1**，再按 M1→M6
+  推进（POSIX、网络、TLS/HTTP、浏览器 B0、真机、8h+ 浸泡）；
+  出口清单见 `d1/d1-plan.md` §2。
 - ABI 规范：冻结版 `../abi/abi-1.0.md`；机器头 `../abi/abi-1.0.h`；
   历史草案 `../abi/abi-1.0-draft.md`（已被取代，仅供追溯）。
 - D0 发布：`../release/d0.md`；本地产物 `dist-ng/release/d0/`（gitignore）。
@@ -60,6 +74,8 @@
 - 提交按路径限定，不用 git add -A。
 - 范围变更先改 decisions.md，再改代码。
 - D0 之前不加“顺手功能”；P5/P6 冻结。
+- D1 范围以 `d1/d1-plan.md` §6 为准：不做 fork/COW、动态链接、抢占式
+  时间片/SMP 调度、安装器/更新（后者建议 D1.1，待负责人确认）。
 
 ## 文件清单
 
@@ -68,6 +84,10 @@
 | architecture.md | 长期架构口径 |
 | evolution.md | 迁移计划与工作包 |
 | decisions.md | ADR（含 64 位相关决策） |
+| d1/d1-plan.md | D1 计划：目标拆解/依赖顺序/M1–M6/范围围栏/待确认决策 |
+| d1/wps.md | D1 工作包：WP5-0…WP5-6，31 个子包（范围/允许路径/出口/依赖） |
+| d1/risks.md | D1 风险、未知数、回退方案与“先验证什么” |
+| d1/posix-profile.md | POSIX Profile 1.0 设计输入：syscall/errno/结构体/flags/上限 |
 | three-layer.md | 历史（已取代） |
 | memory-ng.md / paging-ng.md | WP1-2/1-4 内存与页表 |
 | trap-syscall-ng.md | WP1-3 trap / syscall |
