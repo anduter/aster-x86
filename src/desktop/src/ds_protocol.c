@@ -336,3 +336,56 @@ int ds_hotkey_token_ok(u32 wm_token, u32 token)
     /* 会话模式下热键通道属于 WM：其它令牌（含 0）一律拒绝。 */
     return (token == wm_token) ? 1 : 0;
 }
+
+int ds_wm_claim_ok(u32 wm_token, u32 token)
+{
+    /* 0 = 旧客户端/非 WM 令牌：没有认领意图，走原来的路径。 */
+    if (token == 0) {
+        return 1;
+    }
+    /* 还没有 WM：第一个 WM 角色令牌成为 WM 的令牌。 */
+    if (wm_token == 0) {
+        return 1;
+    }
+    /* 已经有 WM：只接受同一个令牌（WM 重建自己的面板）。 */
+    return (token == wm_token) ? 1 : 0;
+}
+
+int ds_focus_token_ok(u32 surface_token, u32 wm_token, u32 token)
+{
+    /* 无令牌的窗口（v1/v2 客户端 / demo 直连模式）：保持旧行为。 */
+    if (surface_token == 0) {
+        return 1;
+    }
+    /* 会话窗口：token=0 不能改焦点（否则知道 id 就能抢焦点）。 */
+    if (token == 0) {
+        return 0;
+    }
+    if (token == surface_token) {
+        return 1;
+    }
+    if (wm_token != 0 && token == wm_token) {
+        return 1;
+    }
+    return 0;
+}
+
+u32 ds_str_sanitize(char *out, u32 cap, const char *s, u32 max)
+{
+    u32 n = 0;
+
+    if (out == NULL || cap == 0) {
+        return 0;
+    }
+    while (s != NULL && s[n] != '\0' && n < max && n + 1u < cap) {
+        char c = s[n];
+
+        if ((u8)c < 0x20u || (u8)c >= 0x7Fu) {
+            c = '.'; /* CR/LF/控制符/高位字节：不让它们进证据通道 */
+        }
+        out[n] = c;
+        n++;
+    }
+    out[n] = '\0';
+    return n;
+}

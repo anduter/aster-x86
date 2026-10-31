@@ -420,6 +420,22 @@ static void t_destroy_auth_proto(void)
     CHECK(ds_hotkey_token_ok(0x0001B001u, 0x0001B001u) == 1);
     CHECK(ds_hotkey_token_ok(0x0001B001u, 0) == 0);
     CHECK(ds_hotkey_token_ok(0x0001B001u, 0x0001B002u) == 0);
+
+    /* 第二轮审计：WM 角色令牌只认领一次（伪造 WM 权威的 CREATE 被拒）。 */
+    CHECK(ds_wm_claim_ok(0, 0) == 1);                       /* 旧客户端 */
+    CHECK(ds_wm_claim_ok(0, 0x0001B001u) == 1);             /* 第一个 WM 令牌 */
+    CHECK(ds_wm_claim_ok(0x0001B001u, 0x0001B001u) == 1);   /* 同一令牌重建 */
+    CHECK(ds_wm_claim_ok(0x0001B001u, 0x0001B002u) == 0);   /* 别人冒充 WM */
+    CHECK(ds_wm_claim_ok(0x0001B001u, 0) == 1);             /* 非 WM 令牌 */
+
+    /* 第二轮审计：FOCUS 的令牌策略（会话窗口不能无令牌抢焦点）。 */
+    CHECK(ds_focus_token_ok(0, 0, 0) == 1);                 /* v2 直连 */
+    CHECK(ds_focus_token_ok(0, 0, 0x1234u) == 1);           /* 无令牌窗口 */
+    CHECK(ds_focus_token_ok(0, 0x0001B001u, 0) == 1);       /* v2 窗口 + WM */
+    CHECK(ds_focus_token_ok(0x0002A101u, 0, 0) == 0);       /* 会话窗口 token=0 */
+    CHECK(ds_focus_token_ok(0x0002A101u, 0, 0x0002A101u) == 1);
+    CHECK(ds_focus_token_ok(0x0002A101u, 0x0001B001u, 0x0001B001u) == 1);
+    CHECK(ds_focus_token_ok(0x0002A101u, 0x0001B001u, 0x0003A101u) == 0);
 }
 
 static void t_table_destroy_auth(void)
@@ -710,6 +726,55 @@ static void t_draw(void)
     ds_draw_text(&b, 0, 0, NULL, 0, 0); /* 空指针安全 */
 }
 
+/*
+ * 第二轮审计：客户端字符串进入串口/证据通道之前必须净化（title/path 是
+ * 攻击者完全控制的字段，直接打印可以伪造出证据行）。
+ */
+static void t_str_sanitize(void)
+{
+    char out[24];
+
+    memset(out, 0x7F, sizeof(out));
+    CHECK(ds_str_sanitize(out, sizeof(out), "Demo", 15) == 4);
+    CHECK(strcmp(out, "Demo") == 0);
+
+    /* CR/LF 变成 '.'：不再能换行伪造 "PANIC:" 之类的证据行。 */
+    memset(out, 0, sizeof(out));
+    CHECK(ds_str_sanitize(out, sizeof(out), "a\r\nb", 15) == 4);
+    CHECK(strcmp(out, "a..b") == 0);
+    memset(out, 0, sizeof(out));
+    CHECK(ds_str_sanitize(out, sizeof(out), "\r\nPANIC: vec=0xe", 15) == 15);
+    CHECK(strcmp(out, "..PANIC: vec=0x") == 0);
+    CHECK(strchr(out, '\n') == NULL);
+    CHECK(strchr(out, '\r') == NULL);
+
+    /* DEL 与高位字节。 */
+    memset(out, 0, sizeof(out));
+    CHECK(ds_str_sanitize(out, sizeof(out), "\x7F\x80Z", 15) == 3);
+    CHECK(strcmp(out, "..Z") == 0);
+
+    /* max / cap 双重截断，且始终 NUL 结尾。 */
+    memset(out, 0, sizeof(out));
+    CHECK(ds_str_sanitize(out, 4, "abcdef", 15) == 3);
+    CHECK(strcmp(out, "abc") == 0);
+    memset(out, 0, sizeof(out));
+    CHECK(ds_str_sanitize(out, sizeof(out), "abcdef", 2) == 2);
+    CHECK(strcmp(out, "ab") == 0);
+
+    /* 边界：NULL / cap 0 / cap 1 / 空串。 */
+    CHECK(ds_str_sanitize(NULL, 8, "x", 8) == 0);
+    CHECK(ds_str_sanitize(out, 0, "x", 8) == 0);
+    memset(out, 0x7F, sizeof(out));
+    CHECK(ds_str_sanitize(out, 1, "x", 8) == 0);
+    CHECK(out[0] == '\0');
+    memset(out, 0x7F, sizeof(out));
+    CHECK(ds_str_sanitize(out, sizeof(out), NULL, 8) == 0);
+    CHECK(out[0] == '\0');
+    memset(out, 0x7F, sizeof(out));
+    CHECK(ds_str_sanitize(out, sizeof(out), "", 8) == 0);
+    CHECK(out[0] == '\0');
+}
+
 int test_desktop(void)
 {
     t_protocol_sizes();
@@ -723,5 +788,6 @@ int test_desktop(void)
     t_composite_alpha();
     t_cursor();
     t_draw();
+    t_str_sanitize();
     return 0;
 }

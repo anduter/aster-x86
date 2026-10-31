@@ -359,6 +359,44 @@ int ds_msg_status_ok(const struct ds_msg *m);
  */
 int ds_hotkey_token_ok(u32 wm_token, u32 token);
 
+/*
+ * v3 审计加固（第二轮）：CREATE 里的 WM 角色令牌**只认领一次**。
+ *
+ * 背景：displayd 无法验证令牌是不是 session manager 签发的（IPC 只给端口
+ * ticket，不给 peer 身份）。以前任何客户端发一个"形状合法"的 WM 角色令牌
+ * CREATE，就会把 g_wm_token 覆盖成自己的 —— 于是它立刻获得 FOCUS 任何窗口 /
+ * DESTROY 任何窗口 / 抢占全局热键的能力（伪造 WM 权威）。
+ *
+ * 规则（渲染成纯函数便于 host 单测）：
+ *   - token == 0（旧客户端 / 非 WM 令牌）：不参与认领，返回 1；
+ *   - 还没有 WM（wm_token == 0）：第一个 WM 角色令牌成为 WM 的令牌，返回 1；
+ *   - 已经有 WM：只接受**同一个**令牌（WM 重建自己的面板），别人的 WM 令牌
+ *     返回 0（CREATE 以 EPERM 拒绝，不影响表状态）。
+ * WM 面板被销毁时 displayd 会把 wm_token 清零（d_handle_destroy），所以 WM
+ * 重启（sessiond 先销毁旧面板再拉起新 WM）之后新令牌仍然可以认领。
+ */
+int ds_wm_claim_ok(u32 wm_token, u32 token);
+
+/*
+ * v3 审计加固（第二轮）：FOCUS 的令牌策略。
+ *   - surface_token == 0（旧客户端 / 非会话窗口）：保持 WP3-2 行为（token 无关）；
+ *   - surface_token != 0（会话窗口）：必须出示该窗口自己的令牌，或 WM 令牌；
+ *     token == 0 一律拒绝 —— 以前"知道 surface id 就能抢焦点"，任何客户端都能
+ *     把焦点从别人的窗口上抢走（输入被劫持）。
+ * 返回 1 = 允许，0 = 拒绝。
+ */
+int ds_focus_token_ok(u32 surface_token, u32 wm_token, u32 token);
+
+/*
+ * 把客户端给的字符串放进串口/证据通道之前先净化：只保留可打印 ASCII
+ * (0x20..0x7E)，其它字节（CR/LF、控制符、>=0x7F）一律换成 '.'。
+ *
+ * 串口日志是所有门禁（run-ng / 审计脚本）的证据源；title/path 这类字段
+ * 完全由客户端控制，直接 d_put() 会让攻击者注入伪造的证据行（例如一个
+ * 带 "\r\nPANIC:" 的标题）。写回 *out（cap 含 NUL），返回写入的字符数。
+ */
+u32 ds_str_sanitize(char *out, u32 cap, const char *s, u32 max);
+
 /* ---- 标题打包（4 个 u32 = 16 字节，NUL padding） ------------------------- */
 void ds_title_set(u32 out[DS_TITLE_WORDS], const char *s);
 void ds_title_get(const u32 in[DS_TITLE_WORDS], char *out, u32 cap);
