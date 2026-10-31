@@ -13,12 +13,14 @@
 
 - main：冻结在 69ab006（旧 32 位，305/305）。
 - 开发分支：ng（64 位内核）。
-- 当前阶段：**E3 进行中（WP3-0、WP3-1 完成）**。E2（WP2-1…WP2-7）已全部完成
+- 当前阶段：**E3 进行中（WP3-0、WP3-1、WP3-2 完成）**。E2（WP2-1…WP2-7）已全部完成
   并打 tag `ng-e2`（`d3a5671`）；E3 的前置 **WP3-0（多进程用户态 + 跨进程
-  IPC）** 与 **WP3-1（display server，L2a）** 落地：进程表/spawn/wait/kill、
-  per-process 句柄表、ticket 跨进程 IPC、shell 作为父进程；syscall 45/46/47
-  （共享内存 + LFB 用户映射）、ring3 `/bin/displayd`（surface/合成/焦点/输入
-  转发）、L3 `/bin/demo`、QMP screendump 像素断言。
+  IPC）**、**WP3-1（display server，L2a）** 与 **WP3-2（shell/WM，L2b +
+  协议 v2）** 落地：进程表/spawn/wait/kill、per-process 句柄表、ticket 跨进程
+  IPC、shell 作为父进程；syscall 45/46/47（共享内存 + LFB 用户映射）、ring3
+  `/bin/displayd`（surface/合成/焦点/输入转发）、L3 `/bin/demo`、QMP
+  screendump 像素断言；ring3 `/bin/wm`（1280×32 面板/启动器/任务切换/全局
+  热键）、协议 v2（LIST/LIST_REPLY/REGISTER_HOTKEY/WM_STATUS、CREATE title）。
 - 门禁：`tools/ci-ng.ps1` 一条命令跑 check-domains / check-deps / unit-ng /
   build-ng / run-ng / parity-ng / 旧 32 位 `build.ps1 -Test`，全绿输出
   `=== NG CI PASS ===`（`-Quick` 跳 QEMU/legacy）；CI 见
@@ -29,12 +31,15 @@
   （`ng: parity 100/100 PASS`，host 95/95）+ **WP3-0 多进程**
   （`ng: proc spawn/wait/ipc cross/kill/as isolated` /`ng: WP3-0 selftest PASS`）
   + **WP3-1 display server**（`ng: displayd up` / `ng: composite ok (px=...)` /
-  `ng: input route ok` / `ng: WP3-1 selftest PASS` + QMP 截图像素）；
-  host 单测 **4402 checks, 0 failures**；旧 32 位 305/305；
+  `ng: input route ok` / `ng: WP3-1 selftest PASS` + QMP 截图像素）
+  + **WP3-2 shell/WM**（`ng: wm up` / `ng: wm panel ok (px=0x202838 at=0,0)` /
+  `ng: wm launcher ok` / `ng: wm task switch ok` / `ng: wm launch ok` /
+  `ng: WP3-2 selftest PASS` + 第二张 QMP 截图断言面板与 Demo 窗口）；
+  host 单测 **4684 checks, 0 failures**；旧 32 位 305/305；
   check-domains / check-deps 0 违规（`docs/claims/ng-WP2-1.md` …
-  `ng-WP2-7.md`、`ng-WP3-0.md`、`ng-WP3-1.md`）。
-- 下一步：E3 主体（WP3-2 shell/WM / WP3-3 session manager / WP3-4 SDK
-  alpha），见 evolution.md。
+  `ng-WP2-7.md`、`ng-WP3-0.md`、`ng-WP3-1.md`、`ng-WP3-2.md`）。
+- 下一步：E3 主体（WP3-3 session manager / WP3-4 SDK alpha / WP3-5 S1 故障
+  注入），见 evolution.md。
 
 ## 执行规则
 
@@ -64,6 +69,6 @@
 | auth-log-pkg-ng.md | WP2-5 auth（salt+SHA-256 迭代）/ 64 KiB log 环 / pkg 清单与校验 / syscall 31..35 |
 | shell-ng.md | WP2-6 用户态 shell（L3）：命令/行编辑/重定向/cwd/证据行/run-ng 注入 |
 | proc-ng.md | WP3-0 进程模型：pid/进程表、spawn/wait/kill、per-process 句柄、ticket 跨进程 IPC |
-| display-server-ng.md | WP3-1 display server（L2a）：syscall 45/46/47、共享内存 refcount、协议、surface/z-order/合成、输入路由、QMP 像素断言 |
+| display-server-ng.md | WP3-1 display server（L2a）：syscall 45/46/47、共享内存 refcount、协议、surface/z-order/合成、输入路由、QMP 像素断言；WP3-2 追加协议 v2 与 L2b WM（第 13 节） |
 | `tests/parity/parity_cases.h` / `parity_body.inc` | WP2-7 parity 100 项的唯一 case 表与共享断言体（kernel/host 同源） |
 | domains/ | 每域一页 |

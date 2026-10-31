@@ -25,7 +25,8 @@
 
 static void t_protocol_sizes(void)
 {
-    CHECK(ds_msg_body_size(DS_MSG_CREATE) == 16);
+    CHECK(ds_msg_body_size(DS_MSG_CREATE) == 40); /* v2：title/owner_pid/pos */
+    CHECK(ds_msg_body_size_v(DS_MSG_CREATE, 1) == 16); /* v1 兼容 */
     CHECK(ds_msg_body_size(DS_MSG_CREATE_REPLY) == 28);
     CHECK(ds_msg_body_size(DS_MSG_MAP) == 8);
     CHECK(ds_msg_body_size(DS_MSG_COMMIT) == 20);
@@ -34,7 +35,7 @@ static void t_protocol_sizes(void)
     CHECK(ds_msg_body_size(DS_MSG_INPUT) == 20);
     CHECK(ds_msg_body_size(DS_MSG_BYE) == 8);
     CHECK(ds_msg_body_size(99) == 0);
-    CHECK(ds_msg_size(DS_MSG_CREATE) == DS_MSG_HDR_SIZE + 16);
+    CHECK(ds_msg_size(DS_MSG_CREATE) == DS_MSG_HDR_SIZE + 40);
     CHECK(ds_msg_size(DS_MSG_CREATE_REPLY) == DS_MSG_HDR_SIZE + 28);
     CHECK(ds_msg_size(99) == 0);
     CHECK(sizeof(struct ds_msg) <= DS_MSG_MAX);

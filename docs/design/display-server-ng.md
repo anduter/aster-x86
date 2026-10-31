@@ -1,9 +1,11 @@
-# ng display server 设计（WP3-1，L2a）
+# ng display server 设计（WP3-1，L2a）+ shell/WM（WP3-2，L2b）
 
-> 状态：已实现（2026-10-31），出口见 `docs/claims/ng-WP3-1.md`。
-> 范围：只做 **L2a display server**（合成/扫描输出/surface 生命周期/焦点/输入
-> 路由）+ 一个 L3 demo；WP3-2 shell/WM、WP3-3 session manager、WP3-5 S1 故障
-> 注入都不在这里。
+> 状态：WP3-1 已实现（2026-10-31，`docs/claims/ng-WP3-1.md`）；WP3-2 在**不改
+> v1 语义**的前提下把协议扩到 **v2** 并落了 L2b WM（`docs/claims/ng-WP3-2.md`，
+> 见本文第 13 节）。
+> 范围：L2a display server（合成/扫描输出/surface 生命周期/焦点/输入路由）+
+> L3 demo + WP3-2 的 L2b shell/WM（面板/启动器/任务切换）；WP3-3 session
+> manager、WP3-5 S1 故障注入都不在这里。
 > 上位约束：`docs/design/architecture.md` 第 5 节不变量 7（控制面走消息、数据面
 > 走共享内存，4 KiB 消息只用于控制）、不变量 2（L1/L2 不共享地址空间，只经
 > IPC + cap）、第 3 节失败矩阵（L2a 崩 = session 级，不拖内核）。
@@ -98,14 +100,18 @@ SYS_FB_MAP(&va, &info)                  -> 0 / -err     (47，root-only)
 
 | 消息 | 方向 | body 字段 | 语义 |
 |---|---|---|---|
-| `CREATE` | client→server | w,h,flags | 建 surface；server 分配共享内存 |
+| `CREATE` | client→server | w,h,flags [,x,y,owner_pid,title[4]] | 建 surface；server 分配共享内存。v1 只有 w,h,flags（16 B）；v2 40 B，`flags&DS_CREATE_F_POS` 时用 x/y，title 15 字符 |
 | `CREATE_REPLY` | server→client | surface_id, shm_handle, pages, x,y,w,h, status | 返回 id/缓冲/放置 |
 | `MAP` | client→server | surface_id | 客户端已 `SHM_MAP`（之后才允许 COMMIT） |
 | `COMMIT` | client→server | surface_id, x,y,w,h | surface 局部脏矩形；server 合成到 LFB |
 | `DESTROY` | client→server | surface_id | 销毁 surface（焦点回退到最上层） |
 | `FOCUS` | client→server | surface_id | 置焦点 + 提到 z-order 最前 |
-| `INPUT` | server→focus client | surface_id, kind, key, scancode, flags | PS/2 按下事件推送 |
+| `INPUT` | server→focus client | surface_id, kind, key, scancode, flags | PS/2 按下事件推送；热键副本带 `DS_INPUT_F_GLOBAL` |
 | `BYE` | client→server | reason | 保留 |
+| `LIST`（v2） | client→server | reserved | 要一份 surface 快照（WM 任务列表） |
+| `LIST_REPLY`（v2） | server→client | count + entries[8] | 每条 44 B：id/owner_pid/x/y/w/h/focused/title[4]，z-order 后→前 |
+| `REGISTER_HOTKEY`（v2） | client→server | surface_id,key,flags,reserved | `key=0`（ANY）时每个按键先给注册者一份 |
+| `WM_STATUS`（v2） | client→server | surface_id,tasks,focus,switches,lastswitch,launches,lastpid | displayd 汇总进 `/run/display.status`（不新建 ramfs 文件） |
 
 规则：
 
@@ -116,6 +122,10 @@ SYS_FB_MAP(&va, &info)                  -> 0 / -err     (47，root-only)
    displayd 丢掉坏消息继续服务，不 panic。
 5. `INPUT` 只发给焦点 surface 的 `client_ticket`（CREATE 时记下的 `hdr.from`）；
    没有焦点时按键被丢弃。
+6. **v1/v2 兼容**：解码器接受 `version == 1 || 2`；v1 CREATE body 固定 16 字节，
+   解码后 title 为空、owner_pid=0、忽略 x/y（走级联放置）。v1 下
+   LIST/LIST_REPLY/REGISTER_HOTKEY/WM_STATUS 的 body 长度为 0，直接拒绝。
+   编码器始终写 version 2。
 
 ## 5. surface 表、z-order 与裁剪
 
@@ -252,8 +262,111 @@ run-ng: screendump pixel ok (185,145)=#3070c0
 5. **没有 vsync/双缓冲/脏区合并**：每次 COMMIT 重合成 surface 覆盖的屏幕
    region（z-order 正确），像素量小所以够用；D1 再谈。
 6. **没有 resize/装饰/多显示器/DPMS**：CREATE 后尺寸固定，server-side
-   decoration 属 WP3-2。
+   decoration 属 WP3-2（WP3-2 只做 WM 面板，没做应用装饰）。
 7. **像素断言依赖 1280x800 stdvga + QEMU screendump PPM**：其它卡/VGA 文本
    走 `-Fallback` 跳过；真机在 D1 锁定硬件后再补。
 8. **VFS fd 表全局一份**：displayd/demo 的 open/close 之间没有阻塞点，所以
    协作式单核下安全；每进程 fd 表属 fsd/WP3-x。
+
+## 13. WP3-2 追加：shell/WM（L2b）与协议 v2
+
+WP3-2 不新增内核机制（syscall/共享内存/LFB 都不动），只把 display 协议扩到
+v2 并加一个 ring3 WM 进程。
+
+### 13.1 组件
+
+```text
+displayd（L2a，v2）
+  ├─ surface 表：每项多一个 title[16] + owner_pid
+  ├─ LIST/LIST_REPLY：WM 的任务表快照
+  ├─ REGISTER_HOTKEY：每个按键先给 WM 一份（GLOBAL），再按焦点转发
+  ├─ WM_STATUS：WM 的 switch/launch 计数写进已有的 /run/display.status
+  └─ 合成/焦点/输入语义与 WP3-1 相同
+
+/bin/wm（L2b，ring3）
+  ├─ CREATE(1280x32, title="Aster Panel", POS (0,0)) -> SHM_MAP -> 画面板
+  ├─ MAP / COMMIT（整块 1280x32）
+  ├─ REGISTER_HOTKEY(surface=1, key=ANY)
+  ├─ 每 ~200ms LIST；任务按钮标题来自 LIST_REPLY
+  ├─ Tab / Alt+Tab -> LIST -> next(排除自己) -> FOCUS -> 下一次 LIST 确认
+  ├─ '1'..'9' -> 启动器可启动下标 -> spawn(/bin/<app>)
+  └─ 变化时发 WM_STATUS（switch/lastswitch/launch/lastpid/tasks/focus）
+
+/bin/demo（L3）
+  ├─ 默认角色：CREATE(title=Demo) -> 画 -> COMMIT -> FOCUS -> 等 INPUT -> 退出
+  └─ window 角色：CREATE(title=Demo) -> 画 -> COMMIT -> **不发 FOCUS**
+                  -> 常驻等 INPUT（内核 kill）；WM 用 Tab 切焦点
+```
+
+WM 是 displayd 的普通客户端：不 `SYS_FB_MAP`、不写 surface 表、不持有应用
+句柄。应用窗口的进程由内核自检或 WM 启动器 `spawn` 创建；WM 被 kill 时内核
+只回收 WM 自己的 AS/端口/共享页，Demo 进程继续运行（S1 的最小前身）。
+
+### 13.2 面板
+
+```text
+(0,0) 1280x32:
+  [0..63]     标题 "Aster"（8,12 起画）
+  [64..127]   启动器按钮 "Apps"
+  [136..]     任务按钮：96x24、gap 6、最多 8 个（标题 11 字符截断；焦点高亮）
+  [1112..]    时钟占位 "--:--"
+  [1184..1272] 通知区（88x24，含一个 6x6 圆点）
+  底部 y=30..31 强调线
+```
+
+颜色：背景 `#202838`、强调线/描边 `#30507A`、普通按钮 `#304460`、焦点按钮
+`#4A7AC0`、通知点 `#FFC040`；探针 `(4,4)` 是纯背景（QMP 断言用）。
+布局是 `ds_wm_layout_init()` 纯函数（1280/640/320 三种宽度都有 host 单测）。
+
+### 13.3 启动器
+
+- `listdir("/bin")` + `listdir("/System/Packages")`（syscall 25，单次 ≤8 条）。
+- `/bin` 普通文件 → `DS_WM_APP_BIN`；`shell` / `displayd` / `wm` 标记
+  **不可启动**（再起一个 shell 会抢串口，第二个 displayd 会覆盖
+  `/run/display.port`）；`/System/Packages` 目录 → `DS_WM_APP_PKG`，只列出
+  （entry 在 manifest 里，包启动属 WP3-3/4）。
+- 插入排序（kind 后 name），保证键盘 1..9 的确定性：本次 `/bin` 里可启动的是
+  `demo`（1）、`hello`（2）、`proc`（3）。
+- `spawn` 走 proc syscall 40（WM 是父进程）；内核自检读到 `wmlaunch=` 后
+  再回收这个 demo。
+
+### 13.4 任务切换与热键
+
+- WM 的“当前焦点”来自最近一次 LIST_REPLY 的 `focused` 位；可切换集合排除
+  WM 自己的面板 surface。
+- Tab 到达 WM 时 `ds_wm_tasks_next()` 选当前焦点的下一个（回绕）；`FOCUS`
+  发出去之后**不假设成功**，下一次 LIST_REPLY 的 focus 等于目标才记一次
+  `switches++` 并打印 `ng: wm task switch ok (focus=.. from=.. via=key)`。
+- 热键路由在 displayd 的 `d_poll_input()` 里：注册者先拿一份
+  （`flags | DS_INPUT_F_GLOBAL`），焦点客户端仍拿普通副本；两者相同则只发
+  一次。`Alt` 没有独立修饰位，Alt+Tab 在驱动层已经只剩 Tab。
+- 无 QMP 时 WM 有自检 fallback：看到窗口 3s 内没有 Tab 就自己切一次
+  （`via=auto`），切换后再 3s 没有启动就自己启动第一个；真实交互不会走这条。
+
+### 13.5 WM 状态与 ramfs 节点
+
+`/run/display.status` 追加（仅 WM_STATUS 到达后）：
+
+```text
+wm=1 wmtasks=N wmfocus=ID wmswitch=N wmlast=ID wmlaunch=N wmlastpid=PID
+```
+
+不新建状态文件的原因：ramfs 节点池只有 32 个；WP3-2 多种了 `/bin/wm`，再建
+`/run/wm.status` 会把用户态 shell 的 `/tmp/s.txt` 挤成 ENOSPC。内核 wp32 读同一
+份 display.status，`ng: wm ready ok` / `wm tasks seen ok` / `wm switch seen ok` /
+`wm launch seen ok` 都由它驱动。ring3 fs demo 也改成跑完 `unlink("/tmp/a")`。
+
+### 13.6 证据（详见 `docs/claims/ng-WP3-2.md`）
+
+```text
+ng: wm up (pid=.. panel=1280x32)
+ng: wm panel ok (px=0x202838 at=0,0)
+ng: wm launcher ok (apps=3 pkgs=1)
+ng: wm tasks ok (n=2 apps=1)
+ng: displayd hotkey ok (key=0x9 scancode=0xf)
+ng: wm task switch ok (focus=2 from=1 via=key)
+ng: wm launch ok (app=/bin/demo pid=14 via=key)
+ng: demo survives wm ok (alive=1 id=2)
+ng: WP3-2 selftest PASS
+QMP PPM: panel(4,4)=#202838 demo(217,177)=#3070c0
+```

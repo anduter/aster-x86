@@ -219,7 +219,22 @@ IPC 消息，CREATE 返回 `shm_handle`）。`/bin/demo`（L3）读发现文件 
 `input-send-event` 注入 `b`，并 `screendump` 抓 PPM 断言 `(185,145)=#3070c0`；
 kill displayd 后内核继续跑、客户端自己超时退出（崩溃隔离）。证据见
 `docs/claims/ng-WP3-1.md`，设计见 `docs/design/display-server-ng.md`。
-下一步：WP3-2 shell/WM（面板/启动器/任务切换）。
+
+**WP3-2 完成**（shell/WM，L2b + display 协议 v2）。L2 新增
+`src/desktop/shell/wm.c`：ring3 `/bin/wm` 作为 displayd 的普通客户端，
+`CREATE(1280x32, title="Aster Panel", POS (0,0))` 拿共享内存画面板（标题/
+时钟占位/启动器按钮/任务按钮/通知区），`REGISTER_HOTKEY(key=ANY)` 让 displayd
+把每个按键先给 WM 一份，`LIST/LIST_REPLY` 做任务表，`Tab`/`Alt+Tab` → `FOCUS`
+切换（下一次 LIST 确认后计数），`1..9` → 启动器 `spawn`。协议扩到 **v2**：
+CREATE 加 `x,y,owner_pid,title`（v1 的 16 字节 body 仍可解码，空标题+级联）、
+LIST/LIST_REPLY（44 字节/条：id/owner_pid/坐标/尺寸/focused/title）、
+REGISTER_HOTKEY、WM_STATUS（计数由 displayd 汇总进已有的
+`/run/display.status`，不新建 ramfs 节点）。`/bin/demo` 的 CREATE 带
+`title=Demo` 并新增常驻 `demo window` 角色（不抢焦点）。run-ng 用 QMP 注入
+`tab`/`1`，并做第二次 `screendump` 断言 `(4,4)=#202838`（面板）与
+`(217,177)=#3070c0`（Demo 窗口）；kill WM 后 Demo 仍活着、displayd 继续服务
+（`ng: demo survives wm ok`）。证据见 `docs/claims/ng-WP3-2.md`。
+下一步：WP3-3 session manager（应用生命周期/窗口表/角色令牌）。
 
 ### E4
 

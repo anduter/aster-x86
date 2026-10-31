@@ -49,6 +49,8 @@ extern const u8 ng_displayd_elf_start[]; /* WP3-1 display server（L2a） */
 extern const u8 ng_displayd_elf_end[];
 extern const u8 ng_demo_elf_start[]; /* WP3-1 demo app（L3） */
 extern const u8 ng_demo_elf_end[];
+extern const u8 ng_wm_elf_start[]; /* WP3-2 shell/WM（L2b） */
+extern const u8 ng_wm_elf_end[];
 
 /* 内嵌 ELF 的落盘路径（ramfs /bin）。 */
 #define PROC_BIN_SHELL "/bin/shell"
@@ -56,6 +58,7 @@ extern const u8 ng_demo_elf_end[];
 #define PROC_BIN_HELLO "/bin/hello"
 #define PROC_BIN_DISPLAYD "/bin/displayd"
 #define PROC_BIN_DEMO "/bin/demo"
+#define PROC_BIN_WM "/bin/wm"
 
 /* freestanding 内存原语（src/ng/mem.c）。 */
 void *memcpy(void *dst, const void *src, u64 n);
@@ -381,9 +384,9 @@ static void proc_thread_main(void *arg)
 
 static int proc_seed_bins(void)
 {
-    const u8 *blobs[5];
-    u64 sizes[5];
-    const char *paths[5];
+    const u8 *blobs[6];
+    u64 sizes[6];
+    const char *paths[6];
     struct vfs_ctx *ctx = fs_sys_ctx();
     u32 i;
 
@@ -403,6 +406,9 @@ static int proc_seed_bins(void)
     blobs[4] = ng_demo_elf_start;
     sizes[4] = (u64)(usize)ng_demo_elf_end - (u64)(usize)ng_demo_elf_start;
     paths[4] = PROC_BIN_DEMO;
+    blobs[5] = ng_wm_elf_start;
+    sizes[5] = (u64)(usize)ng_wm_elf_end - (u64)(usize)ng_wm_elf_start;
+    paths[5] = PROC_BIN_WM;
 
     /* /bin 目录（ramfs 根只有 /tmp，WP2-1 种的）。 */
     if (ctx == NULL) {
@@ -418,7 +424,7 @@ static int proc_seed_bins(void)
             return 1;
         }
     }
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 6; i++) {
         int rc = fs_sys_seed_file(paths[i], blobs[i], sizes[i]);
 
         if (rc != VFS_OK) {
@@ -476,6 +482,8 @@ void proc_init(void)
     serial_puts(PROC_BIN_DISPLAYD);
     serial_puts(" demo=");
     serial_puts(PROC_BIN_DEMO);
+    serial_puts(" wm=");
+    serial_puts(PROC_BIN_WM);
     serial_puts(")\r\n");
 
     serial_puts("ng: proc table ok (max=");

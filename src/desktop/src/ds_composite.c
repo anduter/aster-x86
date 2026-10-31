@@ -3,30 +3,7 @@
  */
 #include "ds_composite.h"
 
-u32 ds_pixel_blend(u32 dst, u32 src)
-{
-    u32 a = (src >> 24) & 0xFFu;
-    u32 sr;
-    u32 sg;
-    u32 sb;
-    u32 r;
-    u32 g;
-    u32 b;
-
-    if (a == 0) {
-        return dst;
-    }
-    if (a == 0xFFu) {
-        return src & 0x00FFFFFFu;
-    }
-    sr = (src >> 16) & 0xFFu;
-    sg = (src >> 8) & 0xFFu;
-    sb = src & 0xFFu;
-    r = ((sr * a) + (((dst >> 16) & 0xFFu) * (0xFFu - a))) / 0xFFu;
-    g = ((sg * a) + (((dst >> 8) & 0xFFu) * (0xFFu - a))) / 0xFFu;
-    b = ((sb * a) + ((dst & 0xFFu) * (0xFFu - a))) / 0xFFu;
-    return (r << 16) | (g << 8) | b;
-}
+/* ds_pixel_blend 在 ds_blend.c（demo/wm 只链这个小对象，省 .rodata）。 */
 
 void ds_screen_pixel(struct ds_screen *s, i64 x, i64 y, u32 argb)
 {

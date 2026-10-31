@@ -121,6 +121,18 @@
 #   -NoQmp 时 input 走 timeout 分支、不做 screendump；
 #   -Fallback 时期望 `ng: WP3-1 selftest skipped (no fb)`。
 #
+# WP3-2 追加（shell/WM，L2b；stdvga 模式）：
+#   ng: wm spawn ok (pid=) / wm up / wm panel ok / wm launcher ok / wm tasks ok
+#   ng: displayd hotkey ok / wm task switch ok (focus=.. via=key) /
+#   ng: wm launch ok (app=/bin/demo via=key) / demo window up /
+#   ng: wm kill ok (status=265) / demo survives wm ok / WP3-2 selftest PASS
+#   QMP：看到 `ng: wm tasks ok` 注入 Tab（热键 -> WM 任务切换）；看到
+#   `ng: wm task switch ok` 注入 '1'（启动器 spawn demo）；看到
+#   `ng: wm task switch ok` 再做一次 screendump：
+#     (4,4) == #202838（面板背景）且 Demo 窗口探针 (x+25,y+25) == #3070c0。
+#   -NoQmp 时 WM 走 auto 分支（via=auto），不做 screendump；
+#   -Fallback 时期望 `ng: WP3-2 selftest skipped (no fb)`。
+#
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
 #
@@ -263,7 +275,7 @@ if ($Panic) {
         'ng: proc ipc cross ok (pid=',
         'ng: proc as isolated ok (va=0x40010000',
         'ng: proc kill ok (pids=',
-        'ng: desktop bin ok (displayd=/bin/displayd demo=/bin/demo)',
+        'ng: desktop bin ok (displayd=/bin/displayd demo=/bin/demo wm=/bin/wm)',
         'ng: WP3-0 selftest PASS',
         'ng: WP3-1 selftest PASS'
     )
@@ -381,6 +393,51 @@ if ($Panic) {
         }
     }
 
+    # WP3-2：shell/WM（L2b）。stdvga 路径完整跑；没有 LFB 时打印 skipped。
+    if ($Fallback) {
+        $required += @('ng: WP3-2 selftest skipped (no fb)')
+    } else {
+        $required += @(
+            'ng: wm spawn ok (pid=',
+            'ng: wm up (pid=',
+            'ng: wm panel ok (px=',
+            'ng: wm launcher ok (apps=',
+            'ng: wm tasks ok (n=',
+            'ng: wm task switch ok (focus=',
+            'ng: wm launch ok (app=',
+            'ng: demo window up (id=',
+            'ng: wm kill ok (status=265',
+            'ng: demo survives wm ok (alive=1',
+            'ng: WP3-2 selftest PASS'
+        )
+        $patterns += @(
+            'ng: wm up \(pid=[0-9]+ panel=1280x32\)',
+            'ng: wm panel ok \(px=0x202838 at=0,0\)',
+            'ng: wm launcher ok \(apps=[0-9]+ pkgs=[0-9]+\)',
+            'ng: wm app ok \(n=0 path=/bin/demo\)',
+            'ng: wm pkg ok \(path=/System/Packages/[a-z]+\)',
+            'ng: wm tasks ok \(n=[0-9]+ apps=[0-9]+\)',
+            'ng: surface title ok \(id=[0-9]+ title=Demo\)',
+            'ng: demo window up \(id=[0-9]+ title=Demo\)',
+            'ng: demo survives wm ok \(alive=1 id=[0-9]+\)'
+        )
+        if ($NoQmp) {
+            # 没有 QMP：WM 在 ~3s 后走 auto fallback，仍产出切换/启动证据。
+            $patterns += @(
+                'ng: wm task switch ok \(focus=[0-9]+ from=[0-9]+ via=auto\)',
+                'ng: wm launch ok \(app=/bin/demo pid=[0-9]+ via=auto\)'
+            )
+        } else {
+            # QMP 注入 Tab -> displayd 热键副本 -> WM 任务切换；
+            # 注入 '1' -> WM 启动器 spawn /bin/demo。
+            $patterns += @(
+                'ng: displayd hotkey ok \(key=0x[0-9a-f]+ scancode=0x[0-9a-f]+\)',
+                'ng: wm task switch ok \(focus=[0-9]+ from=[0-9]+ via=key\)',
+                'ng: wm launch ok \(app=/bin/demo pid=[0-9]+ via=key\)'
+            )
+        }
+    }
+
     if ($Smoke) {
         $required += @('ng: shell skipped (smoke mode)')
     } elseif (-not $NoQmp) {
@@ -456,6 +513,9 @@ if ($Panic) {
         'ng: surface .* FAIL',
         'ng: composite .* FAIL',
         'ng: demo .* FAIL',
+        'ng: WP3-2 .* FAIL',
+        'ng: wm .* FAIL',
+        'ng: hotkey .* FAIL',
         'ng: parity FAIL',
         '(?m)^parity: [0-9]+/100 .* \.\.\. FAIL'
     )
@@ -781,6 +841,14 @@ $screenChecked = $false
 $screenBad = $false
 $screenMsg = ''
 $screenPixel = ''
+$wmTabInjected = $false
+$wmLaunchInjected = $false
+$wmScreenChecked = $false
+$wmScreenOk = $false
+$wmScreenMsg = ''
+$wmScreenPixel = ''
+$wmTaskX = 192
+$wmTaskY = 152
 $shellTyped = $false
 if ($qmpPort -gt 0) {
     $qmp = Connect-Qmp -Port $qmpPort
@@ -821,6 +889,24 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
                     Write-Host 'run-ng: WARN QMP sendkey b failed; demo input uses timeout path'
                 }
             }
+            # WP3-2：WM 已经用 LIST 看到窗口 -> 注入 Tab（全局热键 -> 任务切换）。
+            if (-not $wmTabInjected -and $qmp -and -not $Fallback -and $text.Contains('ng: wm tasks ok (')) {
+                $wmTabInjected = $true
+                if (Send-QmpKey $qmp 'tab') {
+                    Write-Host 'run-ng: QMP sendkey tab -> WM hotkey task switch'
+                } else {
+                    Write-Host 'run-ng: WARN QMP sendkey tab failed; WM uses auto fallback'
+                }
+            }
+            # WP3-2：任务切换完成 -> 注入 '1'（WM 启动器 spawn /bin/demo）。
+            if (-not $wmLaunchInjected -and $qmp -and -not $Fallback -and $text.Contains('ng: wm task switch ok (focus=')) {
+                $wmLaunchInjected = $true
+                if (Send-QmpKey $qmp '1') {
+                    Write-Host 'run-ng: QMP sendkey 1 -> WM launcher spawn demo'
+                } else {
+                    Write-Host 'run-ng: WARN QMP sendkey 1 failed; WM uses auto fallback'
+                }
+            }
             # WP3-1：第一帧合成完成 -> screendump + 像素断言（只做一次）。
             if (-not $screenChecked -and $qmp -and -not $Fallback -and $text.Contains('ng: composite ok (px=')) {
                 $screenChecked = $true
@@ -858,6 +944,43 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
                 } else {
                     $screenBad = $true
                     $screenMsg = 'QMP screendump failed'
+                }
+            }
+            # WP3-2：任务切换完成 -> screendump 断言面板背景 + Demo 窗口存在。
+            if (-not $wmScreenChecked -and $qmp -and -not $Fallback -and -not $NoQmp -and $text.Contains('ng: wm task switch ok (focus=')) {
+                $wmScreenChecked = $true
+                $shot2 = Join-Path $tmpBase 'screen2.ppm'
+                Remove-Item -LiteralPath $shot2 -Force -ErrorAction SilentlyContinue
+                $taskMatch = [regex]::Matches($text, 'ng: wm task ok \(id=(\d+) x=(\d+) y=(\d+)')
+                if ($taskMatch.Count -gt 0) {
+                    $wmTaskX = [int]$taskMatch[$taskMatch.Count - 1].Groups[2].Value
+                    $wmTaskY = [int]$taskMatch[$taskMatch.Count - 1].Groups[3].Value
+                }
+                if (Send-QmpScreendump $qmp $shot2) {
+                    for ($i = 0; $i -lt 60; $i++) {
+                        if ((Test-Path -LiteralPath $shot2) -and (Get-Item -LiteralPath $shot2).Length -gt 54) { break }
+                        Start-Sleep -Milliseconds 50
+                    }
+                    Start-Sleep -Milliseconds 150
+                    $ppm2 = $null
+                    if (Test-Path -LiteralPath $shot2) { $ppm2 = Read-Ppm $shot2 }
+                    $panelPx = Get-PpmPixel $ppm2 4 4
+                    $demoPx = Get-PpmPixel $ppm2 ($wmTaskX + 25) ($wmTaskY + 25)
+                    if ($null -eq $panelPx -or $null -eq $demoPx) {
+                        $wmScreenMsg = ("no ppm/pixel panel=({0}) demo=({1},{2})" -f $panelPx, ($wmTaskX + 25), ($wmTaskY + 25))
+                    } elseif ($panelPx[0] -ne 0x20 -or $panelPx[1] -ne 0x28 -or $panelPx[2] -ne 0x38) {
+                        $wmScreenMsg = ("panel (4,4)=#{0:x2}{1:x2}{2:x2}, want #202838" -f $panelPx[0], $panelPx[1], $panelPx[2])
+                    } elseif ($demoPx[0] -ne 0x30 -or $demoPx[1] -ne 0x70 -or $demoPx[2] -ne 0xC0) {
+                        $wmScreenMsg = ("demo ({0},{1})=#{2:x2}{3:x2}{4:x2}, want #3070c0" -f ($wmTaskX + 25), ($wmTaskY + 25), $demoPx[0], $demoPx[1], $demoPx[2])
+                    } else {
+                        $wmScreenOk = $true
+                        $wmScreenPixel = ("panel(4,4)=#{0:x2}{1:x2}{2:x2} demo({3},{4})=#{5:x2}{6:x2}{7:x2}" -f `
+                            $panelPx[0], $panelPx[1], $panelPx[2], ($wmTaskX + 25), ($wmTaskY + 25), `
+                            $demoPx[0], $demoPx[1], $demoPx[2])
+                        Write-Host ("run-ng: wm screendump pixel ok {0}" -f $wmScreenPixel)
+                    }
+                } else {
+                    $wmScreenMsg = 'QMP screendump (wm) failed'
                 }
             }
             # WP2-6：shell 已 ready -> 逐字符注入整条命令序列（一次会话只做一次）。
@@ -905,6 +1028,10 @@ if ($matched) {
             Fail ("QMP screendump pixel assertion failed ({0})" -f $screenMsg)
         }
         Write-Host ("run-ng: screendump pixel: {0} (QMP PPM)" -f $screenPixel)
+        if (-not $wmScreenChecked -or -not $wmScreenOk) {
+            Fail ("WP3-2 screendump pixel assertion failed ({0})" -f $wmScreenMsg)
+        }
+        Write-Host ("run-ng: wm screendump pixel: {0} (QMP PPM)" -f $wmScreenPixel)
     }
     $missingCount = @($required | Where-Object { -not $serialText.Contains($_) }).Count
     Write-Host ("run-ng: matched {0}/{1} expected lines + {2} patterns" -f ($required.Count - $missingCount), $required.Count, $patterns.Count)

@@ -261,7 +261,7 @@ static void wp31_kill_and_wait(u32 pid)
 
 int wp31_selftest(void)
 {
-    char text[128];
+    char text[256];
     u32 len = 0;
     u32 ticket = 0;
     u32 dispd = 0;

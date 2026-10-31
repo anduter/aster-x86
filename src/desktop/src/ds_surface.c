@@ -107,12 +107,22 @@ int ds_table_create(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
                     u32 client_ticket, u32 shm_handle, u32 shm_pages,
                     u64 pixels, u32 *out_id)
 {
+    /* v1 语义：空标题、级联放置（WP3-1 的调用方与单测继续用它）。 */
+    return ds_table_create_ex(t, w, h, owner_pid, client_ticket, shm_handle,
+                              shm_pages, pixels, NULL, -1, -1, out_id);
+}
+
+int ds_table_create_ex(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
+                       u32 client_ticket, u32 shm_handle, u32 shm_pages,
+                       u64 pixels, const char *title, i32 x, i32 y,
+                       u32 *out_id)
+{
     u64 need_pages;
     u32 slot = DS_SURFACES_MAX;
     u32 i;
     u32 id;
-    u32 x = 0;
-    u32 y = 0;
+    u32 px = 0;
+    u32 py = 0;
     struct ds_surface *s;
 
     if (out_id != NULL) {
@@ -155,15 +165,41 @@ int ds_table_create(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
         t->next_id = 2; /* 回绕：0 永远不是合法 id，1 留给下一个 */
     }
 
-    ds_place(t, w, h, &x, &y);
+    if (x >= 0 && y >= 0) {
+        /* WP3-2：客户端指定位置（WM 的 1280x32 面板必须在 (0,0)）。 */
+        px = (u32)x;
+        py = (u32)y;
+        if ((u64)px + (u64)w > (u64)t->screen_w) {
+            px = ((u64)t->screen_w > (u64)w) ? (u32)((u64)t->screen_w - (u64)w)
+                                             : 0u;
+        }
+        if ((u64)py + (u64)h > (u64)t->screen_h) {
+            py = ((u64)t->screen_h > (u64)h) ? (u32)((u64)t->screen_h - (u64)h)
+                                             : 0u;
+        }
+    } else {
+        ds_place(t, w, h, &px, &py);
+    }
     s = &t->slot[slot];
     ds_table_zero(s, (u64)sizeof(*s));
     s->used = 1;
     s->id = id;
     s->w = w;
     s->h = h;
-    s->x = x;
-    s->y = y;
+    s->x = px;
+    s->y = py;
+    {
+        u32 k;
+
+        for (k = 0; k + 1u < (u32)DS_TITLE_MAX; k++) {
+            char c = (title != NULL) ? title[k] : '\0';
+
+            s->title[k] = c;
+            if (c == '\0') {
+                break;
+            }
+        }
+    }
     s->owner_pid = owner_pid;
     s->client_ticket = client_ticket;
     s->shm_handle = shm_handle;
@@ -205,6 +241,31 @@ u32 ds_table_count(const struct ds_table *t)
 u32 ds_table_focus_id(const struct ds_table *t)
 {
     return (t == NULL) ? 0 : t->focus_id;
+}
+
+u32 ds_table_fill_list(const struct ds_table *t, struct ds_list_entry *out,
+                       u32 max)
+{
+    u32 n = 0;
+    u32 i;
+
+    if (t == NULL || out == NULL) {
+        return 0;
+    }
+    if (max > DS_LIST_MAX) {
+        max = DS_LIST_MAX;
+    }
+    for (i = 0; i < t->count && n < max; i++) {
+        const struct ds_surface *s = &t->slot[t->order[i]];
+
+        if (!s->used) {
+            continue;
+        }
+        ds_list_entry_set(&out[n], s->id, s->owner_pid, s->x, s->y, s->w, s->h,
+                          (s->id == t->focus_id) ? 1u : 0u, s->title);
+        n++;
+    }
+    return n;
 }
 
 int ds_table_mark_mapped(struct ds_table *t, u32 id)
@@ -282,7 +343,12 @@ int ds_table_focus(struct ds_table *t, u32 id)
     pos = ds_order_pos(t, slot);
     if (pos >= 0) {
         ds_order_remove(t, (u32)pos);
-        ds_order_push_back(t, slot);
+        /*
+         * ds_order_remove() 把元素左移并把最后一格清零，但**不改 count**
+         * （destroy 才减）。所以这里把 slot 放回最后一个有效位置；
+         * 用 push_back(按 count 写) 会留下一个清零的空洞。
+         */
+        t->order[t->count - 1u] = slot;
     }
     t->focus_id = id;
     return DS_OK;

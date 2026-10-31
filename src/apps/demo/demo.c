@@ -257,9 +257,9 @@ static void e_draw_surface(u32 *px, u32 w, u32 h)
     /* 实心矩形：QMP 截图像素断言就打在 (25,25)（落在这个矩形里）。 */
     ds_draw_fill(&b, 20, 20, 140, 70, E_OPAQUE(DS_DEMO_ACCENT));
     ds_draw_outline(&b, 18, 18, 144, 74, 2, E_OPAQUE(0x00FFFFFFu));
-    ds_draw_text(&b, 16, 110, "Aster ng WP3-1 display server",
+    ds_draw_text(&b, 16, 110, "Aster ng WP3-2 demo window",
                  E_OPAQUE(0x00FFFFFFu), E_OPAQUE(0x00101820u));
-    ds_draw_text(&b, 16, 126, "displayd (L2a) + demo (L3)",
+    ds_draw_text(&b, 16, 126, "title: Demo   (L3 client)",
                  E_OPAQUE(0x00C8D8FFu), E_OPAQUE(0x00101820u));
     ds_draw_text(&b, 16, 142, "composited via shared memory",
                  E_OPAQUE(0x00C8D8FFu), E_OPAQUE(0x00101820u));
@@ -285,7 +285,8 @@ static int e_wait_reply(u32 port, struct ds_msg *out)
     return DS_ETIMEDOUT;
 }
 
-static int e_create_surface(u32 server, u32 my, u32 w, u32 h, u32 *out_id,
+static int e_create_surface(u32 server, u32 my, u32 w, u32 h, const char *title,
+                            u32 flags, u32 pos_x, u32 pos_y, u32 *out_id,
                             u32 *out_handle, u32 *out_pages)
 {
     struct ds_msg m;
@@ -294,6 +295,11 @@ static int e_create_surface(u32 server, u32 my, u32 w, u32 h, u32 *out_id,
     m.type = DS_MSG_CREATE;
     m.u.create.w = w;
     m.u.create.h = h;
+    m.u.create.flags = flags;
+    m.u.create.x = pos_x;
+    m.u.create.y = pos_y;
+    m.u.create.owner_pid = (u32)e_sys(E_SYS_GETPID, 0, 0, 0);
+    ds_title_set(m.u.create.title, title);
     if (e_send_msg(server, &m, my) != 0) {
         return -1;
     }
@@ -349,7 +355,8 @@ static void e_role_client(void)
         u32 pg = 0;
         u32 sva = 0;
 
-        if (e_create_surface(server, my, 64, 48, &sid, &sh, &pg) != 0) {
+        if (e_create_surface(server, my, 64, 48, "scratch", 0, 0, 0, &sid, &sh,
+                             &pg) != 0) {
             e_put("ng: demo FAIL (scratch create)\r\n");
             (void)e_sys(E_SYS_EXIT, 1, 0, 0);
         }
@@ -367,9 +374,9 @@ static void e_role_client(void)
         (void)e_send_msg(server, &m, my);
     }
 
-    /* CREATE(w,h) --from=my --> displayd */
-    if (e_create_surface(server, my, w, h, &surface_id, &shm_handle, &pages) !=
-        0) {
+    /* CREATE(w,h,title=Demo) --from=my --> displayd */
+    if (e_create_surface(server, my, w, h, DS_DEMO_TITLE, 0, 0, 0, &surface_id,
+                         &shm_handle, &pages) != 0) {
         e_put("ng: demo FAIL (create)\r\n");
         (void)e_sys(E_SYS_EXIT, 1, 0, 0);
     }
@@ -379,6 +386,11 @@ static void e_role_client(void)
     e_puthex(shm_handle);
     e_put(" pages=");
     e_putdec(pages);
+    e_put(")\r\n");
+    e_put("ng: demo title ok (id=");
+    e_putdec(surface_id);
+    e_put(" title=");
+    e_put(DS_DEMO_TITLE);
     e_put(")\r\n");
 
     /* 数据面：把 displayd 分配的共享页映射进本进程（跨进程 SHM）。 */
@@ -496,6 +508,93 @@ static void e_role_hold(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* 角色：window（常驻窗口；WM 的任务切换/QMP 截图用）                        */
+/* ------------------------------------------------------------------------- */
+
+#define E_WINDOW_ROUNDS 500u /* 500 * 20ms ≈ 10s；内核会提前 kill */
+
+static void e_role_window(void)
+{
+    u32 my = 0;
+    u32 server = 0;
+    u32 surface_id = 0;
+    u32 shm_handle = 0;
+    u32 pages = 0;
+    u32 va = 0;
+    u32 pid = (u32)e_sys(E_SYS_GETPID, 0, 0, 0);
+    u32 got_input = 0;
+    u32 tries;
+    struct ds_msg m;
+    i64 rc;
+
+    server = e_read_server_ticket();
+    if (server == 0) {
+        e_put("ng: demo FAIL (no display port, pid=");
+        e_putdec(pid);
+        e_put(")\r\n");
+        (void)e_sys(E_SYS_EXIT, 1, 0, 0);
+    }
+    my = e_port_create();
+    if (my == 0) {
+        e_put("ng: demo FAIL (port)\r\n");
+        (void)e_sys(E_SYS_EXIT, 1, 0, 0);
+    }
+    if (e_create_surface(server, my, DS_DEMO_W, DS_DEMO_H, DS_DEMO_TITLE, 0, 0,
+                         0, &surface_id, &shm_handle, &pages) != 0) {
+        e_put("ng: demo FAIL (window create)\r\n");
+        (void)e_sys(E_SYS_EXIT, 1, 0, 0);
+    }
+    rc = e_sys(E_SYS_SHM_MAP, (i64)shm_handle, (i64)&va, 0);
+    if (rc != 0 || va == 0) {
+        e_put("ng: demo FAIL (window shm map)\r\n");
+        (void)e_sys(E_SYS_EXIT, 1, 0, 0);
+    }
+    e_draw_surface((u32 *)(usize)va, DS_DEMO_W, DS_DEMO_H);
+
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = DS_MSG_MAP;
+    m.u.map.surface_id = surface_id;
+    (void)e_send_msg(server, &m, my);
+
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = DS_MSG_COMMIT;
+    m.u.commit.surface_id = surface_id;
+    m.u.commit.x = 0;
+    m.u.commit.y = 0;
+    m.u.commit.w = DS_DEMO_W;
+    m.u.commit.h = DS_DEMO_H;
+    (void)e_send_msg(server, &m, my);
+
+    /*
+     * 注意：**不发 FOCUS**。窗口焦点归 WM（WP3-2 的 Tab 任务切换）——
+     * 应用不再自己抢焦点，这是 S1/WP3-3 之前最小的一步。
+     */
+    e_put("ng: demo window up (id=");
+    e_putdec(surface_id);
+    e_put(" title=");
+    e_put(DS_DEMO_TITLE);
+    e_put(")\r\n");
+
+    for (tries = 0; tries < E_WINDOW_ROUNDS; tries++) {
+        int type = e_recv_msg(my, &m, NULL, DS_INPUT_WAIT_TICKS);
+
+        if (type == (int)DS_MSG_INPUT) {
+            got_input++;
+        }
+        if (type < 0 && type != E_ETIMEDOUT) {
+            break;
+        }
+    }
+    (void)e_sys(E_SYS_PORT_CLOSE, (i64)my, 0, 0);
+    e_put("ng: demo window done (id=");
+    e_putdec(surface_id);
+    e_put(" input=");
+    e_putdec(got_input);
+    e_put(")\r\n");
+    (void)e_sys(E_SYS_EXIT, 0, 0, 0);
+}
+
+/* ------------------------------------------------------------------------- */
 /* 入口                                                                       */
 /* ------------------------------------------------------------------------- */
 
@@ -515,6 +614,10 @@ int e_main(long argc, char **argv)
 {
     if (argc >= 2 && argv != NULL && e_streq(argv[1], "hold")) {
         e_role_hold();
+        return 0;
+    }
+    if (argc >= 2 && argv != NULL && e_streq(argv[1], "window")) {
+        e_role_window();
         return 0;
     }
     e_role_client();

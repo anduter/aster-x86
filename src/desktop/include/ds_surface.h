@@ -37,7 +37,8 @@ struct ds_surface {
     u32 h;
     u32 x; /* 屏幕坐标（左上角） */
     u32 y;
-    u32 owner_pid;     /* 证据用（当前 IPC 不带 pid，displayd 填调用方 pid 或 0） */
+    char title[DS_TITLE_MAX]; /* v2 CREATE title（v1 客户端为空串） */
+    u32 owner_pid;     /* v2：客户端自报 getpid()；v1 客户端为 0 */
     u32 client_ticket; /* 客户端回复端口 ticket（INPUT 推送目标） */
     u32 shm_handle;    /* SYS_SHM_ALLOC 返回的共享内存 handle */
     u32 shm_pages;
@@ -67,18 +68,34 @@ void ds_table_init(struct ds_table *t, u32 screen_w, u32 screen_h);
 const char *ds_table_version(void);
 
 /*
- * 建一个 surface。cascade 位置由表算；w/h 或 shm_pages 不合法 -> EINVAL，
- * 表满 -> ENOSPC，像素缓冲不够 -> EINVAL。成功写 *out_id（>0）。
+ * 建一个 surface（v1 语义：空标题、级联放置）。w/h 或 shm_pages 不合法 ->
+ * EINVAL，表满 -> ENOSPC，像素缓冲不够 -> EINVAL。成功写 *out_id（>0）。
  */
 int ds_table_create(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
                     u32 client_ticket, u32 shm_handle, u32 shm_pages,
                     u64 pixels, u32 *out_id);
+
+/*
+ * WP3-2：带标题/指定位置的 CREATE（display 协议 v2）。title 可为 NULL；
+ * x/y >= 0 表示客户端指定左上角（DS_CREATE_F_POS），否则走级联放置。
+ */
+int ds_table_create_ex(struct ds_table *t, u32 w, u32 h, u32 owner_pid,
+                       u32 client_ticket, u32 shm_handle, u32 shm_pages,
+                       u64 pixels, const char *title, i32 x, i32 y,
+                       u32 *out_id);
 
 struct ds_surface *ds_table_find(struct ds_table *t, u32 id);
 /* 第 index 个（0 = 最下层）；越界返回 NULL。 */
 struct ds_surface *ds_table_at(struct ds_table *t, u32 index);
 u32 ds_table_count(const struct ds_table *t);
 u32 ds_table_focus_id(const struct ds_table *t);
+
+/*
+ * WP3-2：把表按 z-order（后 -> 前）填进 LIST_REPLY 的 entries[]，返回条数
+ * （<= min(max, DS_LIST_MAX)）。focused 位来自 t->focus_id，标题来自 surface。
+ */
+u32 ds_table_fill_list(const struct ds_table *t, struct ds_list_entry *out,
+                       u32 max);
 
 /* 客户端映射完成（幂等：重复 MAP 返回 DS_OK）。 */
 int ds_table_mark_mapped(struct ds_table *t, u32 id);

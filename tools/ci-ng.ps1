@@ -10,7 +10,7 @@
 #                                  log/pkg/shell/parity），期望 N checks, 0 failures
 #   4. tools/build-ng.ps1          构建 dist-ng/aster-ng.elf（ELF64 + multiboot2
 #                                  + PVH + 用户 ELF 校验）
-#   5. tools/run-ng.ps1            QEMU 启动，等 108 条期望行 + 42 条正则（含
+#   5. tools/run-ng.ps1            QEMU 启动，等 147 条期望行 + 61 条正则（含
 #                                  `ng: ring3 hello`、`ng: parity 100/100 PASS`）
 #   6. tools/parity-ng.ps1         WP2-7 parity 门禁（复用第 5 步日志，断言
 #                                  100 项逐条 ok / 无 FAIL，不重复起 QEMU）

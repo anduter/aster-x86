@@ -55,6 +55,7 @@
 #include "wp25.h"
 #include "wp26.h"
 #include "wp31.h"
+#include "wp32.h"
 
 /* WP2-5：把每个 WP 的 PASS/FAIL 写进 64 KiB log 环（启动关键路径证据）。 */
 static void log_wp(const char *wp, int fails)
@@ -371,6 +372,27 @@ void kmain(u64 mb_info)
         serial_puts(")\r\n");
     }
     log_wp("WP3-1", fails);
+
+    /* WP3-2：shell/WM（L2b，ring3 进程 /bin/wm）。WM 只是 displayd 的普通
+     * 客户端：面板 surface + LIST/FOCUS/REGISTER_HOTKEY + 启动器 spawn；不碰
+     * LFB、不拥有应用进程。依赖 WP3-1 的 displayd 与 WP3-0 的 spawn/IPC。
+     * 没有 LFB 时打印 skipped 并跳过，不算失败。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += wp32_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP3-2 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP3-2 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+    log_wp("WP3-2", fails);
 
     /* WP2-6：用户态 shell（L3）。默认启动顺序：所有自检 -> ring3 hello ->
      * shell（交互，直到 exit/Ctrl-D）。`build-ng.ps1 -Smoke` 编出的内核跳过

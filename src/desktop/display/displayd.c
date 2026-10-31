@@ -163,6 +163,20 @@ static u32 g_port;      /* displayd 的端口 ticket（客户端从 /run/display
 static u32 g_commits;   /* COMMIT 次数 */
 static u32 g_inputs;    /* 转发给客户端的按键数 */
 static u32 g_px;        /* 最近一次合成后 LFB 探针像素（证据） */
+static u32 g_hotkey_client;  /* REGISTER_HOTKEY 的客户端 ticket（0 = 没注册） */
+static u32 g_hotkey_surface; /* 注册者的 surface id（INPUT 副本里的 surface_id） */
+static u32 g_hotkey_key;     /* DS_HOTKEY_ANY = 所有键 */
+static u32 g_hotkey_prints;  /* 热键转发证据行计数 */
+static u32 g_last_list_n = 0xFFFFFFFFu;     /* LIST 证据行去重 */
+static u32 g_last_list_focus = 0xFFFFFFFFu;
+/* WP3-2：WM 通过 WM_STATUS 报上来的计数（汇总进 /run/display.status）。 */
+static u32 g_wm_seen;
+static u32 g_wm_tasks;
+static u32 g_wm_focus;
+static u32 g_wm_switch;
+static u32 g_wm_lastswitch;
+static u32 g_wm_launch;
+static u32 g_wm_lastpid;
 static struct ds_table g_table;
 static struct ds_screen g_screen;
 
@@ -190,7 +204,7 @@ static void d_status_append_u32(char *buf, u32 *len, u32 v)
 
 static void d_status_write(void)
 {
-    char buf[192];
+    char buf[320];
     char hex[10];
     u32 len = 0;
     u32 mapped = 0;
@@ -214,6 +228,25 @@ static void d_status_write(void)
     d_status_append_u32(buf, &len, ds_table_focus_id(&g_table));
     d_status_append(buf, &len, " input=");
     d_status_append_u32(buf, &len, g_inputs);
+    d_status_append(buf, &len, " hotkey=");
+    d_status_append_u32(buf, &len, (g_hotkey_client != 0) ? 1u : 0u);
+    /* WP3-2：WM 的自治计数（内核 wp32 自检读同一份状态文件）。 */
+    d_status_append(buf, &len, " wm=");
+    d_status_append_u32(buf, &len, (g_wm_seen != 0) ? 1u : 0u);
+    if (g_wm_seen != 0) {
+        d_status_append(buf, &len, " wmtasks=");
+        d_status_append_u32(buf, &len, g_wm_tasks);
+        d_status_append(buf, &len, " wmfocus=");
+        d_status_append_u32(buf, &len, g_wm_focus);
+        d_status_append(buf, &len, " wmswitch=");
+        d_status_append_u32(buf, &len, g_wm_switch);
+        d_status_append(buf, &len, " wmlast=");
+        d_status_append_u32(buf, &len, g_wm_lastswitch);
+        d_status_append(buf, &len, " wmlaunch=");
+        d_status_append_u32(buf, &len, g_wm_launch);
+        d_status_append(buf, &len, " wmlastpid=");
+        d_status_append_u32(buf, &len, g_wm_lastpid);
+    }
     d_status_append(buf, &len, " px=0x");
     (void)d_hexstr(g_px, hex);
     for (i = 0; hex[i] != '\0'; i++) {
@@ -338,6 +371,21 @@ static void d_composite_surface(struct ds_surface *sf)
 /* 输入转发                                                                   */
 /* ------------------------------------------------------------------------- */
 
+static void d_send_input(u32 ticket, u32 surface_id, u32 ascii, u32 scancode,
+                         u32 flags)
+{
+    struct ds_msg m;
+
+    ds_memzero(&m, (u64)sizeof(m));
+    m.type = DS_MSG_INPUT;
+    m.u.input.surface_id = surface_id;
+    m.u.input.kind = DS_INPUT_KEY_DOWN;
+    m.u.input.key = ascii;
+    m.u.input.scancode = scancode;
+    m.u.input.flags = flags;
+    (void)d_send_msg(ticket, 0, &m, g_port);
+}
+
 static void d_poll_input(void)
 {
     u32 n;
@@ -348,7 +396,7 @@ static void d_poll_input(void)
         u32 ascii;
         u32 scancode;
         struct ds_surface *focus;
-        struct ds_msg m;
+        u32 hotkey_sent = 0;
 
         if (v < 0) {
             return; /* EAGAIN：没有键了 */
@@ -356,18 +404,35 @@ static void d_poll_input(void)
         flags = (u32)((v >> 24) & 0xFFu);
         ascii = (u32)((v >> 16) & 0xFFu);
         scancode = (u32)(v & 0xFFu);
+
+        /*
+         * WP3-2：WM 注册了全局热键 —— 先把按键给 WM 一份（带 GLOBAL 位），
+         * 再按焦点转发。WM 用它做 Tab 任务切换 / 1..9 启动器。
+         */
+        if (g_hotkey_client != 0 &&
+            (g_hotkey_key == DS_HOTKEY_ANY || ascii == g_hotkey_key)) {
+            d_send_input(g_hotkey_client, g_hotkey_surface, ascii, scancode,
+                         flags | DS_INPUT_F_GLOBAL);
+            hotkey_sent = 1;
+            if (g_hotkey_prints < 8u) {
+                g_hotkey_prints++;
+                d_put("ng: displayd hotkey ok (key=");
+                d_puthex(ascii);
+                d_put(" scancode=");
+                d_puthex(scancode);
+                d_put(")\r\n");
+            }
+        }
+
         focus = ds_table_find(&g_table, ds_table_focus_id(&g_table));
         if (focus == NULL || focus->client_ticket == 0) {
             continue;
         }
-        ds_memzero(&m, (u64)sizeof(m));
-        m.type = DS_MSG_INPUT;
-        m.u.input.surface_id = focus->id;
-        m.u.input.kind = DS_INPUT_KEY_DOWN;
-        m.u.input.key = ascii;
-        m.u.input.scancode = scancode;
-        m.u.input.flags = flags;
-        (void)d_send_msg(focus->client_ticket, 0, &m, g_port);
+        /* 焦点客户端就是 WM 时，热键副本已经送过了（不重复投递）。 */
+        if (!(hotkey_sent != 0 && focus->client_ticket == g_hotkey_client)) {
+            d_send_input(focus->client_ticket, focus->id, ascii, scancode,
+                         flags);
+        }
         g_inputs++;
         d_put("ng: displayd input ok (key=");
         if (ascii >= 0x20u && ascii < 0x7Fu) {
@@ -409,8 +474,22 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
     u64 va = 0;
     u32 handle = 0;
     u32 id = 0;
+    u32 owner_pid = 0;
+    i32 px = -1;
+    i32 py = -1;
+    char title[DS_TITLE_MAX];
     i64 rc;
 
+    title[0] = '\0';
+    /* v2 才带 title / owner_pid / 指定位置；v1 客户端走默认（空标题+级联）。 */
+    if (m->version >= 2u) {
+        ds_title_get(m->u.create.title, title, (u32)sizeof(title));
+        owner_pid = m->u.create.owner_pid;
+        if ((m->u.create.flags & DS_CREATE_F_POS) != 0u) {
+            px = (i32)m->u.create.x;
+            py = (i32)m->u.create.y;
+        }
+    }
     if (w == 0 || h == 0 || w > DS_SURFACE_MAX_W || h > DS_SURFACE_MAX_H) {
         d_reply_status(from, DS_MSG_CREATE_REPLY, DS_EINVAL, m->seq);
         d_put("ng: surface create FAIL (geom)\r\n");
@@ -432,7 +511,8 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
         d_put(")\r\n");
         return;
     }
-    rc = ds_table_create(&g_table, w, h, 0, from, handle, pages, va, &id);
+    rc = ds_table_create_ex(&g_table, w, h, owner_pid, from, handle, pages, va,
+                            title, px, py, &id);
     if (rc != DS_OK) {
         d_reply_status(from, DS_MSG_CREATE_REPLY, (i32)rc, m->seq);
         d_put("ng: surface create FAIL (table)\r\n");
@@ -465,6 +545,86 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
     d_put(" pages=");
     d_putdec(pages);
     d_put(")\r\n");
+    if (title[0] != '\0') {
+        d_put("ng: surface title ok (id=");
+        d_putdec(id);
+        d_put(" title=");
+        d_put(title);
+        d_put(")\r\n");
+    }
+    g_last_list_n = 0xFFFFFFFFu;
+    d_status_write();
+}
+
+/* WP3-2：LIST -> LIST_REPLY（surface 表快照；WM 的任务列表/任务切换用）。 */
+static void d_handle_list(const struct ds_msg *m, u32 from)
+{
+    struct ds_msg r;
+    u32 n;
+    u32 focus = ds_table_focus_id(&g_table);
+
+    ds_memzero(&r, (u64)sizeof(r));
+    r.type = DS_MSG_LIST_REPLY;
+    r.status = 0;
+    r.seq = m->seq;
+    n = ds_table_fill_list(&g_table, r.u.list_reply.entries, DS_LIST_MAX);
+    r.u.list_reply.count = n;
+    (void)d_send_msg(from, 1, &r, g_port);
+
+    if (n != g_last_list_n || focus != g_last_list_focus) {
+        g_last_list_n = n;
+        g_last_list_focus = focus;
+        d_put("ng: displayd list ok (n=");
+        d_putdec(n);
+        d_put(" focus=");
+        d_putdec(focus);
+        d_put(")\r\n");
+    }
+}
+
+/* WP3-2：WM 注册全局热键（key = DS_HOTKEY_ANY 表示所有键先给 WM 一份）。 */
+static void d_handle_register_hotkey(const struct ds_msg *m, u32 from)
+{
+    g_hotkey_client = from;
+    g_hotkey_surface = m->u.register_hotkey.surface_id;
+    g_hotkey_key = m->u.register_hotkey.key;
+    d_reply_status(from, DS_MSG_REGISTER_HOTKEY, DS_OK, m->seq);
+    d_put("ng: hotkey registered ok (surface=");
+    d_putdec(g_hotkey_surface);
+    d_put(" key=");
+    if (g_hotkey_key == DS_HOTKEY_ANY) {
+        d_put("any");
+    } else {
+        d_puthex(g_hotkey_key);
+    }
+    d_put(")\r\n");
+    d_status_write();
+}
+
+/* WP3-2：WM 把切换/启动计数报上来，displayd 汇总进 /run/display.status。 */
+static void d_handle_wm_status(const struct ds_msg *m)
+{
+    u32 new_switch = m->u.wm_status.switches;
+    u32 new_launch = m->u.wm_status.launches;
+    int changed = (g_wm_seen == 0) || (new_switch != g_wm_switch) ||
+                  (new_launch != g_wm_launch);
+
+    g_wm_seen = 1;
+    g_wm_tasks = m->u.wm_status.tasks;
+    g_wm_focus = m->u.wm_status.focus;
+    g_wm_switch = new_switch;
+    g_wm_lastswitch = m->u.wm_status.lastswitch;
+    g_wm_launch = new_launch;
+    g_wm_lastpid = m->u.wm_status.lastpid;
+    if (changed) {
+        d_put("ng: displayd wm status ok (switch=");
+        d_putdec(g_wm_switch);
+        d_put(" launch=");
+        d_putdec(g_wm_launch);
+        d_put(" tasks=");
+        d_putdec(g_wm_tasks);
+        d_put(")\r\n");
+    }
     d_status_write();
 }
 
@@ -521,7 +681,17 @@ static void d_handle_msg(int type, const struct ds_msg *m, u32 from)
         break;
     case DS_MSG_DESTROY:
         (void)ds_table_destroy(&g_table, m->u.destroy.surface_id);
+        g_last_list_n = 0xFFFFFFFFu;
         d_status_write();
+        break;
+    case DS_MSG_LIST:
+        d_handle_list(m, from);
+        break;
+    case DS_MSG_REGISTER_HOTKEY:
+        d_handle_register_hotkey(m, from);
+        break;
+    case DS_MSG_WM_STATUS:
+        d_handle_wm_status(m);
         break;
     case DS_MSG_BYE:
     default:

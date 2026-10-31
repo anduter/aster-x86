@@ -133,7 +133,8 @@ if ($Smoke) { $cFlags += '-DNG_SMOKE_MODE=1' }
 $userCFlags = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
     '-fno-stack-protector', '-fcf-protection=none', '-mno-sse',
     '-mgeneral-regs-only', '-fno-builtin', '-fno-pic', '-fno-pie', '-std=c11',
-    '-O2', '-Wall', '-Wextra', '-Werror',
+    '-Os', '-Wall', '-Wextra', '-Werror',
+    '-ffunction-sections', '-fdata-sections',
     '-I', $srcDir,
     '-I', (Join-Path $Repo 'src/desktop/include'),
     '-c')
@@ -159,7 +160,7 @@ if ($LASTEXITCODE -ne 0) { Fail 'user hello.S compile failed' }
 Write-Host ("  link    -> {0}" -f 'obj-ng/hello.elf (base 0x40000000)')
 $userLinkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $userElf, $userObj)
+    '-Wl,--gc-sections', '-o', $userElf, $userObj)
 & $clang @userLinkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) { Fail 'user hello.elf link failed' }
 
@@ -253,7 +254,7 @@ if ($LASTEXITCODE -ne 0) { Fail 'user shell.c compile failed' }
 Write-Host ("  link    -> {0}" -f 'obj-ng/shell.elf (base 0x40000000)')
 $shellLinkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $shellElf, $shellObj)
+    '-Wl,--gc-sections', '-o', $shellElf, $shellObj)
 & $clang @shellLinkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) { Fail 'user shell.elf link failed' }
 
@@ -344,7 +345,7 @@ if ($LASTEXITCODE -ne 0) { Fail 'user proc.c compile failed' }
 Write-Host ("  link    -> {0}" -f 'obj-ng/proc.elf (base 0x40000000)')
 $procLinkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $procElf, $procObj)
+    '-Wl,--gc-sections', '-o', $procElf, $procObj)
 & $clang @procLinkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) { Fail 'user proc.elf link failed' }
 
@@ -504,29 +505,42 @@ ${SymbolPrefix}_end:
     if ($LASTEXITCODE -ne 0) { Fail ("{0} ELF embed compile failed" -f $Label) }
 }
 
-Write-Host '=== user-desktop (WP3-1) ==='
+Write-Host '=== user-desktop (WP3-2) ==='
 $dsInclude = Join-Path $Repo 'src/desktop/include'
 $dsSrcDir = Join-Path $Repo 'src/desktop/src'
 $dsUserSources = @('ds_protocol.c', 'ds_surface.c', 'ds_composite.c',
-    'ds_font8x8.c', 'ds_draw.c')
+    'ds_blend.c', 'ds_font8x8.c', 'ds_draw.c', 'ds_wm.c')
 $dsUserObjs = New-Object System.Collections.Generic.List[string]
+$dsObjByName = @{}
 foreach ($name in $dsUserSources) {
     $src = Join-Path $dsSrcDir $name
     if (-not (Test-Path -LiteralPath $src)) { Fail ("missing desktop source: {0}" -f $src) }
-    $obj = Join-Path $objDir ('ds_' + [IO.Path]::GetFileNameWithoutExtension($name) + '.o')
+    $leaf = [IO.Path]::GetFileNameWithoutExtension($name)
+    $obj = Join-Path $objDir ('ds_' + $leaf + '.o')
     Write-Host ("  {0} -> {1}" -f $name, ('obj-ng/' + [IO.Path]::GetFileName($obj)))
     & $clang @($userCFlags + @($src, '-o', $obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
     if ($LASTEXITCODE -ne 0) { Fail ("{0} compile failed" -f $name) }
     $dsUserObjs.Add($obj)
+    $dsObjByName[$leaf] = $obj
 }
 
+# 每个程序只链自己用到的 L2 模块（内核 .rodata 里嵌入 6 个用户 ELF，
+# 2 MiB 映像窗口很紧：displayd 不需要 ds_draw/ds_font8x8/ds_wm，
+# demo/wm 不需要 ds_surface/ds_composite）。
 $desktopPrograms = @(
     @{ Name = 'displayd'; Src = (Join-Path $Repo 'src/desktop/display/displayd.c');
        Obj = (Join-Path $objDir 'user_displayd.o'); Elf = (Join-Path $objDir 'displayd.elf');
-       Sym = 'ng_displayd_elf'; Label = 'displayd' },
+       Sym = 'ng_displayd_elf'; Label = 'displayd';
+       Libs = @('ds_protocol', 'ds_surface', 'ds_composite', 'ds_blend') },
     @{ Name = 'demo'; Src = (Join-Path $Repo 'src/apps/demo/demo.c');
        Obj = (Join-Path $objDir 'user_demo.o'); Elf = (Join-Path $objDir 'demo.elf');
-       Sym = 'ng_demo_elf'; Label = 'demo' }
+       Sym = 'ng_demo_elf'; Label = 'demo';
+       Libs = @('ds_protocol', 'ds_blend', 'ds_font8x8', 'ds_draw') },
+    @{ Name = 'wm'; Src = (Join-Path $Repo 'src/desktop/shell/wm.c');
+       Obj = (Join-Path $objDir 'user_wm.o'); Elf = (Join-Path $objDir 'wm.elf');
+       Sym = 'ng_wm_elf'; Label = 'wm';
+       Libs = @('ds_protocol', 'ds_blend', 'ds_font8x8', 'ds_draw',
+                'ds_wm') }
 )
 $desktopBlobObjs = New-Object System.Collections.Generic.List[string]
 foreach ($prog in $desktopPrograms) {
@@ -535,9 +549,15 @@ foreach ($prog in $desktopPrograms) {
     & $clang @($userCFlags + @($prog.Src, '-o', $prog.Obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
     if ($LASTEXITCODE -ne 0) { Fail ("{0}.c compile failed" -f $prog.Name) }
     Write-Host ("  link    -> {0} (base 0x40000000)" -f ('obj-ng/' + [IO.Path]::GetFileName($prog.Elf)))
+    $progLibObjs = @()
+    foreach ($lib in $prog.Libs) {
+        if (-not $dsObjByName.ContainsKey($lib)) { Fail ("missing desktop object: {0}" -f $lib) }
+        $progLibObjs += $dsObjByName[$lib]
+    }
     $linkUserArgs = @($target, '-fuse-ld=lld', '-nostdlib',
         ('-Wl,-T,' + $userLd), '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-        '-o', $prog.Elf, $prog.Obj) + $dsUserObjs.ToArray()
+        '-Wl,--gc-sections',
+        '-o', $prog.Elf, $prog.Obj) + $progLibObjs
     & $clang @linkUserArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
     if ($LASTEXITCODE -ne 0) { Fail ("{0}.elf link failed" -f $prog.Name) }
     $info = Test-NgUserElf -Path $prog.Elf -Label $prog.Label -MinLoad 2
@@ -650,7 +670,7 @@ Write-Host ''
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'proc_table.c', 'proc.c', 'proc_selftest.c', 'shm_core.c', 'shm.c', 'fbmap.c', 'wp31_selftest.c', 'parity_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'proc_table.c', 'proc.c', 'proc_selftest.c', 'shm_core.c', 'shm.c', 'fbmap.c', 'wp31_selftest.c', 'wp32_selftest.c', 'parity_selftest.c', 'main.c')
 # L1 服务域源码（相对仓库根；-I src/ng 与各 src/services/*/include 已加）。
 $serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',

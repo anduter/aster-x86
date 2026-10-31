@@ -158,6 +158,16 @@ _start:
     jne .Lfail
     PRINT_MSG fs_msg_listdir, fs_msg_listdir_len
 
+    # ---- 27 unlink("/tmp/a")：demo 自己清理 ------------------------------
+    # ramfs 节点池只有 32 个；WP3-2 把 /bin/wm 也种进 /bin 之后，这里留下的
+    # /tmp/a 会挤掉后面用户态 shell 的 /tmp/s.txt。demo 跑完就删掉自己的
+    # scratch（27 unlink），给会话留一个节点。
+    leaq fs_path(%rip), %rdi
+    movl $27, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+
     # ---- WP2-2：FAT16 挂载点 /mnt/fat -------------------------------------
     # 20 open("/mnt/fat/HELLO.TXT", O_RDONLY) -> 21 read 18 字节并校验
     leaq fat_hello_path(%rip), %rdi

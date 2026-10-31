@@ -114,8 +114,10 @@ $sources = @(
     'src/desktop/src/ds_protocol.c',
     'src/desktop/src/ds_surface.c',
     'src/desktop/src/ds_composite.c',
+    'src/desktop/src/ds_blend.c',
     'src/desktop/src/ds_font8x8.c',
     'src/desktop/src/ds_draw.c',
+    'src/desktop/src/ds_wm.c',
     'tests/unit-ng/fake_ng_env.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
@@ -137,6 +139,7 @@ $sources = @(
     'tests/unit-ng/test_proc.c',
     'tests/unit-ng/test_shm.c',
     'tests/unit-ng/test_desktop.c',
+    'tests/unit-ng/test_wm.c',
     'tests/unit-ng/test_parity.c'
 )
 $srcPaths = @()
