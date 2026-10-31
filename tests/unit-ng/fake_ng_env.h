@@ -67,4 +67,14 @@ void fake_ipc_set_ret(u64 ret);
 u32 fake_ipc_count(void);
 const struct fake_ipc_call *fake_ipc_get(u32 i);
 
+/* ---- fake FS 数据页池（WP2-1：ramfs 的 fs_env） --------------------------- */
+/* 8 个 4 KiB 页；page_alloc 返回清零页，page_free 归还。fake_fs_reset 全归还。 */
+#include "ramfs.h"
+
+#define FAKE_FS_PAGES 8u
+
+void fake_fs_reset(void);
+void fake_fs_env(struct fs_env *env);
+u32 fake_fs_pages_live(void);
+
 #endif /* NG_TEST_FAKE_ENV_H */

@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "fake_ng_env.h"
+#include "fs_syscall.h"
 #include "ipc.h"
 #include "paging.h"
 #include "serial.h"
@@ -25,6 +26,7 @@
 #include "test_util.h"
 #include "thread.h"
 #include "uaccess.h"
+#include "vfs.h"
 
 /* 与 src/ng/syscall.c 的 struct syscall_frame 字段顺序一致（isr.S push 顺序）。 */
 struct syscall_frame {
@@ -442,12 +444,145 @@ static void t_kernel_stack(void)
 /* ------------------------------------------------------------------------- */
 /* 入口                                                                       */
 /* ------------------------------------------------------------------------- */
+/* 6. WP2-1：20..27 VFS 分发（用户指针 -> uaccess -> vfs）                     */
+/* ------------------------------------------------------------------------- */
+
+static void t_dispatch_fs(void)
+{
+    struct syscall_frame f;
+    struct fs_env env;
+    struct vfs_stat st;
+    char *path = (char *)(usize)ubuf;
+    char *buf = (char *)(usize)(ubuf + 128);
+    char *entp = (char *)(usize)(ubuf + 768);
+    int fd;
+
+    reset_env();
+    fake_fs_reset();
+    fake_fs_env(&env);
+    CHECK(fs_sys_init(&env) == VFS_OK);
+    CHECK(strcmp(fs_sys_ctx()->cwd, "/") == 0);
+
+    /* 20 open("/tmp/a", O_CREAT|O_RDWR, 0644) */
+    strcpy(path, "/tmp/a");
+    frame_init(&f, NG_SYS_OPEN);
+    f.rdi = ubuf;
+    f.rsi = VFS_O_CREAT | VFS_O_RDWR;
+    f.rdx = 0644;
+    syscall_dispatch(&f);
+    fd = (int)(i64)f.rax;
+    CHECK(fd > 0);
+
+    /* 22 write(fd, "hello", 5) */
+    memcpy(buf, "hello", 5);
+    frame_init(&f, NG_SYS_WRITE_FD);
+    f.rdi = (u64)fd;
+    f.rsi = ubuf + 128;
+    f.rdx = 5;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 5);
+
+    /* 23 close(fd) 后重开只读：新 fd 从 offset 0 读回 "hello"。 */
+    frame_init(&f, NG_SYS_CLOSE);
+    f.rdi = (u64)fd;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    strcpy(path, "/tmp/a");
+    frame_init(&f, NG_SYS_OPEN);
+    f.rdi = ubuf;
+    f.rsi = VFS_O_RDONLY;
+    f.rdx = 0;
+    syscall_dispatch(&f);
+    fd = (int)(i64)f.rax;
+    CHECK(fd > 0);
+
+    /* 21 read(fd, buf, 8) == 5 + 内容 */
+    memset(buf, 0, 16);
+    frame_init(&f, NG_SYS_READ);
+    f.rdi = (u64)fd;
+    f.rsi = ubuf + 128;
+    f.rdx = 8;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 5);
+    CHECK(memcmp(buf, "hello", 5) == 0);
+
+    /* 24 stat("/tmp/a", &st) */
+    frame_init(&f, NG_SYS_STAT);
+    f.rdi = ubuf;
+    f.rsi = ubuf + 256;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    memcpy(&st, (void *)(usize)(ubuf + 256), sizeof(st));
+    CHECK(st.type == VFS_NODE_FILE);
+    CHECK(st.size == 5);
+
+    /* 25 listdir("/tmp", ents, 4) == 1 */
+    strcpy(path, "/tmp");
+    frame_init(&f, NG_SYS_LISTDIR);
+    f.rdi = ubuf;
+    f.rsi = ubuf + 768;
+    f.rdx = 4;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 1);
+    {
+        struct vfs_dirent e;
+
+        memcpy(&e, entp, sizeof(e));
+        CHECK(e.name_len == 1);
+        CHECK(e.name[0] == 'a');
+        CHECK(e.type == VFS_NODE_FILE);
+    }
+
+    /* 23 close(fd) 后 21 read 旧 fd -> EBADF */
+    frame_init(&f, NG_SYS_CLOSE);
+    f.rdi = (u64)fd;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    frame_init(&f, NG_SYS_READ);
+    f.rdi = (u64)fd;
+    f.rsi = ubuf + 128;
+    f.rdx = 1;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)VFS_EBADF);
+
+    /* 坏路径指针 -> EFAULT（不会 #PF）；坏 stat 指针 -> EFAULT。 */
+    frame_init(&f, NG_SYS_OPEN);
+    f.rdi = 0x1000;
+    f.rsi = VFS_O_RDONLY;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)VFS_EFAULT);
+    frame_init(&f, NG_SYS_STAT);
+    f.rdi = ubuf;
+    f.rsi = 0;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)VFS_EFAULT);
+
+    /* 26 mkdir / 27 unlink 成功 / 失败码。 */
+    strcpy(path, "/d");
+    frame_init(&f, NG_SYS_MKDIR);
+    f.rdi = ubuf;
+    f.rsi = 0755;
+    syscall_dispatch(&f);
+    CHECK(f.rax == 0);
+    frame_init(&f, NG_SYS_MKDIR);
+    f.rdi = ubuf;
+    f.rsi = 0755;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)VFS_EEXIST);
+    frame_init(&f, NG_SYS_UNLINK);
+    f.rdi = ubuf;
+    syscall_dispatch(&f);
+    CHECK(f.rax == (u64)(i64)VFS_EISDIR);
+}
+
+/* ------------------------------------------------------------------------- */
 
 int test_syscall(void)
 {
     t_dispatch_basic();
     t_write_bounds();
     t_dispatch_ipc();
+    t_dispatch_fs();
     t_run_user_args();
     t_run_user_ok();
     t_run_user_bad();

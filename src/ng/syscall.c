@@ -22,6 +22,7 @@
  */
 #include "syscall.h"
 
+#include "fs_syscall.h"
 #include "gdt.h"
 #include "io.h"
 #include "ipc.h"
@@ -100,6 +101,7 @@ static volatile u64 ring3_writes;
 static volatile u64 ring3_bytes;
 static volatile u64 ring3_exit_code;
 static volatile u64 ring3_bad_writes;
+static volatile u64 ring3_fs_calls;
 static volatile int syscall_from_ring3;
 static volatile int ring3_user_rsp_ok;
 static u64 ring3_stack_lo;
@@ -250,6 +252,55 @@ void syscall_dispatch(struct syscall_frame *f)
     case NG_SYS_PORT_CLOSE:
         f->rax = ipc_sys_close(f->rdi);
         break;
+    /* WP2-1：VFS/ramfs。用户指针在 fs_syscall.c 里经 uaccess 校验。 */
+    case NG_SYS_OPEN:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_open(f->rdi, (u32)f->rsi, (u32)f->rdx);
+        break;
+    case NG_SYS_READ:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_read((u32)f->rdi, f->rsi, f->rdx);
+        break;
+    case NG_SYS_WRITE_FD:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_write((u32)f->rdi, f->rsi, f->rdx);
+        break;
+    case NG_SYS_CLOSE:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_close((u32)f->rdi);
+        break;
+    case NG_SYS_STAT:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_stat(f->rdi, f->rsi);
+        break;
+    case NG_SYS_LISTDIR:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_listdir(f->rdi, f->rsi, (u32)f->rdx);
+        break;
+    case NG_SYS_MKDIR:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_mkdir(f->rdi, (u32)f->rsi);
+        break;
+    case NG_SYS_UNLINK:
+        if (syscall_from_ring3) {
+            ring3_fs_calls++;
+        }
+        f->rax = (u64)(i64)fs_sys_unlink(f->rdi);
+        break;
     default:
         f->rax = (u64)-1;
         break;
@@ -278,6 +329,7 @@ int syscall_run_user(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
     ring3_bytes = 0;
     ring3_exit_code = 0;
     ring3_bad_writes = 0;
+    ring3_fs_calls = 0;
     ring3_user_rsp_ok = 0;
 
     ring3_enter(entry, user_rsp);
@@ -288,6 +340,7 @@ int syscall_run_user(u64 entry, u64 user_rsp, u64 stack_lo, u64 stack_hi,
         out->syscalls = ring3_syscalls;
         out->writes = ring3_writes;
         out->bytes = ring3_bytes;
+        out->fs_calls = ring3_fs_calls;
         out->exit_code = ring3_exit_code;
         out->exited = syscall_want_exit ? 1 : 0;
         out->user_rsp_ok = ring3_user_rsp_ok;

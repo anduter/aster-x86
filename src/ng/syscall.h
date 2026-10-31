@@ -22,7 +22,15 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
  *  12  port_recv(handle, buf, max, tmo)    -> 消息总长 / -err
  *  13  port_reply(ticket, msg, len, tmo)   -> 0 / -err
  *  14  port_close(handle)                  -> 0 / -err
- * 其中 msg/buf 是用户指针（内核做 U/S 页校验 + SMAP copyin/copyout）；
+ *  20  open(path, flags, mode)             -> fd / -err          （WP2-1）
+ *  21  read(fd, buf, len)                  -> 字节数 / -err     （WP2-1）
+ *  22  write(fd, buf, len)                 -> 字节数 / -err     （WP2-1）
+ *  23  close(fd)                           -> 0 / -err          （WP2-1）
+ *  24  stat(path, struct vfs_stat*)        -> 0 / -err          （WP2-1）
+ *  25  listdir(path, struct vfs_dirent*, max) -> 条数 / -err    （WP2-1）
+ *  26  mkdir(path, mode)                   -> 0 / -err          （WP2-1）
+ *  27  unlink(path)                        -> 0 / -err          （WP2-1）
+ * 其中 msg/buf/path/stat 是用户指针（内核做 U/S 页校验 + SMAP copyin/copyout）；
  * timeout 单位是 TSC tick（0 = 非阻塞，~0 = 永久）。
  */
 #define NG_SYS_WRITE 0u
@@ -32,12 +40,21 @@ struct thread; /* 前向声明：per-thread 内核栈接口用 */
 #define NG_SYS_PORT_RECV 12u
 #define NG_SYS_PORT_REPLY 13u
 #define NG_SYS_PORT_CLOSE 14u
+#define NG_SYS_OPEN 20u
+#define NG_SYS_READ 21u
+#define NG_SYS_WRITE_FD 22u
+#define NG_SYS_CLOSE 23u
+#define NG_SYS_STAT 24u
+#define NG_SYS_LISTDIR 25u
+#define NG_SYS_MKDIR 26u
+#define NG_SYS_UNLINK 27u
 
 /* ring3 一次执行的统计（syscall_run_user 填）。 */
 struct ring3_result {
     u64 syscalls;   /* 从 CPL3 进来的 syscall 次数 */
     u64 writes;     /* 成功执行的 write(buf,len) 次数 */
     u64 bytes;      /* write 写出的总字节数 */
+    u64 fs_calls;   /* 20..27 的调用次数（WP2-1 演示的证据） */
     u64 exit_code;  /* syscall 1 的 rdi */
     int exited;     /* 命中 syscall 1（回到内核恢复点） */
     int user_rsp_ok;/* 每次进入内核时的 RSP 都在用户栈区间内 */

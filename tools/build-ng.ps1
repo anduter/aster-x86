@@ -1,6 +1,7 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP1-7: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
-#               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello）
+# build-ng.ps1 - ng WP2-1: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 +
+#               trap/syscall + 线程/调度 + IPC/句柄 + ELF64 加载器 + ring3 hello
+#               + VFS/ramfs（L1 服务域））
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
@@ -8,11 +9,13 @@
 #       src/ng/pmm.c（bitmap PMM）、src/ng/heap.c（first-fit + 合并堆）、
 #       src/ng/paging.c（4 级页表/W^X/NX/SMEP/SMAP，页表页来自 PMM）、
 #       src/ng/gdt.c（GDT/TSS/IST）、src/ng/trap.c（IDT/异常/panic）、
-#       src/ng/syscall.c（STAR/LSTAR/FMASK + ring0/ring3 + IPC 调用号）、
+#       src/ng/syscall.c（STAR/LSTAR/FMASK + ring0/ring3 + IPC/VFS 调用号）、
 #       src/ng/mem_selftest.c（内存图/PMM/heap/页表池自检）、
 #       src/ng/switch.S + sched_arch.c + sched.c + sched_selftest.c（WP1-5）、
 #       src/ng/handle.c + ipc_core.c + ipc.c + ipc_selftest.c（WP1-6）、
 #       src/ng/elf.c + useras.c + uaccess.c + elf_selftest.c（WP1-7）、
+#       src/ng/fs_syscall.c（20..27 的用户指针胶水）+ src/ng/fs_selftest.c
+#       （WP2-1）、src/services/fs/vfs.c + ramfs.c（L1：VFS 核心 + ramfs）、
 #       src/ng/main.c（64 位 C 入口）、src/ng/link.ld。
 # 用户程序：src/ng/user/hello.S 用 src/ng/user/user.ld 链到 0x40000000，
 #           生成 obj-ng/hello.elf，再用 .incbin 嵌进内核 .rodata
@@ -70,7 +73,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP1-7) ==='
+Write-Host '=== build-ng (WP2-1) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -84,7 +87,10 @@ $common = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
     '-fno-stack-protector', '-fcf-protection=none')
 $asmFlags = $common + @('-c')
 $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
-    '-fno-pic', '-fno-pie', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-c')
+    '-fno-pic', '-fno-pie', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+    '-I', $srcDir,
+    '-I', (Join-Path $Repo 'src/services/fs/include'),
+    '-c')
 if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
 
 # ---- WP1-7：用户程序 hello.S -> hello.elf（0x40000000）-> .incbin 嵌内核 ----
@@ -189,11 +195,15 @@ Write-Host ''
 # WP1-6 additions: handle.c, ipc_core.c, ipc.c, ipc_selftest.c.
 # WP1-7 additions: mem.c（freestanding memcpy/memset）、elf.c、useras.c、
 #                  uaccess.c、elf_selftest.c + user_elf_blob.o。
+# WP2-1 additions: fs_syscall.c、fs_selftest.c（src/ng）+ vfs.c、ramfs.c
+#                  （src/services/fs，L1 服务域；只依赖 types.h 与 fs_env）。
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'main.c')
-$steps = $asmSources.Count + $cSources.Count + 1
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'fs_selftest.c', 'main.c')
+# L1 服务域源码（相对仓库根；-I src/ng 与 -I src/services/fs/include 已加）。
+$serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c')
+$steps = $asmSources.Count + $cSources.Count + $serviceSources.Count + 1
 $step = 0
 $asmObjs = New-Object System.Collections.Generic.List[string]
 
@@ -217,13 +227,25 @@ foreach ($src in $cSources) {
     $cObjs.Add($obj)
 }
 
+# ---- L1 服务域（src/services/fs）-------------------------------------------
+$serviceObjs = New-Object System.Collections.Generic.List[string]
+foreach ($rel in $serviceSources) {
+    $step++
+    $leaf = [IO.Path]::GetFileName($rel)
+    Write-Host ("  [{0}/{1}] {2}" -f $step, $steps, $rel)
+    $obj = Join-Path $objDir ([IO.Path]::GetFileNameWithoutExtension($rel) + '.o')
+    & $clang @($cFlags + @((Join-Path $Repo $rel), '-o', $obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0} compile failed" -f $leaf) }
+    $serviceObjs.Add($obj)
+}
+
 # ---- 链接 ------------------------------------------------------------------
 $step++
 Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + @($userBlobObj)
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + @($userBlobObj)
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

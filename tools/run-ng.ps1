@@ -38,8 +38,14 @@
 #   ng: elf64 header ok / ng: elf64 map ok (segs=3)
 #   ng: ring3 exec ok / <用户态> ng: ring3 hello / ng: ring3 exit ok
 #   ng: WP1-7 selftest PASS
+# WP2-1 追加（VFS/ramfs + ring3 fs demo）：
+#   ng: vfs mount ok / ng: ramfs write/read ok / ng: fd bad rejected
+#   ng: vfs path edge ok / ng: fs syscall user ptr EFAULT ok
+#   <用户态> ng: fs open ok / write ok / read ok / stat ok / close ok /
+#            listdir ok / ng: fs user demo ok
+#   ng: WP2-1 selftest PASS
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
-# ipc 统计行、ELF 段规划/per-thread 栈/uaccess。
+# ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数。
 #
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
@@ -116,8 +122,21 @@ if ($Panic) {
         'ng: elf64 map ok (segs=3)',
         'ng: ring3 exec ok',
         'ng: ring3 hello',
+        'ng: fs open ok',
+        'ng: fs write ok',
+        'ng: fs read ok',
+        'ng: fs stat ok',
+        'ng: fs close ok',
+        'ng: fs listdir ok',
+        'ng: fs user demo ok',
         'ng: ring3 exit ok',
-        'ng: WP1-7 selftest PASS'
+        'ng: WP1-7 selftest PASS',
+        'ng: vfs mount ok',
+        'ng: ramfs write/read ok',
+        'ng: fd bad rejected',
+        'ng: vfs path edge ok',
+        'ng: fs syscall user ptr EFAULT ok',
+        'ng: WP2-1 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -130,7 +149,13 @@ if ($Panic) {
         'ng: elf64 bad image rejected \(n=[0-9]+\)',
         'ng: syscall stack per-thread ok \(probe=0x[0-9a-f]+ rsp0=0x[0-9a-f]+ tss\.rsp0=0x[0-9a-f]+ boot=0x[0-9a-f]+\)',
         'ng: uaccess ok \(bad ptr EFAULT\)',
-        'ng: elf64 data/bss ok'
+        'ng: elf64 data/bss ok',
+        'ng: vfs mount ok \(root=ramfs mounts=2\)',
+        'ng: ramfs write/read ok \(bytes=[0-9]+ limit=1MiB\)',
+        'ng: fd bad rejected \(n=[0-9]+\)',
+        'ng: vfs path edge ok \(n=[0-9]+\)',
+        'ng: fs stat ok \(size=5\)',
+        'ng: fs listdir ok \(n=1\)'
     )
     $failPatterns = @(
         'ng: WP1-2 selftest FAIL',
@@ -145,7 +170,12 @@ if ($Panic) {
         'ng: WP1-6 selftest FAIL',
         'ng: elf64 .* FAIL',
         'ng: ring3 .* FAIL',
-        'ng: WP1-7 selftest FAIL'
+        'ng: WP1-7 selftest FAIL',
+        'ng: vfs .* FAIL',
+        'ng: ramfs .* FAIL',
+        'ng: fd .* FAIL',
+        'ng: fs .* FAIL',
+        'ng: WP2-1 selftest FAIL'
     )
 }
 
@@ -210,7 +240,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP1-7) ==='
+Write-Host '=== run-ng (WP2-1) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }

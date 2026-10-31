@@ -16,6 +16,7 @@ int test_ipc(void);
 int test_elf(void);
 int test_uaccess(void);
 int test_syscall(void);
+int test_vfs(void);
 
 int ut_checks;
 int ut_failures;
@@ -39,6 +40,7 @@ int main(void)
     test_elf();
     test_uaccess();
     test_syscall();
+    test_vfs();
 
     printf("%d checks, %d failures\n", ut_checks, ut_failures);
     return (ut_failures == 0) ? 0 : 1;

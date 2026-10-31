@@ -75,6 +75,20 @@ E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP
 | WP2-6 | shell 移植 | src/apps | 64 位 shell 可交互 |
 | WP2-7 | parity 套件 100 项 | tests/ | 100 项通过 |
 
+E2 进度（2026-10-31）：**WP2-1 完成**（tag 待 E2 收口时打）。`src/services/fs`
+成为第一个真正落地的 L1 服务域：
+
+- VFS 核心（挂载/节点/路径/fd/权限，负 errno）+ ramfs（节点/目录项/页链，
+  1 MiB/文件）+ syscall 20..27（用户指针经 uaccess）+ ring3 demo
+  （open→write→read→stat→close→listdir）；
+- 内核自检 `ng: vfs mount ok` / `ng: ramfs write/read ok` / `ng: fd bad
+  rejected` / `ng: vfs path edge ok` / `ng: WP2-1 selftest PASS`；run-ng
+  52 条期望行 + 17 条正则；
+- host 单测 1085 → **1438 checks**（新增 `tests/unit-ng/test_vfs.c` 与
+  syscall 20..27 分发用例）；旧 32 位 305/305；
+- 设计/限制见 `docs/design/vfs-ng.md`，证据见 `docs/claims/ng-WP2-1.md`。
+  FAT16（WP2-2）/块设备（WP2-4）/fb（WP2-3）未动。
+
 ### E3
 
 | ID | 内容 | 主要路径 | 出口 |

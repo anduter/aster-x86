@@ -334,7 +334,8 @@ static int check_bad_images(const u8 *blob, u64 size, u32 phoff, u32 phnum)
     muts[n++].name = "e_phoff past end";
     muts[n].off = p2 + 32;
     muts[n].width = 8;
-    muts[n].value = 0x20; /* filesz > memsz */
+    muts[n].value = rd64(blob, p2 + 40) + 1; /* filesz = memsz + 1（hello 的
+                                              * .bss 大小会随 WP 变化，别写死） */
     muts[n].want = ELF_ESEG;
     muts[n++].name = "p_filesz>p_memsz";
     muts[n].off = p0 + 8;
@@ -679,8 +680,11 @@ int elf_selftest(void)
 
     if (rc != 0) {
         fail_item("ring3 exec");
-    } else if (res.exit_code != 0 || res.writes != 1 || res.bad_writes != 0 ||
-               !res.user_rsp_ok) {
+    } else if (res.exit_code != 0 || res.writes < 1 || res.bad_writes != 0 ||
+               !res.user_rsp_ok || res.fs_calls < 6) {
+        /* WP2-1：hello 现在除了 "ng: ring3 hello" 还会跑 fs demo（open /
+         * write / read / stat / close / listdir），所以 writes 不再固定为 1，
+         * 但必须至少有一次用户态 write，且 20..27 至少被调用 6 次。 */
         fail_item("ring3 exec");
     } else {
         serial_puts("ng: ring3 exit ok\r\n");

@@ -359,3 +359,74 @@ u64 ipc_sys_close(u64 handle)
 {
     return fake_ipc_record(FAKE_IPC_CLOSE, handle, 0, 0, 0);
 }
+
+/* ------------------------------------------------------------------------- */
+/* fake FS 数据页池（WP2-1）                                                  */
+/* ------------------------------------------------------------------------- */
+
+static u8 ffs_pages[FAKE_FS_PAGES][4096] __attribute__((aligned(4096)));
+static u8 ffs_used[FAKE_FS_PAGES];
+
+void fake_fs_reset(void)
+{
+    u32 i;
+
+    for (i = 0; i < FAKE_FS_PAGES; i++) {
+        ffs_used[i] = 0;
+    }
+}
+
+static void *fake_fs_page_alloc(void *ctx)
+{
+    u32 i;
+
+    (void)ctx;
+    for (i = 0; i < FAKE_FS_PAGES; i++) {
+        if (ffs_used[i] == 0) {
+            u32 k;
+
+            ffs_used[i] = 1;
+            for (k = 0; k < 4096; k++) {
+                ffs_pages[i][k] = 0; /* 与 PMM_ZERO_ON_ALLOC 一致 */
+            }
+            return ffs_pages[i];
+        }
+    }
+    return NULL;
+}
+
+static void fake_fs_page_free(void *ctx, void *page)
+{
+    u32 i;
+
+    (void)ctx;
+    for (i = 0; i < FAKE_FS_PAGES; i++) {
+        if ((void *)ffs_pages[i] == page) {
+            ffs_used[i] = 0;
+            return;
+        }
+    }
+}
+
+void fake_fs_env(struct fs_env *env)
+{
+    if (env == NULL) {
+        return;
+    }
+    env->page_alloc = fake_fs_page_alloc;
+    env->page_free = fake_fs_page_free;
+    env->ctx = NULL;
+}
+
+u32 fake_fs_pages_live(void)
+{
+    u32 i;
+    u32 n = 0;
+
+    for (i = 0; i < FAKE_FS_PAGES; i++) {
+        if (ffs_used[i] != 0) {
+            n++;
+        }
+    }
+    return n;
+}

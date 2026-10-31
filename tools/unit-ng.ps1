@@ -18,6 +18,10 @@
 #   - syscall.c: 调用号分发 + ring3 执行入口 + per-thread 内核栈
 #                （fake 串口/页表/GDT/IPC 胶水 + fake ring3 入口，
 #                  test_syscall.c；fake_ng_env.c 提供这些替身）
+#   - src/services/fs/vfs.c + ramfs.c : VFS 路径/挂载/节点/fd/权限 + ramfs
+#                页链（tests/unit-ng/test_vfs.c；fake 页池 8 页）
+#   - src/ng/fs_syscall.c : 20..27 的 syscall 胶水（路径 copyin_str、缓冲
+#                copyin/copyout，见 test_syscall.c 的 FS 分发用例）
 # 这些模块不 include 串口/端口 IO，所以能脱离内核直接跑。
 #
 # 输出必须包含 `N checks, M failures`；M=0 且 N>=20 才算 PASS。
@@ -69,6 +73,9 @@ $sources = @(
     'src/ng/elf.c',
     'src/ng/uaccess.c',
     'src/ng/syscall.c',
+    'src/ng/fs_syscall.c',
+    'src/services/fs/vfs.c',
+    'src/services/fs/ramfs.c',
     'tests/unit-ng/fake_ng_env.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
@@ -78,7 +85,8 @@ $sources = @(
     'tests/unit-ng/test_ipc.c',
     'tests/unit-ng/test_elf.c',
     'tests/unit-ng/test_uaccess.c',
-    'tests/unit-ng/test_syscall.c'
+    'tests/unit-ng/test_syscall.c',
+    'tests/unit-ng/test_vfs.c'
 )
 $srcPaths = @()
 foreach ($s in $sources) { $srcPaths += (Join-Path $Repo $s) }
@@ -87,6 +95,7 @@ $ccArgs = @(
     '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
     '-DNG_HOST_TEST=1',
     '-I', (Join-Path $Repo 'src/ng'),
+    '-I', (Join-Path $Repo 'src/services/fs/include'),
     '-I', (Join-Path $Repo 'tests/unit-ng'),
     '-o', $exe
 ) + $srcPaths
