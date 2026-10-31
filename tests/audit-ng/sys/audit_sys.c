@@ -43,6 +43,7 @@
 #define SYS_LISTDIR 25
 #define SYS_MKDIR 26
 #define SYS_UNLINK 27
+#define SYS_READKEY 30
 #define SYS_LOGIN 31
 #define SYS_DMESG 32
 #define SYS_LOG_WRITE 33
@@ -68,9 +69,12 @@
 #define E_FAULT (-14)
 #define E_BUSY (-16)
 #define E_EXIST (-17)
+#define E_NOTDIR (-20)
 #define E_ISDIR (-21)
 #define E_INVAL (-22)
+#define E_MFILE (-24)
 #define E_NOSPC (-28)
+#define E_ROFS (-30)
 #define E_NAMETOOLONG (-36)
 #define E_MSGSIZE (-90)
 #define E_TIMEDOUT (-110)
@@ -85,6 +89,7 @@
 #define O_WRONLY 0x001u
 #define O_RDWR 0x002u
 #define O_CREAT 0x040u
+#define O_EXCL 0x080u
 #define O_TRUNC 0x200u
 
 #define ARRAY_N(a) (sizeof(a) / sizeof((a)[0]))
@@ -129,7 +134,12 @@ _Static_assert(sizeof(struct audit_fb_info) == 48, "ds_fb_info");
 
 /* ---- 静态缓冲（.bss；16 KiB 用户栈之外）-------------------------------- */
 static u8 g_buf[64];
-static u8 g_big[8192] __attribute__((aligned(4096)));
+/*
+ * IPC_MSG_MAX=4112；dmesg/pkg 的上限都 <= 4096。这里只留 4160 字节，避免
+ * .bss 越过 0x40010000（内核会在那里映射每个进程的私有 marker 页，ELF 段
+ * 覆盖同一 VA 会被 marker 覆盖）。
+ */
+static u8 g_big[4160] __attribute__((aligned(4096)));
 static char g_path[300];
 static char g_path2[300];
 static char g_arg127[128];
@@ -139,6 +149,45 @@ static struct audit_fb_info g_fb;
 static u32 g_pass;
 static u32 g_fail;
 static u32 g_sleep_port;
+static char g_wbuf[256];
+static char g_long127[128];
+static char g_names[256];
+
+/*
+ * PROC_MARKER_VA（0x40010000）是内核给每个进程映射的一页 RW+NX 私有页，
+ * 下一页 0x40011000 未映射 —— 这是用户窗口里唯一能构造“正好在页尾/跨页”
+ * 的合法可写地址。用它测 copyin/copyout 的页边界，不碰 0x40103xxx 的
+ * 初始 argv/栈顶。
+ */
+#define MARKER_VA 0x40010000ULL
+#define MARKER_OFF(off) (MARKER_VA + (u64)(off))
+
+static void marker_fill(u32 off, u8 v, u32 n)
+{
+    u8 *p = (u8 *)(usize)MARKER_OFF(off);
+    u32 i;
+
+    for (i = 0; i < n; i++) {
+        p[i] = v;
+    }
+}
+
+static void marker_put_str(u32 off, const char *s)
+{
+    char *p = (char *)(usize)MARKER_OFF(off);
+    u32 i = 0;
+
+    while (s[i] != '\0') {
+        p[i] = s[i];
+        i++;
+    }
+    p[i] = '\0';
+}
+
+static void marker_put_u64(u32 off, u64 v)
+{
+    *(volatile u64 *)(usize)MARKER_OFF(off) = v;
+}
 
 static const char k_ro_msg[] = "audit-ro\n";
 
@@ -280,6 +329,40 @@ static void sleep_ticks(u64 ticks)
     }
 }
 
+/* 探针自己的 ELF 路径（argv[0]），spawn 子模式用。 */
+static char *g_self;
+
+/* 统一的 spawn 包装：av 由调用方保证以 NULL 结尾。 */
+static i64 spawn_argv(char *const av[], u32 *out_pid)
+{
+    u32 pid = 0;
+    i64 rc;
+
+    if (out_pid != NULL) {
+        *out_pid = 0;
+    }
+    if (av == NULL || av[0] == NULL) {
+        return E_INVAL;
+    }
+    rc = sys3(SYS_SPAWN, (i64)(usize)av[0], (i64)(usize)av,
+              (i64)(usize)&pid);
+    if (out_pid != NULL) {
+        *out_pid = pid;
+    }
+    return rc;
+}
+
+static i64 wait_status(i64 pid, int *out_status)
+{
+    int st = -1;
+    i64 rc = sys3(SYS_WAIT, pid, (i64)(usize)&st, 0);
+
+    if (out_status != NULL) {
+        *out_status = st;
+    }
+    return rc;
+}
+
 /* ------------------------------------------------------------------------- */
 /* 打开/关闭辅助                                                              */
 /* ------------------------------------------------------------------------- */
@@ -329,8 +412,8 @@ static int child_main(long argc, char **argv)
     put_str(num);
     put_str(block ? " block\n" : " quick\n");
 
-    if (str_eq(mode, "shm") && argc >= 5) {
-        u64 handle = parse_u64(argv[4]);
+    if (str_eq(mode, "shm") || str_eq(mode, "shmq")) {
+        u64 handle = (argc >= 5) ? parse_u64(argv[4]) : 0;
         u64 va = 0;
         i64 rc = sys3(SYS_SHM_MAP, (i64)handle, (i64)(usize)&va, 0);
 
@@ -342,8 +425,12 @@ static int child_main(long argc, char **argv)
             put_str(" va=0x5a5a5a5a\n");
         } else {
             put_str("AUDIT: child shm map failed\n");
+            return 5;
         }
-    } else if (str_eq(mode, "fb")) {
+        if (str_eq(mode, "shmq")) {
+            return 0; /* 正常退出路径：shm_release_proc 必须先摘页再 as_destroy */
+        }
+    } else if (str_eq(mode, "fb") || str_eq(mode, "fbq")) {
         u64 va = 0;
         struct audit_fb_info info;
         i64 rc = sys3(SYS_FB_MAP, (i64)(usize)&va, (i64)(usize)&info, 0);
@@ -355,7 +442,129 @@ static int child_main(long argc, char **argv)
             put_str(" mapped\n");
         } else {
             put_str("AUDIT: child fb map failed\n");
+            return 6;
         }
+        if (str_eq(mode, "fbq")) {
+            return 0; /* 正常退出路径：fbmap_release_proc 必须先摘 PTE */
+        }
+    } else if (str_eq(mode, "selfkill")) {
+        u32 sig = (argc >= 5) ? parse_u32(argv[4]) : 9u;
+
+        put_str("AUDIT: child selfkill id=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)id);
+        put_str(num);
+        put_str(" sig=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)sig);
+        put_str(num);
+        put_str("\n");
+        /* 自杀：proc_kill 的 p == cur 分支直接从 syscall 里退出，不返回。 */
+        (void)sys3(SYS_KILL, (i64)sys3(SYS_GETPID, 0, 0, 0), (i64)sig, 0);
+        put_str("AUDIT: child selfkill returned (BUG)\n");
+        return 3;
+    } else if (str_eq(mode, "eperm") && argc >= 5) {
+        u32 ticket = parse_u32(argv[4]);
+        struct audit_hdr h;
+        u8 tmp[8];
+        i64 r1;
+        i64 r2;
+        i64 r3;
+
+        /* 非属主：recv/close 必须 EPERM；send 允许（ticket 跨进程传递）。 */
+        r1 = sys4(SYS_PORT_RECV, (i64)ticket, (i64)(usize)tmp,
+                  (i64)sizeof(tmp), 0);
+        h.type = 0x0E;
+        h.len = 0;
+        h.from = 0;
+        h.flags = 0;
+        r2 = sys4(SYS_PORT_SEND, (i64)ticket, (i64)(usize)&h, IPC_HDR, 0);
+        r3 = sys3(SYS_PORT_CLOSE, (i64)ticket, 0, 0);
+        put_str("AUDIT: child eperm id=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)id);
+        put_str(num);
+        put_str(" recv=");
+        (void)put_s64(num, (u32)sizeof(num), r1);
+        put_str(num);
+        put_str(" send=");
+        (void)put_s64(num, (u32)sizeof(num), r2);
+        put_str(num);
+        put_str(" close=");
+        (void)put_s64(num, (u32)sizeof(num), r3);
+        put_str(num);
+        put_str("\n");
+        return (r1 == -1 && r2 == 0 && r3 == -1) ? 0 : 7;
+    } else if (str_eq(mode, "waitblock")) {
+        char *cav[6];
+        char cid[24];
+        u32 gpid = 0;
+        int gst = 0;
+        i64 rc2;
+
+        /* 孙进程永久阻塞在 recv；自己阻塞在 wait，供父进程 kill。 */
+        (void)put_s64(cid, (u32)sizeof(cid), (i64)(id + 1u));
+        cav[0] = argv[0];
+        cav[1] = (char *)"child";
+        cav[2] = cid;
+        cav[3] = (char *)"block";
+        cav[4] = NULL;
+        rc2 = sys3(SYS_SPAWN, (i64)(usize)argv[0], (i64)(usize)cav,
+                   (i64)(usize)&gpid);
+        if (rc2 != 0) {
+            put_str("AUDIT: child waitblock spawn fail\n");
+            return 8;
+        }
+        put_str("AUDIT: child waitblock grandchild=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)gpid);
+        put_str(num);
+        put_str("\n");
+        (void)sys3(SYS_WAIT, (i64)gpid, (i64)(usize)&gst, 0); /* 阻塞 */
+        put_str("AUDIT: child waitblock returned (BUG)\n");
+        return 0;
+    } else if (str_eq(mode, "sender") && argc >= 7) {
+        u32 ticket = parse_u32(argv[4]);
+        u32 count = parse_u32(argv[5]);
+        u64 timeout = parse_u64(argv[6]);
+        u32 i;
+
+        for (i = 0; i < count; i++) {
+            struct audit_hdr h;
+            i64 rc;
+
+            h.type = 0x9000u + i;
+            h.len = 0;
+            h.from = 0;
+            h.flags = 0;
+            rc = sys4(SYS_PORT_SEND, (i64)ticket, (i64)(usize)&h, IPC_HDR,
+                      (i64)timeout);
+            if (rc != 0) {
+                put_str("AUDIT: child sender fail id=");
+                (void)put_s64(num, (u32)sizeof(num), (i64)id);
+                put_str(num);
+                put_str(" rc=");
+                (void)put_s64(num, (u32)sizeof(num), rc);
+                put_str(num);
+                put_str("\n");
+                return 4;
+            }
+        }
+        put_str("AUDIT: child sender done id=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)id);
+        put_str(num);
+        put_str(" count=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)count);
+        put_str(num);
+        put_str("\n");
+        return 0;
+    } else if (str_eq(mode, "exitcode") && argc >= 5) {
+        u32 code = parse_u32(argv[4]);
+
+        put_str("AUDIT: child exitcode id=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)id);
+        put_str(num);
+        put_str(" code=");
+        (void)put_s64(num, (u32)sizeof(num), (i64)(code & 0xFFu));
+        put_str(num);
+        put_str("\n");
+        return (int)(code & 0xFFu);
     }
 
     if (block) {
@@ -1139,6 +1348,1041 @@ static void test_shm_fb(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* 第二轮补充：写 / 页边界 / 跨进程 IPC / FAT16 / SVC / proc / shm-fb         */
+/* ------------------------------------------------------------------------- */
+static void test_write2(void)
+{
+    u32 i;
+
+    section("write2");
+
+    for (i = 0; i < (u32)sizeof(g_wbuf); i++) {
+        g_wbuf[i] = 'w';
+    }
+    expect("write2.len256", sys3(SYS_WRITE, (i64)(usize)g_wbuf, 256, 0), 256);
+    expect("write2.len255", sys3(SYS_WRITE, (i64)(usize)g_wbuf, 255, 0), 255);
+
+    /* marker 页 0x40010000..0x40010FFF 可写；下一页 0x40011000 未映射。 */
+    marker_fill(0xFF0, 'm', 16);
+    expect("write2.page_tail",
+           sys3(SYS_WRITE, (i64)MARKER_OFF(0xFF0), 16, 0), 16);
+    expect("write2.page_cross",
+           sys3(SYS_WRITE, (i64)MARKER_OFF(0xFF0), 17, 0), E_FAULT);
+    expect("write2.page_end_cross",
+           sys3(SYS_WRITE, (i64)MARKER_OFF(0xFFC), 8, 0), E_FAULT);
+
+    expect("write2.user_max_unmapped",
+           sys3(SYS_WRITE, 0x7FFFFFFFF000LL, 8, 0), E_FAULT);
+    expect("write2.noncanonical",
+           sys3(SYS_WRITE, (i64)0x8000000000000000ULL, 8, 0), E_FAULT);
+    expect("write2.uva_overlap",
+           sys3(SYS_WRITE, (i64)0xFFFFFFFFFFFFF000ULL, 16, 0), E_FAULT);
+    expect("write2.diag_rdi0_lenmax", sys3(SYS_WRITE, 0, (i64)~0ULL, 0), 0);
+}
+
+static void test_ipc2(void)
+{
+    struct audit_hdr h;
+    struct audit_hdr *got = (struct audit_hdr *)(void *)g_big;
+    i64 t3;
+    i64 rc;
+    u32 pid = 0;
+    int st = 0;
+    char ticket[24];
+    char *av[8];
+    u32 i;
+
+    section("ipc2");
+
+    t3 = sys3(SYS_PORT_CREATE, 2, 0, 0);
+    expect_true("ipc2.create", t3 > 0, t3);
+    expect("ipc2.recv_page_cross",
+           sys4(SYS_PORT_RECV, t3, (i64)MARKER_OFF(0xFF0), 4112, 0), E_FAULT);
+    expect("ipc2.recv_bad_handle_high",
+           sys4(SYS_PORT_RECV, 0x100000000LL, (i64)(usize)g_big, 16, 0), -9);
+    expect("ipc2.close_bad_handle_high",
+           sys3(SYS_PORT_CLOSE, 0x100000000LL, 0, 0), -9);
+
+    hdr_init(&h, 5, 0, 0, 0);
+    expect("ipc2.reply_bad_ptr",
+           sys4(SYS_PORT_REPLY, t3, 0x1000, IPC_HDR, 0), E_FAULT);
+    expect("ipc2.reply_page_cross",
+           sys4(SYS_PORT_REPLY, t3, (i64)MARKER_OFF(0xFFE), IPC_HDR, 0),
+           E_FAULT);
+    expect("ipc2.reply_len15",
+           sys4(SYS_PORT_REPLY, t3, (i64)(usize)&h, 15, 0), E_INVAL);
+    expect("ipc2.reply_len4113",
+           sys4(SYS_PORT_REPLY, t3, (i64)(usize)&h, 4113, 0), E_MSGSIZE);
+    expect("ipc2.reply_len_max",
+           sys4(SYS_PORT_REPLY, t3, (i64)(usize)&h, (i64)~0ULL, 0), E_INVAL);
+
+    hdr_init(&h, 6, 16, 0, 0);
+    expect("ipc2.send_page_cross",
+           sys4(SYS_PORT_SEND, t3, (i64)MARKER_OFF(0xFF0), 32, 0), E_FAULT);
+
+    /* 最大消息（4112）+ max=16 的短 recv：返回总长，只拷 16 字节消息头。 */
+    for (i = 0; i < 4112u; i++) {
+        g_big[i] = 0;
+    }
+    got->type = 0x6A;
+    got->len = 4096;
+    expect("ipc2.send_max",
+           sys4(SYS_PORT_SEND, t3, (i64)(usize)g_big, 4112, 0), 0);
+    marker_fill(0xFC0, 0xCC, 16);
+    expect("ipc2.recv_max_short16",
+           sys4(SYS_PORT_RECV, t3, (i64)MARKER_OFF(0xFC0), 16, 0), 4112);
+    expect_true("ipc2.recv_max_short16_type",
+                ((struct audit_hdr *)(usize)MARKER_OFF(0xFC0))->type == 0x6A,
+                (i64)((struct audit_hdr *)(usize)MARKER_OFF(0xFC0))->type);
+
+    /* 已关闭端口的 ticket 作为 hdr.from：generation 失效 -> EBADF。 */
+    {
+        i64 t4 = sys3(SYS_PORT_CREATE, 1, 0, 0);
+
+        expect_true("ipc2.from_create", t4 > 0, t4);
+        expect("ipc2.from_close", sys3(SYS_PORT_CLOSE, t4, 0, 0), 0);
+        hdr_init(&h, 7, 0, (u32)t4, 0);
+        expect("ipc2.send_stale_from",
+               sys4(SYS_PORT_SEND, t3, (i64)(usize)&h, IPC_HDR, 0), -9);
+    }
+    expect("ipc2.close", sys3(SYS_PORT_CLOSE, t3, 0, 0), 0);
+
+    /*
+     * 跨进程显式唤醒：父进程先阻塞在 recv，子进程 send 后 ipc_wake_one
+     * 把父进程从 BLOCKED 搬到 READY（上一轮只覆盖了同进程超时路径）。
+     */
+    {
+        i64 p = sys3(SYS_PORT_CREATE, 1, 0, 0);
+
+        expect_true("ipc2.xrecv_create", p > 0, p);
+        if (p > 0) {
+            (void)put_s64(ticket, (u32)sizeof(ticket), p);
+            av[0] = g_self;
+            av[1] = (char *)"child";
+            av[2] = (char *)"60";
+            av[3] = (char *)"sender";
+            av[4] = ticket;
+            av[5] = (char *)"1";
+            av[6] = (char *)"0";
+            av[7] = NULL;
+            rc = spawn_argv(av, &pid);
+            expect_true("ipc2.xrecv_spawn", rc == 0 && pid > 0, rc);
+            if (rc == 0) {
+                expect("ipc2.xrecv_wake",
+                       sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, IPC_HDR,
+                            2000000000LL), IPC_HDR);
+                expect_true("ipc2.xrecv_type", got->type == 0x9000u,
+                            (i64)got->type);
+                (void)sys3(SYS_KILL, (i64)pid, 9, 0);
+                st = -1;
+                expect("ipc2.xrecv_wait", wait_status((i64)pid, &st), 0);
+                expect("ipc2.xrecv_status", st, 0);
+                put_str("AUDIT: info xproc recv wake ok\n");
+            }
+            expect("ipc2.xrecv_close", sys3(SYS_PORT_CLOSE, p, 0, 0), 0);
+        }
+    }
+
+    /*
+     * 两个发送者在满队列上阻塞；父进程每次 recv 释放一个空位，
+     * ipc_wake_one(SEND) 必须按通知位把两个发送者交替放行。
+     */
+    {
+        i64 p = sys3(SYS_PORT_CREATE, 1, 0, 0);
+        u32 pa = 0;
+        u32 pb = 0;
+
+        expect_true("ipc2.handoff_create", p > 0, p);
+        if (p > 0) {
+            hdr_init(&h, 8, 0, 0, 0);
+            expect("ipc2.handoff_fill",
+                   sys4(SYS_PORT_SEND, p, (i64)(usize)&h, IPC_HDR, 0), 0);
+            (void)put_s64(ticket, (u32)sizeof(ticket), p);
+            av[0] = g_self;
+            av[1] = (char *)"child";
+            av[2] = (char *)"61";
+            av[3] = (char *)"sender";
+            av[4] = ticket;
+            av[5] = (char *)"1";
+            av[6] = (char *)"18446744073709551615"; /* IPC_TIMEOUT_FOREVER */
+            av[7] = NULL;
+            rc = spawn_argv(av, &pa);
+            expect_true("ipc2.handoff_spawn_a", rc == 0 && pa > 0, rc);
+            av[2] = (char *)"62";
+            rc = spawn_argv(av, &pb);
+            expect_true("ipc2.handoff_spawn_b", rc == 0 && pb > 0, rc);
+            sleep_ticks(200000000); /* 让两个 sender 都阻塞在 send */
+            expect("ipc2.handoff_recv0",
+                   sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, IPC_HDR,
+                        2000000000LL), IPC_HDR);
+            expect("ipc2.handoff_recv1",
+                   sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, IPC_HDR,
+                        2000000000LL), IPC_HDR);
+            expect("ipc2.handoff_recv2",
+                   sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, IPC_HDR,
+                        2000000000LL), IPC_HDR);
+            /* 已正常退出的子进程 kill 是幂等的；失败时也不会挂住 wait。 */
+            (void)sys3(SYS_KILL, (i64)pa, 9, 0);
+            (void)sys3(SYS_KILL, (i64)pb, 9, 0);
+            st = -1;
+            expect("ipc2.handoff_wait_a", wait_status((i64)pa, &st), 0);
+            expect("ipc2.handoff_status_a", st, 0);
+            st = -1;
+            expect("ipc2.handoff_wait_b", wait_status((i64)pb, &st), 0);
+            expect("ipc2.handoff_status_b", st, 0);
+            put_str("AUDIT: info xproc send handoff ok\n");
+            expect("ipc2.handoff_close", sys3(SYS_PORT_CLOSE, p, 0, 0), 0);
+        }
+    }
+
+    /*
+     * kill 一个阻塞在 send 的进程：cancel_thread 摘等待者；端口本身
+     * （父进程所有）保留已排队的消息。
+     */
+    {
+        i64 p = sys3(SYS_PORT_CREATE, 1, 0, 0);
+        u32 pc = 0;
+
+        expect_true("ipc2.ksend_create", p > 0, p);
+        if (p > 0) {
+            hdr_init(&h, 9, 0, 0, 0);
+            expect("ipc2.ksend_fill",
+                   sys4(SYS_PORT_SEND, p, (i64)(usize)&h, IPC_HDR, 0), 0);
+            (void)put_s64(ticket, (u32)sizeof(ticket), p);
+            av[0] = g_self;
+            av[1] = (char *)"child";
+            av[2] = (char *)"63";
+            av[3] = (char *)"sender";
+            av[4] = ticket;
+            av[5] = (char *)"1";
+            av[6] = (char *)"18446744073709551615";
+            av[7] = NULL;
+            rc = spawn_argv(av, &pc);
+            expect_true("ipc2.ksend_spawn", rc == 0 && pc > 0, rc);
+            sleep_ticks(200000000);
+            expect("ipc2.ksend_kill", sys3(SYS_KILL, (i64)pc, 9, 0), 0);
+            st = -1;
+            expect("ipc2.ksend_wait", wait_status((i64)pc, &st), 0);
+            expect("ipc2.ksend_status", st, 0x109);
+            expect("ipc2.ksend_drain",
+                   sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, IPC_HDR, 0),
+                   IPC_HDR);
+            put_str("AUDIT: info kill blocked sender ok\n");
+            expect("ipc2.ksend_close", sys3(SYS_PORT_CLOSE, p, 0, 0), 0);
+        }
+    }
+
+    /* 非属主 recv/close -> EPERM；send 允许（ticket 即能力）。 */
+    {
+        i64 p = sys3(SYS_PORT_CREATE, 1, 0, 0);
+        u32 pe = 0;
+
+        expect_true("ipc2.eperm_create", p > 0, p);
+        if (p > 0) {
+            (void)put_s64(ticket, (u32)sizeof(ticket), p);
+            av[0] = g_self;
+            av[1] = (char *)"child";
+            av[2] = (char *)"64";
+            av[3] = (char *)"eperm";
+            av[4] = ticket;
+            av[5] = NULL;
+            rc = spawn_argv(av, &pe);
+            expect_true("ipc2.eperm_spawn", rc == 0 && pe > 0, rc);
+            if (rc == 0) {
+                st = -1;
+                expect("ipc2.eperm_wait", wait_status((i64)pe, &st), 0);
+                expect("ipc2.eperm_status", st, 0);
+                expect("ipc2.eperm_send_arrived",
+                       sys4(SYS_PORT_RECV, p, (i64)(usize)g_big, IPC_HDR, 0),
+                       IPC_HDR);
+                expect_true("ipc2.eperm_type", got->type == 0x0Eu,
+                            (i64)got->type);
+                put_str("AUDIT: info cross-process recv/close EPERM ok\n");
+            }
+            expect("ipc2.eperm_close", sys3(SYS_PORT_CLOSE, p, 0, 0), 0);
+        }
+    }
+
+    /* close 唤醒阻塞在 send 的进程：send 返回 ECANCELED（-125）。 */
+    {
+        i64 p = sys3(SYS_PORT_CREATE, 1, 0, 0);
+        u32 pd = 0;
+
+        expect_true("ipc2.closesend_create", p > 0, p);
+        if (p > 0) {
+            hdr_init(&h, 10, 0, 0, 0);
+            expect("ipc2.closesend_fill",
+                   sys4(SYS_PORT_SEND, p, (i64)(usize)&h, IPC_HDR, 0), 0);
+            (void)put_s64(ticket, (u32)sizeof(ticket), p);
+            av[0] = g_self;
+            av[1] = (char *)"child";
+            av[2] = (char *)"65";
+            av[3] = (char *)"sender";
+            av[4] = ticket;
+            av[5] = (char *)"1";
+            av[6] = (char *)"18446744073709551615";
+            av[7] = NULL;
+            rc = spawn_argv(av, &pd);
+            expect_true("ipc2.closesend_spawn", rc == 0 && pd > 0, rc);
+            sleep_ticks(200000000);
+            expect("ipc2.closesend_close", sys3(SYS_PORT_CLOSE, p, 0, 0), 0);
+            st = -1;
+            expect("ipc2.closesend_wait", wait_status((i64)pd, &st), 0);
+            expect("ipc2.closesend_status", st, 4);
+            put_str("AUDIT: info close wakes blocked sender ok\n");
+        }
+    }
+
+    /* 端口池：持满后 ENOSPC；全部关闭后能重建。 */
+    {
+        i64 held[32];
+        u32 made = 0;
+
+        rc = 0;
+        for (i = 0; i < 32u; i++) {
+            rc = sys3(SYS_PORT_CREATE, 1, 0, 0);
+            if (rc <= 0) {
+                break;
+            }
+            held[made++] = rc;
+        }
+        expect("ipc2.pool_enospc", rc, E_NOSPC);
+        expect_true("ipc2.pool_nonzero", made >= 1, (i64)made);
+        for (i = 0; i < made; i++) {
+            (void)sys3(SYS_PORT_CLOSE, held[i], 0, 0);
+        }
+        rc = sys3(SYS_PORT_CREATE, 1, 0, 0);
+        expect_true("ipc2.pool_recreate", rc > 0, rc);
+        if (rc > 0) {
+            (void)sys3(SYS_PORT_CLOSE, rc, 0, 0);
+        }
+    }
+}
+
+static void test_fs2(void)
+{
+    i64 fd;
+    i64 fds[20];
+    u32 nfd = 0;
+    u32 i;
+    i64 rc;
+    u32 pid = 0;
+    char *av[6];
+    struct audit_stat *mst = (struct audit_stat *)(usize)MARKER_OFF(0xFE8);
+    struct audit_dirent *de = (struct audit_dirent *)(void *)g_ents_raw;
+
+    section("fs2");
+
+    /* fd 表上限（VFS_FD_MAX=16）：填满后 EMFILE，spawn 也不能再 open ELF。 */
+    rc = 0;
+    for (i = 0; i < 20u; i++) {
+        fd = open_file("/bin/shell", O_RDONLY, 0);
+        if (fd < 0) {
+            rc = fd;
+            break;
+        }
+        fds[nfd++] = fd;
+    }
+    expect("fs2.fd_exhaust", rc, E_MFILE);
+    expect_true("fs2.fd_filled", nfd >= 1 && nfd <= 16, (i64)nfd);
+    av[0] = g_self;
+    av[1] = (char *)"child";
+    av[2] = (char *)"70";
+    av[3] = (char *)"quick";
+    av[4] = NULL;
+    expect("fs2.spawn_emfile", spawn_argv(av, &pid), E_MFILE);
+    for (i = 0; i < nfd; i++) {
+        (void)sys3(SYS_CLOSE, fds[i], 0, 0);
+    }
+    fd = open_file("/bin/shell", O_RDONLY, 0);
+    expect_true("fs2.fd_reuse", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        expect("fs2.read_page_tail",
+               sys3(SYS_READ, fd, (i64)MARKER_OFF(0xFF0), 16), 16);
+        expect("fs2.read_page_cross",
+               sys3(SYS_READ, fd, (i64)MARKER_OFF(0xFF0), 17), E_FAULT);
+        expect("fs2.read_ro_buf", sys3(SYS_READ, fd, 0x40000000, 16), E_FAULT);
+        expect("fs2.write_rdonly",
+               sys3(SYS_WRITE_FD, fd, (i64)(usize)g_buf, 4), -9);
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+
+    /* stat / listdir 的页边界 + 只读页写检查。 */
+    expect("fs2.stat_page_tail",
+           sys3(SYS_STAT, (i64)(usize)"/bin/shell", (i64)MARKER_OFF(0xFE8), 0),
+           0);
+    expect_true("fs2.stat_page_tail_type", mst->type == 1, (i64)mst->type);
+    expect_true("fs2.stat_page_tail_size", mst->size > 0, (i64)mst->size);
+    expect("fs2.stat_page_cross",
+           sys3(SYS_STAT, (i64)(usize)"/bin/shell", (i64)MARKER_OFF(0xFFE), 0),
+           E_FAULT);
+    expect("fs2.stat_ro_out",
+           sys3(SYS_STAT, (i64)(usize)"/bin/shell", 0x40000000, 0), E_FAULT);
+    expect("fs2.listdir_page_tail",
+           sys3(SYS_LISTDIR, (i64)(usize)"/", (i64)MARKER_OFF(0xFB0), 1), 1);
+    expect("fs2.listdir_page_cross",
+           sys3(SYS_LISTDIR, (i64)(usize)"/", (i64)MARKER_OFF(0xFB0), 2),
+           E_FAULT);
+    expect("fs2.listdir_file",
+           sys3(SYS_LISTDIR, (i64)(usize)"/bin/shell", (i64)(usize)g_ents_raw,
+                1), E_NOTDIR);
+
+    /* 路径字符串压页尾：copyin_str 必须在未映射页之前失败。 */
+    marker_fill(0xFFE, 'c', 2);
+    expect("fs2.open_path_cross",
+           open_file((const char *)(usize)MARKER_OFF(0xFFE), O_RDONLY, 0),
+           E_FAULT);
+    expect("fs2.stat_path_cross",
+           sys3(SYS_STAT, (i64)MARKER_OFF(0xFFE), (i64)(usize)&g_st, 0),
+           E_FAULT);
+    expect("fs2.listdir_path_cross",
+           sys3(SYS_LISTDIR, (i64)MARKER_OFF(0xFFE), (i64)(usize)g_ents_raw,
+                1), E_FAULT);
+    expect("fs2.mkdir_path_cross",
+           sys3(SYS_MKDIR, (i64)MARKER_OFF(0xFFE), 0755, 0), E_FAULT);
+    expect("fs2.unlink_path_cross",
+           sys3(SYS_UNLINK, (i64)MARKER_OFF(0xFFE), 0, 0), E_FAULT);
+
+    /* 目录 fd：read/write 都必须是 EISDIR，不能落到 ramfs ops。 */
+    fd = open_file("/", O_RDONLY, 0);
+    expect_true("fs2.open_dir", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        expect("fs2.read_dir", sys3(SYS_READ, fd, (i64)(usize)g_big, 16),
+               E_ISDIR);
+        expect("fs2.write_dir",
+               sys3(SYS_WRITE_FD, fd, (i64)(usize)g_buf, 4), E_ISDIR);
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+    expect("fs2.open_dir_rw", open_file("/", O_RDWR, 0), E_ISDIR);
+
+    /* O_CREAT|O_EXCL 语义 / 只读文件 open 后 close。 */
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-excl", 0, 0);
+    fd = open_file("/tmp/audit-excl", O_CREAT | O_RDWR, 0644);
+    expect_true("fs2.excl_create", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+    expect("fs2.excl_again",
+           open_file("/tmp/audit-excl", O_CREAT | O_EXCL, 0644), E_EXIST);
+    expect("fs2.excl_unlink",
+           sys3(SYS_UNLINK, (i64)(usize)"/tmp/audit-excl", 0, 0), 0);
+
+    /* ---- FAT16（/mnt/disk）：读 + listdir + 写/截断/删除 ---- */
+    expect("fs2.fat_stat",
+           sys3(SYS_STAT, (i64)(usize)"/mnt/disk/AUDIT.ELF",
+                (i64)(usize)&g_st, 0), 0);
+    expect_true("fs2.fat_stat_type", g_st.type == 1, (i64)g_st.type);
+    expect_true("fs2.fat_stat_size", g_st.size > 1000, (i64)g_st.size);
+    fd = open_file("/mnt/disk/AUDIT.ELF", O_RDONLY, 0);
+    expect_true("fs2.fat_open", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        expect("fs2.fat_read512", sys3(SYS_READ, fd, (i64)(usize)g_big, 512),
+               512);
+        expect_true("fs2.fat_elf_magic",
+                    g_big[0] == 0x7F && g_big[1] == 'E' && g_big[2] == 'L' &&
+                        g_big[3] == 'F',
+                    (i64)g_big[0]);
+        expect("fs2.fat_read512_2",
+               sys3(SYS_READ, fd, (i64)(usize)g_big, 512), 512);
+        expect("fs2.fat_read_len513",
+               sys3(SYS_READ, fd, (i64)(usize)g_big, 513), E_INVAL);
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+    rc = sys3(SYS_LISTDIR, (i64)(usize)"/mnt/disk", (i64)(usize)g_ents_raw, 8);
+    expect_true("fs2.fat_listdir", rc >= 1 && rc <= 8, rc);
+    if (rc >= 1) {
+        expect_true("fs2.fat_dirent_name",
+                    de->name_len > 0 && de->name_len < 64, (i64)de->name_len);
+    }
+
+    (void)sys3(SYS_UNLINK, (i64)(usize)"/mnt/disk/AUDIT.TMP", 0, 0);
+    fd = open_file("/mnt/disk/AUDIT.TMP", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    expect_true("fs2.fat_create", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        g_buf[0] = 'h';
+        g_buf[1] = 'e';
+        g_buf[2] = 'l';
+        g_buf[3] = 'l';
+        g_buf[4] = 'o';
+        expect("fs2.fat_write", sys3(SYS_WRITE_FD, fd, (i64)(usize)g_buf, 5),
+               5);
+        expect("fs2.fat_unlink_busy",
+               sys3(SYS_UNLINK, (i64)(usize)"/mnt/disk/AUDIT.TMP", 0, 0),
+               E_BUSY);
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+    expect("fs2.fat_tmp_stat",
+           sys3(SYS_STAT, (i64)(usize)"/mnt/disk/AUDIT.TMP",
+                (i64)(usize)&g_st, 0), 0);
+    expect_true("fs2.fat_tmp_size", g_st.size == 5, (i64)g_st.size);
+    fd = open_file("/mnt/disk/AUDIT.TMP", O_RDONLY, 0);
+    expect_true("fs2.fat_tmp_reopen", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        for (i = 0; i < 8u; i++) {
+            g_big[i] = 0;
+        }
+        expect("fs2.fat_tmp_read", sys3(SYS_READ, fd, (i64)(usize)g_big, 5),
+               5);
+        expect_true("fs2.fat_tmp_content",
+                    g_big[0] == 'h' && g_big[1] == 'e' && g_big[2] == 'l' &&
+                        g_big[3] == 'l' && g_big[4] == 'o',
+                    (i64)g_big[0]);
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+    fd = open_file("/mnt/disk/AUDIT.TMP", O_RDWR | O_TRUNC, 0);
+    expect_true("fs2.fat_tmp_trunc", fd >= 0x10000, fd);
+    if (fd >= 0) {
+        (void)sys3(SYS_CLOSE, fd, 0, 0);
+    }
+    expect("fs2.fat_tmp_stat0",
+           sys3(SYS_STAT, (i64)(usize)"/mnt/disk/AUDIT.TMP",
+                (i64)(usize)&g_st, 0), 0);
+    expect_true("fs2.fat_tmp_size0", g_st.size == 0, (i64)g_st.size);
+    expect("fs2.fat_tmp_unlink",
+           sys3(SYS_UNLINK, (i64)(usize)"/mnt/disk/AUDIT.TMP", 0, 0), 0);
+    expect("fs2.fat_tmp_gone",
+           sys3(SYS_STAT, (i64)(usize)"/mnt/disk/AUDIT.TMP",
+                (i64)(usize)&g_st, 0), E_NOENT);
+    /* 8.3 之外的名字在 FAT16 上必须被拒绝（不能越界写目录项）。 */
+    rc = open_file("/mnt/disk/audit-long-name.txt", O_CREAT | O_RDWR, 0644);
+    expect_true("fs2.fat_long_name", rc < 0, rc);
+    put_str("AUDIT: info fat16 read/write/listdir ok\n");
+}
+
+static void test_svc2(void)
+{
+    i64 rc;
+    u32 i;
+
+    section("svc2");
+
+    /* syscall 30 readkey：忽略参数，无键时必须 EAGAIN 而不是崩。 */
+    rc = sys3(SYS_READKEY, (i64)~0ULL, (i64)~0ULL, (i64)~0ULL);
+    expect_true("svc2.readkey_junk", rc == E_AGAIN || rc >= 0, rc);
+    rc = sys3(SYS_READKEY, 0, 0, 0);
+    expect_true("svc2.readkey_zero", rc == E_AGAIN || rc >= 0, rc);
+
+    rc = sys2(SYS_DMESG, (i64)(usize)g_big, 4096);
+    expect_true("svc2.dmesg_max4096", rc >= 0 && rc <= 4096, rc);
+    expect("svc2.dmesg_4097", sys2(SYS_DMESG, (i64)(usize)g_big, 4097),
+           E_INVAL);
+    expect("svc2.dmesg_umax",
+           sys2(SYS_DMESG, (i64)(usize)g_big, (i64)~0ULL), E_INVAL);
+    rc = sys2(SYS_DMESG, (i64)MARKER_OFF(0xFF0), 4096);
+    expect_true("svc2.dmesg_page_cross", rc == E_FAULT || rc == 0, rc);
+
+    /* log_write：tag 上限 14 字符、msg 上限 126 字符（含 NUL 的 cap-2）。 */
+    for (i = 0; i < 126u; i++) {
+        g_names[i] = 'm';
+    }
+    g_names[126] = '\0';
+    expect("svc2.log_msg126",
+           sys2(SYS_LOG_WRITE, (i64)(usize)"audit", (i64)(usize)g_names), 0);
+    g_names[126] = 'm';
+    g_names[127] = '\0';
+    expect("svc2.log_msg127",
+           sys2(SYS_LOG_WRITE, (i64)(usize)"audit", (i64)(usize)g_names),
+           E_NAMETOOLONG);
+    for (i = 0; i < 14u; i++) {
+        g_names[i] = 't';
+    }
+    g_names[14] = '\0';
+    expect("svc2.log_tag14",
+           sys2(SYS_LOG_WRITE, (i64)(usize)g_names, (i64)(usize)"x"), 0);
+    g_names[14] = 't';
+    g_names[15] = '\0';
+    expect("svc2.log_tag15",
+           sys2(SYS_LOG_WRITE, (i64)(usize)g_names, (i64)(usize)"x"),
+           E_NAMETOOLONG);
+    marker_fill(0xFFE, 'q', 2); /* 页尾两个非 NUL 字节，NUL 落在未映射页 */
+    expect("svc2.log_tag_cross",
+           sys2(SYS_LOG_WRITE, (i64)MARKER_OFF(0xFFE), (i64)(usize)"x"),
+           E_FAULT);
+    expect("svc2.log_msg_empty",
+           sys2(SYS_LOG_WRITE, (i64)(usize)"audit", (i64)(usize)""), E_INVAL);
+
+    /* login：name 上限 30、pass 上限 62；超长在 auth 之前拒绝（不会锁账户）。 */
+    for (i = 0; i < 30u; i++) {
+        g_names[i] = 'n';
+    }
+    g_names[30] = '\0';
+    rc = sys2(SYS_LOGIN, (i64)(usize)g_names, (i64)(usize)"x");
+    expect_true("svc2.login_unknown30", rc < 0, rc);
+    g_names[30] = 'n';
+    g_names[31] = '\0';
+    expect("svc2.login_name31",
+           sys2(SYS_LOGIN, (i64)(usize)g_names, (i64)(usize)"x"),
+           E_NAMETOOLONG);
+    for (i = 0; i < 63u; i++) {
+        g_names[i] = 'p';
+    }
+    g_names[63] = '\0';
+    expect("svc2.login_pass63",
+           sys2(SYS_LOGIN, (i64)(usize)"root", (i64)(usize)g_names),
+           E_NAMETOOLONG);
+    marker_fill(0xFFE, 'q', 2);
+    expect("svc2.login_name_cross",
+           sys2(SYS_LOGIN, (i64)MARKER_OFF(0xFFE), (i64)(usize)"x"), E_FAULT);
+    expect("svc2.login_pass_cross",
+           sys2(SYS_LOGIN, (i64)(usize)"root", (i64)MARKER_OFF(0xFFE)),
+           E_FAULT);
+
+    /* pkg_list：max=1/513/umax + 输出到只读页。 */
+    expect("svc2.pkg_list_max1", sys2(SYS_PKG_LIST, (i64)(usize)g_big, 1),
+           E_NOSPC);
+    expect("svc2.pkg_list_max513",
+           sys2(SYS_PKG_LIST, (i64)(usize)g_big, 513), E_INVAL);
+    expect("svc2.pkg_list_umax",
+           sys2(SYS_PKG_LIST, (i64)(usize)g_big, (i64)~0ULL), E_INVAL);
+    rc = sys2(SYS_PKG_LIST, (i64)(usize)g_big, 512);
+    expect_true("svc2.pkg_list_ok", rc >= 0, rc);
+    expect("svc2.pkg_list_ro_buf",
+           sys2(SYS_PKG_LIST, 0x40000000, 512), E_FAULT);
+    expect("svc2.pkg_list_page_cross",
+           sys2(SYS_PKG_LIST, (i64)MARKER_OFF(0xFF8), 512), E_FAULT);
+
+    /* pkg_verify：30 字符合法（不存在）、31 太长；"."/".."/空 被 name_ok 拒。 */
+    for (i = 0; i < 30u; i++) {
+        g_names[i] = 'p';
+    }
+    g_names[30] = '\0';
+    rc = sys3(SYS_PKG_VERIFY, (i64)(usize)g_names, 0, 0);
+    expect_true("svc2.pkg_verify_name30", rc < 0, rc);
+    g_names[30] = 'p';
+    g_names[31] = '\0';
+    expect("svc2.pkg_verify_name31",
+           sys3(SYS_PKG_VERIFY, (i64)(usize)g_names, 0, 0), E_NAMETOOLONG);
+    expect("svc2.pkg_verify_dot",
+           sys3(SYS_PKG_VERIFY, (i64)(usize)".", 0, 0), E_INVAL);
+    expect("svc2.pkg_verify_dotdot",
+           sys3(SYS_PKG_VERIFY, (i64)(usize)"..", 0, 0), E_INVAL);
+    expect("svc2.pkg_verify_empty",
+           sys3(SYS_PKG_VERIFY, (i64)(usize)"", 0, 0), E_INVAL);
+    put_str("AUDIT: info svc 30..35 boundary ok\n");
+}
+
+static void test_proc2(void)
+{
+    char *av[9];
+    u32 pid = 0;
+    int st = 0;
+    i64 rc;
+    u32 i;
+    u32 pids[48];
+    u32 made;
+    u32 enospc;
+
+    section("proc2");
+
+    /* spawn path 长度边界：cap=64 -> 62 字符合法（ENOENT），63 拒绝。 */
+    for (i = 0; i < 63u; i++) {
+        g_path[i] = 'a';
+    }
+    g_path[0] = '/';
+    g_path[62] = '\0';
+    av[0] = g_path;
+    av[1] = NULL;
+    expect("proc2.spawn_path62", spawn_argv(av, &pid), E_NOENT);
+    g_path[62] = 'a';
+    g_path[63] = '\0';
+    expect("proc2.spawn_path63", spawn_argv(av, &pid), E_NAMETOOLONG);
+
+    av[0] = (char *)"/bin";
+    av[1] = NULL;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.spawn_dir", rc < 0, rc);
+
+    /* argv/upid/路径字符串压 marker 页尾：跨到未映射页必须 EFAULT。 */
+    marker_put_str(0x000, g_self);
+    marker_put_str(0x020, "child");
+    marker_put_str(0x030, "80");
+    marker_put_str(0x040, "quick");
+    marker_put_u64(0xFF8, MARKER_OFF(0x000));
+    expect("proc2.spawn_argv_page_cross",
+           sys3(SYS_SPAWN, (i64)MARKER_OFF(0x000),
+                (i64)MARKER_OFF(0xFF8), (i64)(usize)&pid), E_FAULT);
+    marker_fill(0xFFF, 'a', 1); /* 'a' 在页尾，NUL 在未映射页 */
+    marker_put_u64(0xFE0, MARKER_OFF(0xFFF));
+    marker_put_u64(0xFE8, 0);
+    expect("proc2.spawn_argv_str_cross",
+           sys3(SYS_SPAWN, (i64)(usize)"/bin/hello",
+                (i64)MARKER_OFF(0xFE0), (i64)(usize)&pid), E_FAULT);
+    marker_fill(0xFFE, 'b', 2);
+    expect("proc2.spawn_path_cross",
+           sys3(SYS_SPAWN, (i64)MARKER_OFF(0xFFE), 0, (i64)(usize)&pid),
+           E_FAULT);
+    marker_put_u64(0xFE0, MARKER_OFF(0x000));
+    marker_put_u64(0xFE8, 0);
+    expect("proc2.spawn_upid_cross",
+           sys3(SYS_SPAWN, (i64)MARKER_OFF(0x000), (i64)MARKER_OFF(0xFE0),
+                (i64)MARKER_OFF(0xFFE)), E_FAULT);
+
+    /* 成功路径：argv 数组在 marker 页中段，&pid 正好压页尾 4 字节。 */
+    marker_put_u64(0xF00, MARKER_OFF(0x000));
+    marker_put_u64(0xF08, MARKER_OFF(0x020));
+    marker_put_u64(0xF10, MARKER_OFF(0x030));
+    marker_put_u64(0xF18, MARKER_OFF(0x040));
+    marker_put_u64(0xF20, 0);
+    pid = 0;
+    rc = sys3(SYS_SPAWN, (i64)MARKER_OFF(0x000), (i64)MARKER_OFF(0xF00),
+              (i64)MARKER_OFF(0xFFC));
+    expect("proc2.spawn_upid_page_tail", rc, 0);
+    if (rc == 0) {
+        pid = *(volatile u32 *)(usize)MARKER_OFF(0xFFC);
+        expect_true("proc2.spawn_upid_value", pid > 0, (i64)pid);
+        st = -1;
+        expect("proc2.wait_status_page_tail",
+               sys3(SYS_WAIT, (i64)pid, (i64)MARKER_OFF(0xFFC), 0), 0);
+        st = *(volatile int *)(usize)MARKER_OFF(0xFFC);
+        expect("proc2.wait_status_zero", st, 0);
+    }
+
+    /* argv=NULL（argc=0）与 8 项 argv：hello 忽略参数，能正常退出。 */
+    pid = 0;
+    rc = sys3(SYS_SPAWN, (i64)(usize)"/bin/hello", 0, (i64)(usize)&pid);
+    expect_true("proc2.spawn_argv_null", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        (void)sys3(SYS_KILL, (i64)pid, 9, 0);
+        st = -1;
+        expect("proc2.spawn_argv_null_wait", wait_status((i64)pid, &st), 0);
+    }
+
+    /* 单项 argv 上限：126 字符合法（copyin_str 会返回 127 = 拒绝线）。 */
+    for (i = 0; i < 126u; i++) {
+        g_long127[i] = 'z';
+    }
+    g_long127[126] = '\0';
+    for (i = 0; i < 8u; i++) {
+        av[i] = g_long127;
+    }
+    av[8] = NULL;
+    pid = 0;
+    rc = sys3(SYS_SPAWN, (i64)(usize)"/bin/hello", (i64)(usize)av,
+              (i64)(usize)&pid);
+    expect_true("proc2.spawn_argv8_maxlen", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        (void)sys3(SYS_KILL, (i64)pid, 9, 0);
+        st = -1;
+        expect("proc2.spawn_argv8_maxlen_wait",
+               wait_status((i64)pid, &st), 0);
+    }
+    av[0] = (char *)"/bin/hello";
+    av[1] = g_long127;
+    av[2] = NULL;
+    g_long127[126] = 'z';
+    g_long127[127] = '\0'; /* 127 字符 = 拒绝线（PROC_ARG_MAX-1） */
+    expect("proc2.spawn_arg127_rejected",
+           sys3(SYS_SPAWN, (i64)(usize)"/bin/hello", (i64)(usize)av,
+                (i64)(usize)&pid), E_NAMETOOLONG);
+
+    /* 进程自身 exit code / 自杀（proc_kill 的 p == cur 分支）。 */
+    av[0] = g_self;
+    av[1] = (char *)"child";
+    av[2] = (char *)"100";
+    av[3] = (char *)"exitcode";
+    av[4] = (char *)"7";
+    av[5] = NULL;
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.exitcode_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("proc2.exitcode_wait", wait_status((i64)pid, &st), 0);
+        expect("proc2.exitcode_7", st, 7);
+    }
+    av[4] = (char *)"256"; /* >255 只保留低 8 位 */
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.exitcode256_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("proc2.exitcode256_wait", wait_status((i64)pid, &st), 0);
+        expect("proc2.exitcode256_masked", st, 0);
+    }
+
+    av[3] = (char *)"selfkill";
+    av[4] = (char *)"9";
+    av[5] = NULL;
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.selfkill_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("proc2.selfkill_wait", wait_status((i64)pid, &st), 0);
+        expect("proc2.selfkill_status", st, 0x109);
+        put_str("AUDIT: info selfkill path ok\n");
+    }
+    av[4] = (char *)"255";
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.selfkill255_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("proc2.selfkill255_wait", wait_status((i64)pid, &st), 0);
+        expect("proc2.selfkill255_status", st, 0x1FF);
+    }
+
+    /* wait/kill 的 status 指针边界、null status、已死进程的幂等 kill。 */
+    av[3] = (char *)"block";
+    av[4] = NULL;
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.wait_bad_status_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        expect("proc2.wait_status_cross",
+               sys3(SYS_WAIT, (i64)pid, (i64)MARKER_OFF(0xFFE), 0), E_FAULT);
+        expect("proc2.kill0", sys3(SYS_KILL, (i64)pid, 0, 0), 0);
+        /* 僵尸态再 kill 一次：幂等返回 0，不重复迁移状态。 */
+        expect("proc2.kill_again_idempotent",
+               sys3(SYS_KILL, (i64)pid, 9, 0), 0);
+        st = -1;
+        expect("proc2.wait_kill0", wait_status((i64)pid, &st), 0);
+        expect("proc2.kill0_status", st, 0x100);
+        expect("proc2.wait_again_echild",
+               sys3(SYS_WAIT, (i64)pid, (i64)(usize)&st, 0), E_CHILD);
+    }
+
+    av[3] = (char *)"quick";
+    av[4] = NULL;
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.wait_null_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        expect("proc2.wait_null_status", sys3(SYS_WAIT, (i64)pid, 0, 0), 0);
+    }
+
+    /* 线程池耗尽：第 N+1 个 spawn 返回 ENOMEM，之前的全部能 wait 回收。 */
+    made = 0;
+    rc = 0;
+    for (i = 0; i < 20u; i++) {
+        pid = 0;
+        rc = spawn_argv(av, &pid);
+        if (rc != 0) {
+            break;
+        }
+        if (made < (u32)ARRAY_N(pids)) {
+            pids[made++] = pid;
+        }
+    }
+    expect_true("proc2.thread_pool_limited", rc == -12, rc);
+    expect_true("proc2.thread_pool_made", made >= 1, (i64)made);
+    for (i = 0; i < made; i++) {
+        st = -1;
+        expect("proc2.thread_pool_wait", wait_status((i64)pids[i], &st), 0);
+    }
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.thread_pool_recovers", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("proc2.thread_pool_recover_wait", wait_status((i64)pid, &st),
+               0);
+    }
+
+    /*
+     * 进程表耗尽：不 wait 的 quick 子进程变僵尸占槽（线程会被调度器回收），
+     * 槽位满后 proc_alloc 返回 ENOSPC；最后逐个 wait 清空。
+     */
+    made = 0;
+    enospc = 0;
+    for (u32 round = 0; round < 4u; round++) {
+        for (i = 0; i < 12u; i++) {
+            pid = 0;
+            rc = spawn_argv(av, &pid);
+            if (rc == 0) {
+                if (made < (u32)ARRAY_N(pids)) {
+                    pids[made++] = pid;
+                }
+            } else {
+                if (rc == -28) {
+                    enospc++;
+                }
+                break;
+            }
+        }
+        sleep_ticks(200000000);
+    }
+    expect_true("proc2.proc_table_enospc", enospc >= 1, (i64)enospc);
+    for (i = 0; i < made; i++) {
+        st = -1;
+        expect("proc2.proc_table_wait", wait_status((i64)pids[i], &st), 0);
+    }
+
+    /* kill 一个阻塞在 wait(孙进程) 的进程：wait 不是 IPC 等待链。 */
+    av[0] = g_self;
+    av[1] = (char *)"child";
+    av[2] = (char *)"130";
+    av[3] = (char *)"waitblock";
+    av[4] = NULL;
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("proc2.waitblock_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        sleep_ticks(300000000); /* 子进程此时阻塞在 SYS_WAIT */
+        expect("proc2.waitblock_kill", sys3(SYS_KILL, (i64)pid, 9, 0), 0);
+        st = -1;
+        expect("proc2.waitblock_wait", wait_status((i64)pid, &st), 0);
+        expect("proc2.waitblock_status", st, 0x109);
+        put_str("AUDIT: info kill blocked-in-wait ok\n");
+    }
+    put_str("AUDIT: info proc table/thread pool limits ok\n");
+}
+
+static void test_shm_fb2(void)
+{
+    u64 va = 0;
+    u64 va2 = 0;
+    u32 h = 0;
+    u32 handles[8];
+    u32 n = 0;
+    u32 i;
+    i64 rc;
+    u32 pid = 0;
+    int st = 0;
+    char hstr[24];
+    char *av[6];
+
+    section("shmfb2");
+
+    expect("shm2.alloc_pages_umax",
+           sys3(SYS_SHM_ALLOC, (i64)~0ULL, (i64)(usize)&va,
+                (i64)(usize)&h), E_INVAL);
+    expect("shm2.alloc_va_out_cross",
+           sys3(SYS_SHM_ALLOC, 1, (i64)MARKER_OFF(0xFFC),
+                (i64)(usize)&h), E_FAULT);
+    expect("shm2.alloc_handle_out_cross",
+           sys3(SYS_SHM_ALLOC, 1, (i64)(usize)&va,
+                (i64)MARKER_OFF(0xFFC)), E_FAULT);
+    expect("shm2.map_out_cross",
+           sys3(SYS_SHM_MAP, 1, (i64)MARKER_OFF(0xFFC), 0), E_FAULT);
+
+    rc = sys3(SYS_SHM_ALLOC, 1, (i64)(usize)&va, (i64)(usize)&h);
+    expect_true("shm2.alloc", rc == 0 && h != 0 && va >= 0x50000000ULL, rc);
+    if (rc == 0) {
+        /* SHM_MAPS_MAX=8：owner 占 1 个，再加 7 个映射后 ENOSPC。 */
+        for (i = 0; i < 7u; i++) {
+            va2 = 0;
+            rc = sys3(SYS_SHM_MAP, (i64)h, (i64)(usize)&va2, 0);
+            expect_true("shm2.map_extra", rc == 0 && va2 >= 0x50000000ULL,
+                        rc);
+        }
+        va2 = 0;
+        expect("shm2.map_full",
+               sys3(SYS_SHM_MAP, (i64)h, (i64)(usize)&va2, 0), E_NOSPC);
+        expect("shm2.map_out_cross2",
+               sys3(SYS_SHM_MAP, (i64)h, (i64)MARKER_OFF(0xFFC), 0),
+               E_FAULT);
+    }
+
+    /*
+     * 子进程正常退出（不是被 kill）时的 shm/fb 释放顺序：必须在对象表填满
+     * 之前做（填满后 SYS_SHM_ALLOC 只能返回 ENOSPC，没有 free syscall）。
+     */
+    rc = sys3(SYS_SHM_ALLOC, 1, (i64)(usize)&va, (i64)(usize)&h);
+    expect_true("shm2.child_spawn_alloc", rc == 0, rc);
+    if (rc == 0) {
+        *(volatile u32 *)(usize)va = 0x11111111u;
+        (void)put_s64(hstr, (u32)sizeof(hstr), (i64)h);
+        av[0] = g_self;
+        av[1] = (char *)"child";
+        av[2] = (char *)"120";
+        av[3] = (char *)"shmq";
+        av[4] = hstr;
+        av[5] = NULL;
+        pid = 0;
+        rc = spawn_argv(av, &pid);
+        expect_true("shm2.child_spawn", rc == 0 && pid > 0, rc);
+        if (rc == 0) {
+            st = -1;
+            expect("shm2.child_wait", wait_status((i64)pid, &st), 0);
+            expect("shm2.child_status", st, 0);
+            expect_true("shm2.child_wrote",
+                        *(volatile u32 *)(usize)va == 0x5A5A5A5Au,
+                        (i64)*(volatile u32 *)(usize)va);
+            expect_true("shm2.parent_survives",
+                        *(volatile u32 *)(usize)va == 0x5A5A5A5Au,
+                        (i64)*(volatile u32 *)(usize)va);
+            *(volatile u32 *)(usize)va = 0x22222222u;
+        }
+    }
+
+    /* FB 输出指针页边界（父进程这里已映射过 FB，先过 uaccess 再 EBUSY）。 */
+    expect("fb2.va_out_cross",
+           sys3(SYS_FB_MAP, (i64)MARKER_OFF(0xFFE), (i64)(usize)&g_fb, 0),
+           E_FAULT);
+    expect("fb2.info_out_cross",
+           sys3(SYS_FB_MAP, (i64)(usize)&va, (i64)MARKER_OFF(0xFF0), 0),
+           E_FAULT);
+
+    av[0] = g_self;
+    av[1] = (char *)"child";
+    av[2] = (char *)"121";
+    av[3] = (char *)"fbq";
+    av[4] = NULL;
+    av[5] = NULL;
+    pid = 0;
+    rc = spawn_argv(av, &pid);
+    expect_true("fb2.child_spawn", rc == 0 && pid > 0, rc);
+    if (rc == 0) {
+        st = -1;
+        expect("fb2.child_wait", wait_status((i64)pid, &st), 0);
+        expect("fb2.child_status", st, 0);
+        put_str("AUDIT: info normal-exit shm/fb release ok\n");
+    }
+
+    /* 对象表上限：填满后 ENOSPC（循环自己数已有对象，不假设起始空表）。 */
+    for (i = 0; i < 8u; i++) {
+        h = 0;
+        rc = sys3(SYS_SHM_ALLOC, 1, (i64)(usize)&va, (i64)(usize)&h);
+        if (rc != 0) {
+            break;
+        }
+        handles[n++] = h;
+    }
+    expect_true("shm2.table_fill", n >= 1, (i64)n);
+    expect("shm2.table_full",
+           sys3(SYS_SHM_ALLOC, 1, (i64)(usize)&va, (i64)(usize)&h), E_NOSPC);
+}
+
+/*
+ * 收尾竞态：探针退出时 proc_release_handles() 会关闭自己的端口并唤醒阻塞在
+ * send 的子进程。故意留一个 blocked sender 不 kill/wait，让它跨过探针的
+ * 退出路径；子进程随后应打印 `sender fail rc=-125`（ECANCELED）。
+ */
+static void arm_exit_cleanup(void)
+{
+    struct audit_hdr h;
+    char ticket[24];
+    char *av[8];
+    u32 pid = 0;
+    i64 p;
+    i64 rc;
+
+    p = sys3(SYS_PORT_CREATE, 1, 0, 0);
+    if (p <= 0) {
+        put_str("AUDIT: info exit cleanup skipped (no port)\n");
+        return;
+    }
+    hdr_init(&h, 0xEE, 0, 0, 0);
+    (void)sys4(SYS_PORT_SEND, p, (i64)(usize)&h, IPC_HDR, 0);
+    (void)put_s64(ticket, (u32)sizeof(ticket), p);
+    av[0] = g_self;
+    av[1] = (char *)"child";
+    av[2] = (char *)"200";
+    av[3] = (char *)"sender";
+    av[4] = ticket;
+    av[5] = (char *)"1";
+    av[6] = (char *)"18446744073709551615";
+    av[7] = NULL;
+    rc = spawn_argv(av, &pid);
+    if (rc != 0) {
+        put_str("AUDIT: info exit cleanup skipped (spawn failed)\n");
+        return;
+    }
+    sleep_ticks(200000000); /* 让子进程阻塞在满队列的 send 上 */
+    put_str("AUDIT: info exit cleanup armed\n");
+}
+
+/* ------------------------------------------------------------------------- */
 /* 入口                                                                       */
 /* ------------------------------------------------------------------------- */
 static int crash_main(void)
@@ -1171,15 +2415,25 @@ int audit_main(long argc, char **argv)
     put_str(num);
     put_str("\n");
 
+    g_self = (argv != NULL && argv[0] != NULL) ? argv[0]
+                                               : (char *)"/mnt/disk/audit.elf";
+
     /* 一个专用端口，用于 sleep_ticks() 让出 CPU。 */
     g_sleep_port = (u32)sys3(SYS_PORT_CREATE, 1, 0, 0);
 
     test_write();
+    test_write2();
     test_ipc();
+    test_ipc2();
     test_fs();
+    test_fs2();
     test_svc();
+    test_svc2();
     test_proc(argv);
+    test_proc2();
     test_shm_fb();
+    test_shm_fb2();
+    arm_exit_cleanup();
 
     put_str("AUDIT: summary pass=");
     (void)put_s64(num, (u32)sizeof(num), (i64)g_pass);

@@ -383,11 +383,12 @@ try {
             $total = [int]$summary.Groups[3].Value
             Write-Host ("  [INFO] summary pass={0} fail={1} total={2}" -f $pass, $fails, $total) -ForegroundColor Cyan
             Check 'boundary: all cases PASS' ($fails -eq 0) ("(fail={0})" -f $fails)
-            Check 'boundary: case count >= 70' ($total -ge 70 -and $pass -ge 70) ("(total={0})" -f $total)
+            Check 'boundary: case count >= 460' ($total -ge 460 -and $pass -ge 460) ("(total={0})" -f $total)
             $failLines = [regex]::Matches($t, 'AUDIT: FAIL [^\r\n]+')
             foreach ($fl in ($failLines | Select-Object -First 12)) { Write-Host ("    " + $fl.Value) }
             $waitOk = Wait-Serial ('ng: shell wait ok \(pid={0} status=0\)' -f [regex]::Escape($probePid)) 20
             Check 'boundary: probe exit status 0' ($null -ne $waitOk)
+            $t = Get-SerialText
             Check 'boundary: no kernel panic' (-not $t.Contains('PANIC:'))
             Check 'boundary: no child from bad-&pid spawn (id=7777)' (-not $t.Contains('id=7777'))
             Check 'boundary: storm block children reached recv' `
@@ -396,6 +397,40 @@ try {
                 ($t.Contains('AUDIT: child shm id=30 va=0x5a5a5a5a'))
             Check 'boundary: child mapped LFB before kill' `
                 ($t.Contains('AUDIT: child fb id=31 mapped'))
+            # Round 2 additions: cross-process IPC / self-kill / FAT16 / SVC /
+            # resource limits / exit-time close race. Keep new comments ASCII:
+            # Windows PowerShell 5.1 reads .ps1 as ANSI (GBK here), and a
+            # multibyte Chinese comment can swallow the following newline.
+            Check 'boundary: cross-process recv wake' `
+                ($t.Contains('AUDIT: info xproc recv wake ok'))
+            Check 'boundary: blocked senders handoff' `
+                ($t.Contains('AUDIT: info xproc send handoff ok'))
+            Check 'boundary: kill blocked sender' `
+                ($t.Contains('AUDIT: info kill blocked sender ok'))
+            Check 'boundary: close wakes blocked sender' `
+                ($t.Contains('AUDIT: info close wakes blocked sender ok'))
+            Check 'boundary: cross-process recv/close EPERM' `
+                ($t.Contains('AUDIT: info cross-process recv/close EPERM ok'))
+            Check 'boundary: FAT16 read/write/listdir' `
+                ($t.Contains('AUDIT: info fat16 read/write/listdir ok'))
+            Check 'boundary: SVC 30..35 boundary' `
+                ($t.Contains('AUDIT: info svc 30..35 boundary ok'))
+            Check 'boundary: self-kill path' `
+                ($t.Contains('AUDIT: info selfkill path ok'))
+            Check 'boundary: proc table / thread pool limits' `
+                ($t.Contains('AUDIT: info proc table/thread pool limits ok'))
+            Check 'boundary: kill blocked-in-wait' `
+                ($t.Contains('AUDIT: info kill blocked-in-wait ok'))
+            Check 'boundary: normal-exit shm/fb release' `
+                ($t.Contains('AUDIT: info normal-exit shm/fb release ok'))
+            Check 'boundary: exit cleanup armed' `
+                ($t.Contains('AUDIT: info exit cleanup armed'))
+            # Probe exit closes its port and must wake the blocked sender; the
+            # child then prints ECANCELED (rc=-125) and exits 4, no panic.
+            $exitWoke = Wait-Serial 'AUDIT: child sender fail id=200 rc=-125' 10
+            Check 'boundary: exit cleanup woke blocked sender' ($null -ne $exitWoke)
+            $t = Get-SerialText
+            Check 'boundary: no kernel panic after probe exit' (-not $t.Contains('PANIC:'))
         }
     }
 } finally {
