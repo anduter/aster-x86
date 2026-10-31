@@ -260,6 +260,13 @@ static u32 g_last_apps;
 static u32 g_last_windows;
 static u32 g_launch_prints;
 static u32 g_reject_prints;
+/*
+ * WP3-5：S1 故障注入钩子。sessiond 自身行为不变；只有存在启动参数
+ * `fault=spin` 时才把它透传给 WM，WM 收到 F12 后进入死循环（无抢占的
+ * 已知限制，见 docs/design/session-ng.md 第 12 节）。正式启动（wp33 的
+ * init -> sessiond）没有这个参数，不影响产品路径。
+ */
+static u32 g_fault_spin;
 
 /* ------------------------------------------------------------------------- */
 /* 状态文件（经 displayd 的 /run/display.status 汇总）                        */
@@ -566,10 +573,11 @@ static int s_start_wm(void)
 {
     char ticket_arg[24];
     char token_arg[24];
-    const char *argv[4];
+    const char *argv[5];
     u32 pid;
     u32 token;
     int slot;
+    int argc = 0;
 
     (void)s_u32str(g_port, ticket_arg + 8);
     ds_memcopy(ticket_arg, "session=", 8);
@@ -577,10 +585,13 @@ static int s_start_wm(void)
     token = s_make_token(SESSION_ROLE_WM);
     (void)s_hexstr(token, token_arg + 8);
 
-    argv[0] = S_WM_PATH;
-    argv[1] = ticket_arg;
-    argv[2] = token_arg;
-    argv[3] = NULL;
+    argv[argc++] = S_WM_PATH;
+    argv[argc++] = ticket_arg;
+    argv[argc++] = token_arg;
+    if (g_fault_spin != 0u) {
+        argv[argc++] = "fault=spin"; /* WP3-5：只在 S1 场景 d 出现 */
+    }
+    argv[argc] = NULL;
     pid = s_spawn(S_WM_PATH, argv);
     if (pid == 0) {
         s_put("ng: sessiond FAIL (wm spawn)\r\n");
@@ -1147,11 +1158,20 @@ static void s_check_deadlines(u64 now)
 /* 入口                                                                       */
 /* ------------------------------------------------------------------------- */
 
-int s_main(void)
+int s_main(long argc, char **argv)
 {
+    long i;
+
     g_pid = (u32)s_sys(S_SYS_GETPID, 0, 0, 0);
     g_seq = 0;
     g_round = 0;
+    g_fault_spin = 0;
+    /* WP3-5：只认故障注入参数；正式启动（init）没有参数。 */
+    for (i = 1; argv != NULL && i < argc; i++) {
+        if (s_streq(argv[i], "fault=spin") != 0) {
+            g_fault_spin = 1;
+        }
+    }
     session_table_init(&g_tab);
     g_wm_state = S_WM_STATE_NONE;
     s_startup();

@@ -274,3 +274,137 @@ token；没有会话时 token=0，displayd 回落到 v1/v2 的无校验语义。
 这条 SDK 通道**不改变** sessiond 的所有权模型：sessiond 仍是应用生命周期
 的唯一入口；SDK 只是客户端。sessiond 自己崩溃后的接管、cap/撤销、displayd
 重连仍是本文第 10 节的遗留。
+
+## 12. S1 故障注入（WP3-5）
+
+> 状态：已实现（2026-10-31，`docs/claims/ng-WP3-5.md`）。
+> 工具：`tools/s1-fault.ps1`；客户机代理/纯逻辑：`tests/s1/**`；
+> host 单测：`tests/unit-ng/test_s1.c`。
+> 上位约束：`docs/design/architecture.md` §3 故障等级（S1 的 L3 存活 SLA）。
+
+### 12.1 断言口径
+
+S1：**shell/WM 崩溃或卡死时，L3 进程、文档状态、输入不丢**；允许视觉中断、
+焦点/IME 重置、重绘。本 WP 只测 WM（L2b）与输入路径；displayd 崩溃存活是
+S2、GPU 恢复是 S3，都不在 S1 范围内。
+
+D0 还没有编辑器类应用，所以"文档状态"用**进程/窗口/注册表不丢**作为可观测
+代理：Demo 进程 pid、surface 窗口、sessiond 注册表项在 WM 双重重启后仍在。
+真正的文档内容属于 E4/D1 的编辑器接入。
+
+### 12.2 注入通道（为什么代理走磁盘）
+
+S1 需要"外部杀进程"，但产品里没有给 host 的调试 syscall，而本 WP 不允许改
+`build-ng.ps1`/内核镜像里的用户 ELF。做法：
+
+```text
+host: clang 编译 tests/s1/s1fault.c + s1_logic.c -> s1fault.elf
+      tools/mkfat-ng.ps1 生成 8MB FAT16 副本
+      tests/s1/fat-add.ps1 把 s1fault.elf 写成根目录 S1FAULT.ELF
+guest: ring3 shell  spawn /mnt/disk/S1FAULT.ELF <a|b|c|d> ; wait <pid>
+       代理 spawn /bin/sessiond（真实启动路径：sessiond -> displayd + wm）
+       代理按步骤读 /run/display.status，kill WM / 焦点应用 / sessiond
+host: QMP input-send-event 注入 1 / f12；screendump + PPM 像素断言
+```
+
+两个关键点：
+
+1. **子进程必须是 VFS 可读的 ELF**：`proc_spawn` 支持任意 VFS 路径，
+   `/mnt/disk` 是 WP2-4 已挂好的 FAT16，正好当测试载荷通道；不改内核、
+   不改产品 ramfs 种子。
+2. **代理不能提前退出**：父 shell 的 `wait` 一旦返回，shell 会重新
+   `readkey` 忙等，和 displayd 抢同一个内核按键队列。所以代理在结束、
+   失败、以及 d 场景 arm 之后都**阻塞在 port_recv 超时轮询上不退出**，
+   QEMU 由 host 结束。
+
+### 12.3 场景与断言
+
+每个场景独立起一个 QEMU（复用 run-ng 的 `-kernel`/`-drive`/`-vga std`/
+`-m 256`/`-cpu max` 参数，独立随机 QMP 端口，`-display none` + serial file）。
+
+| 场景 | 注入 | 断言 | 结果 |
+|---|---|---|---|
+| a 杀 WM | `kill(wm, 9)` | Demo pid/窗口/注册表存活；sessiond `srestarts+1` 且 `swmpid` 换新；面板重新 CREATE+COMMIT（像素）；键盘 `1` 走通新 WM 的 LAUNCH（host 断言 `via=key`） | PASS |
+| b 杀输入应用 | `kill(sapppid, 9)`（焦点 Demo） | sessiond 心跳回收（`sreaps+1`）、WM 不重启；键盘 `1` 仍启动新应用（`slaunches+1`、`sapppid` 变） | PASS |
+| c 杀 sessiond | `kill(spid, 9)` | session 域崩溃：无接管/无重启（`srestarts` 不变、状态停在最后一份）；WM/Demo/输入/面板仍在（host 断言 `via=key` 的 LAUNCH 请求仍发出） | PASS（记录行为，不要求恢复） |
+| d WM 死循环 | WM `fault=spin` 收到 F12 后自旋 | 协作式调度无抢占：serial 冻结、sessiond 无法检测/重启、整机停住；冻结最后一帧仍有面板+窗口 | KNOWN（S1 SLA 不满足，已知限制） |
+
+场景 a 的一个时序坑（实现时踩到）：新 WM 的 `wm launcher ok` 行可能比
+agent 的 `s1 wm restart ok` 证据行更早（两个进程），用它做 `-After` 条件会
+一直等不到、直到**下一个** WM 周期（~8s），期间新 WM 的自检 fallback 已经
+auto-launch 一次。现在改用 sessiond 的 `session wm restart ready ok` 计数
+（新 WM REGISTER 之后）确认热键就绪，并连按两次 `1`：新 WM 的 fallback 最多
+auto-launch 一次，所以 agent 的"launches 至少 +2"只有在至少一次按键真的走通
+时才成立；host 另外单独断言 `via=key` 行。
+
+### 12.4 故障钩子（只影响 S1 调用）
+
+为了能真的让 WM"卡死"，加了两处**只在 S1 场景 d 的启动参数下生效**的钩子：
+
+```text
+sessiond argv 含 fault=spin   ->  spawn /bin/wm 时追加 argv "fault=spin"
+wm argv 含 fault=spin         ->  收到 F12（PS/2 scancode 0x58）时打印
+                                   ng: wm fault spin (scancode=0x58) 后死循环
+```
+
+正式启动路径（init → sessiond → wm）没有这个参数，行为与 WP3-3 完全一致；
+`run-ng`/`ci-ng` 不受影响（本 WP 的 run-ng 仍是 159/159 + 75 正则）。
+
+### 12.5 证据与像素
+
+串口证据（每个场景的 `ng: s1 ...` 行由代理/纯逻辑打印）：
+
+```text
+ng: s1 agent up (pid=.. mode=a)
+ng: s1 sessiond spawn ok (pid=22)
+ng: s1 session up (sessiond=22 displayd=23 wm=24 app=25 launches=1 windows=2)
+ng: s1 wm killed ok (pid=24)
+ng: s1 wm restart ok (old=24 new=26 restarts=1)
+ng: s1 demo alive ok (app=25 apps=1 windows=2 reaps=0)
+ng: s1 input req (scenario=a)              <- host 从这里开始注入
+ng: s1 input ok (launches=3 app=28)
+ng: s1 scenario a PASS (step=4)
+```
+
+像素断言（QMP `screendump` 的 PPM，1280x800）：
+
+- `(4,4) == #202838`：WM 面板背景（尺寸 1280x32，固定贴在左上角）；
+- `(217,177) == #3070c0`：Demo 窗口的实心矩形。Demo 窗口 400x300 由 displayd
+  级联放在 `(160 + 32*count, 120 + 32*count)`，新会话里第一个应用窗口是
+  `(192,152)`，矩形在其内部 `(20,20)-(160,90)`，探针 `(192+25, 152+25)`。
+- 场景 d 在注入 F12 **之前**先抓一帧（面板+窗口），冻结后再抓一次；两次都能
+  读到同一帧说明"整机停住但最后一帧还在"。QMP 在自旋时偶尔会被 QEMU main
+  loop 饿死（screendump 3s 无响应），工具把这种情况也当 KNOWN 证据记录。
+
+### 12.6 结果（2026-10-31）
+
+```text
+s1-fault: scenario a PASS  (12.9s) WM restarted with new pid; Demo survived; panel back; 2x key -> via=key LAUNCH ok
+s1-fault: scenario b PASS  (12.3s) focused app killed/reaped; WM stayed up; key launched a new app (input recovery)
+s1-fault: scenario c PASS  (12.5s) sessiond died (no takeover, D0 known limitation); WM/Demo/input/panel survived
+s1-fault: scenario d KNOWN (13.4s) WM spin froze the whole VM ... frozen frame still has panel + window - S1 SLA not met
+s1-fault: 3 pass, 1 known, 0 fail in 51.1s
+```
+
+host 单测 5025（WP3-3）→ 5034（输入边界加固）→ **5183 checks**（本 WP +149）；
+host 单测直接跑 `tests/s1/s1_logic.c`，和客户机断言是同一份源码。
+
+### 12.7 已知限制
+
+1. **WM 死循环 = 整机冻结**：调度器是协作式（`thread.h`：只在
+   `sched_yield/thread_sleep/thread_exit` 切换），WM 在 ring3 自旋后
+   sessiond/displayd 都拿不到 CPU，也没有看门狗/抢占。d 记录为 KNOWN，
+   修复需要内核抢占或 watchdog（不在本 WP 范围）。
+2. **sessiond 自己崩溃没有接管**：c 只记录行为（应用/displayd/WM 变孤儿继续
+   跑、无注册表/重启策略），不要求恢复（第 10 节遗留、architecture 开放
+   决策 2）。
+3. **displayd 崩溃（S2）没测**：杀 displayd 的保活/重连属 S2。
+4. **输入只测键盘**：PS/2 + QMP `input-send-event`；鼠标/IME 还没实现。
+5. **"文档状态"用进程/窗口/注册表代替**：D0 还没有文档型 L3 应用；编辑器
+   接入后需要补"内容不丢"的断言。
+6. **像素断言依赖 stdvga 1280x800 + QMP screendump**：`-vga none` 没有 LFB，
+   场景不适用（和 run-ng `-Fallback` 同一约束）。
+7. **FAT16 代理是测试通道**：产品路径不加载它；正式外部开发者测试（E4）
+   仍然用 SDK/包安装。
+8. **d 场景的 QMP 行为不稳定**：WM 自旋时 screendump 可能被 QEMU main loop
+   饥饿（3s 超时）；工具两种结果都接受，并把"抓不到"也记为冻结证据。

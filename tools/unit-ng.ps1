@@ -120,6 +120,7 @@ $sources = @(
     'src/desktop/src/ds_wm.c',
     'src/desktop/src/session_protocol.c',
     'src/desktop/src/session_table.c',
+    'tests/s1/s1_logic.c',
     'tests/unit-ng/fake_ng_env.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
@@ -143,6 +144,7 @@ $sources = @(
     'tests/unit-ng/test_desktop.c',
     'tests/unit-ng/test_wm.c',
     'tests/unit-ng/test_session.c',
+    'tests/unit-ng/test_s1.c',
     'tests/unit-ng/test_parity.c'
 )
 $srcPaths = @()
@@ -158,6 +160,7 @@ $ccArgs = @(
     '-I', (Join-Path $Repo 'src/services/pkg/include'),
     '-I', (Join-Path $Repo 'src/drivers/include'),
     '-I', (Join-Path $Repo 'src/desktop/include'),
+    '-I', (Join-Path $Repo 'tests/s1'),
     '-I', (Join-Path $Repo 'tests/unit-ng'),
     '-I', (Join-Path $Repo 'tests/parity'),
     '-o', $exe

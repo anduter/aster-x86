@@ -112,6 +112,22 @@ static u32 w_strlen(const char *s)
     return n;
 }
 
+static int w_streq(const char *a, const char *b)
+{
+    u32 i = 0;
+
+    if (a == NULL || b == NULL) {
+        return 0;
+    }
+    while (a[i] != '\0' && b[i] != '\0') {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+        i++;
+    }
+    return (a[i] == b[i]) ? 1 : 0;
+}
+
 static void w_put(const char *s)
 {
     u32 n = w_strlen(s);
@@ -221,6 +237,12 @@ static u32 g_seq;
 static u32 g_self_id;
 static u32 g_session; /* sessiond 端口 ticket（0 = 直连兼容模式） */
 static u32 g_token;   /* WM 的 role_token */
+/*
+ * WP3-5：S1 故障注入钩子。只有 sessiond 用 `fault=spin` 启动 WM 时才会
+ * 打开（S1 场景 d），收到 F12（PS/2 scancode 0x58）后进入死循环，模拟
+ * "WM 卡死"。正式启动路径没有这个参数，行为不变。
+ */
+static u32 g_fault_spin;
 static u32 g_session_list_printed;
 static u32 g_empty_idle;
 static u32 g_rounds;
@@ -770,6 +792,17 @@ static void wm_handle_input(const struct ds_msg *m)
     if (!ds_wm_input_is_global(flags)) {
         return;
     }
+    /*
+     * WP3-5：S1 场景 d 的故障注入钩子。F12 在正常 WM 里是"其它键"，这里
+     * 只在 fault=spin 模式下把它变成"WM 死循环"：协作式调度没有抢占，
+     * 自旋后 sessiond/displayd 都再也拿不到 CPU（已知限制，见 claims）。
+     */
+    if (g_fault_spin != 0u && m->u.input.scancode == 0x58u) {
+        w_put("ng: wm fault spin (scancode=0x58)\r\n");
+        for (;;) {
+            __asm__ volatile("pause");
+        }
+    }
     action = ds_wm_hotkey_consume(&g_hotkey, key, flags, &index);
     if (action == DS_WM_HOTKEY_TASK_SWITCH) {
         wm_do_switch(0);
@@ -952,6 +985,7 @@ int w_main(long argc, char **argv)
     /* 会话参数：argv 里的 `session=<ticket>` / `token=<hex>`（WP3-3）。 */
     g_session = 0;
     g_token = 0;
+    g_fault_spin = 0;
     for (i = 1; argv != NULL && i < (u32)argc; i++) {
         u32 v = 0;
 
@@ -959,6 +993,8 @@ int w_main(long argc, char **argv)
             g_session = v;
         } else if (session_arg_parse_u32(argv[i], "token=", &v) != 0) {
             g_token = v;
+        } else if (w_streq(argv[i], "fault=spin") != 0) {
+            g_fault_spin = 1; /* WP3-5：S1 场景 d 才出现 */
         }
     }
     rc = w_sys(W_SYS_MKDIR, (i64)"/run", 0755, 0);
