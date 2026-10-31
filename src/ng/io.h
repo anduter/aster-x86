@@ -35,6 +35,13 @@ static inline void write_cr0(u64 v)
     __asm__ volatile("mov %0, %%cr0" : : "r"(v) : "memory");
 }
 
+static inline u64 read_cr2(void)
+{
+    u64 v;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(v));
+    return v;
+}
+
 static inline u64 read_cr3(void)
 {
     u64 v;
@@ -105,10 +112,23 @@ static inline void clac(void)
     __asm__ volatile("clac" : : : "memory");
 }
 
-/* ---- 停 CPU ---- */
+/* ---- 停 CPU / 关中断 ---- */
 static inline void cpu_hlt(void)
 {
     __asm__ volatile("hlt");
+}
+
+static inline void cpu_cli(void)
+{
+    __asm__ volatile("cli" : : : "memory");
+}
+
+/* ---- 任务寄存器 / 段寄存器（TSS 装载后读回证据）---- */
+static inline u16 read_tr(void)
+{
+    u16 v;
+    __asm__ volatile("str %0" : "=r"(v));
+    return v;
 }
 
 #endif /* NG_IO_H */

@@ -1,18 +1,21 @@
 /*
- * ng WP1-2: 64 位 C 入口。
+ * ng WP1-3: 64 位 C 入口（页表 -> GDT/TSS -> IDT -> syscall -> 出口自检）。
  *
- * 到这里时 entry.S 已完成：长模式、分页（引导用 1 GiB 2 MiB 恒等映射）、
- * 64 位段与启动栈。
+ * 顺序是有依赖的：
+ *   1. pg_init() 先建 4 级页表/W^X/NX/SMEP/SMAP（WP1-2）；
+ *   2. gdt_init() 换掉 entry.S 的引导 GDT，装上用户段与 TSS/IST；
+ *   3. trap_init() 填 256 项 IDT 并 lidt（#DF 用 IST1）；
+ *   4. syscall_init() 置 EFER.SCE、STAR/LSTAR/FMASK；
+ *   5. 受控异常（写只读页/ud2/坏段）与 syscall（ring0、ring3）自检。
  *
- * 本 WP 做的事：
- *   1. 串口先就位（无显示环境下唯一的证据通道）；
- *   2. pg_init() 建 4 级页表（4 KiB 内核段 + 2 MiB 大页混合）、切 CR3、
- *      置 EFER.NXE / CR4.SMEP/SMAP / CR0.WP，并做不依赖 trap 的自检；
- *   3. 打印最终 PASS/FAIL 后 hlt 停住（trap/IDT 留给 WP1-3）。
+ * 想验证 panic 路径：build-ng.ps1 -PanicTest 会在所有正常检查后触发一条
+ * 不可恢复的 #UD（普通 build 不定义 NG_PANIC_TEST，行为不变）。
  */
+#include "gdt.h"
 #include "paging.h"
-
 #include "serial.h"
+#include "syscall.h"
+#include "trap.h"
 #include "types.h"
 
 void kmain(u64 mb_info)
@@ -27,6 +30,28 @@ void kmain(u64 mb_info)
     fails = pg_init();
 
     serial_puts("ng: WP1-2 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+
+    if (fails == 0) {
+        gdt_init();
+        fails += trap_init();
+        syscall_init();
+        fails += trap_selftest();
+        fails += syscall_selftest();
+    }
+
+#ifdef NG_PANIC_TEST
+    serial_puts("ng: panic selftest: triggering unrecoverable #UD\r\n");
+    __asm__ volatile("ud2" : : : "memory");
+#endif
+
+    serial_puts("ng: WP1-3 selftest ");
     if (fails == 0) {
         serial_puts("PASS\r\n");
     } else {

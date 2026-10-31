@@ -64,4 +64,12 @@ int pg_protect(u64 va, u64 flags);
 
 u64 pg_cr3(void);
 
+/*
+ * WP1-3：把 CR0/CR4/EFER 的实际状态暴露给 trap/syscall 初始化（clac 是否可用、
+ * 缺页报告里的 SMAP 上下文）。都在 pg_init() 之后有效。
+ */
+int pg_nx_on(void);
+int pg_smep_on(void);
+int pg_smap_on(void);
+
 #endif /* NG_PAGING_H */

@@ -1,8 +1,11 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP1-2: 构建 64 位内核（ELF64 x86_64，4 级页表 + W^X/NX）
+# build-ng.ps1 - ng WP1-3: 构建 64 位内核（ELF64 x86_64，页表 + IDT/TSS + syscall）
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
+#       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
 #       src/ng/serial.c（COM1）、src/ng/paging.c（4 级页表/W^X/NX/SMEP/SMAP）、
+#       src/ng/gdt.c（GDT/TSS/IST）、src/ng/trap.c（IDT/异常/panic）、
+#       src/ng/syscall.c（STAR/LSTAR/FMASK + ring0/ring3 测试）、
 #       src/ng/main.c（64 位 C 入口）、src/ng/link.ld。
 # 输出：dist-ng/aster-ng.elf，对象文件在 obj-ng/。
 #
@@ -14,13 +17,15 @@
 #       前提）；multiboot2 头在前 32 KiB 且 8 字节对齐、checksum 为 0；
 #       PT_NOTE 里有 Xen PVH 入口（QEMU -kernel 用）。
 #
-# usage: powershell -File tools/build-ng.ps1 [-Repo <root>] [-DistDir dist-ng] [-ObjDir obj-ng]
+# usage: powershell -File tools/build-ng.ps1 [-Repo <root>] [-DistDir dist-ng]
+#                                             [-ObjDir obj-ng] [-PanicTest]
 # 退出码：0 = PASS；1 = FAIL。
 # =============================================================================
 param(
     [string]$Repo = '',
     [string]$DistDir = 'dist-ng',
-    [string]$ObjDir = 'obj-ng'
+    [string]$ObjDir = 'obj-ng',
+    [switch]$PanicTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,9 +59,10 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP1-2) ==='
+Write-Host '=== build-ng (WP1-3) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
+if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
 
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
@@ -68,18 +74,25 @@ $common = @($target, '-ffreestanding', '-nostdlib', '-mno-red-zone',
 $asmFlags = $common + @('-c')
 $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-fno-pic', '-fno-pie', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-c')
+if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
 
+# 汇编源；新增 .S 只要加进这个列表。
+$asmSources = @('entry.S', 'isr.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'paging.c', 'main.c')
-$steps = $cSources.Count + 2
+$cSources = @('serial.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'main.c')
+$steps = $asmSources.Count + $cSources.Count + 1
 $step = 0
+$asmObjs = New-Object System.Collections.Generic.List[string]
 
-# ---- 编译 ------------------------------------------------------------------
-$step++
-Write-Host ("  [{0}/{1}] entry.S" -f $step, $steps)
-$entryObj = Join-Path $objDir 'entry.o'
-& $clang @($asmFlags + @((Join-Path $srcDir 'entry.S'), '-o', $entryObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
-if ($LASTEXITCODE -ne 0) { Fail 'entry.S compile failed' }
+# ---- 编译汇编 --------------------------------------------------------------
+foreach ($src in $asmSources) {
+    $step++
+    Write-Host ("  [{0}/{1}] {2}" -f $step, $steps, $src)
+    $obj = Join-Path $objDir ([IO.Path]::GetFileNameWithoutExtension($src) + '.o')
+    & $clang @($asmFlags + @((Join-Path $srcDir $src), '-o', $obj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+    if ($LASTEXITCODE -ne 0) { Fail ("{0} compile failed" -f $src) }
+    $asmObjs.Add($obj)
+}
 
 $cObjs = New-Object System.Collections.Generic.List[string]
 foreach ($src in $cSources) {
@@ -97,7 +110,7 @@ Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf, $entryObj) + $cObjs.ToArray()
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray()
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

@@ -138,7 +138,8 @@ WP1-2 不做 IDT/#PF（WP1-3），所以"保护生效"用**读回 + 走表断言
 
 ## 8. 未做（严格按 WP1-2 边界）
 
-- #PF/#GP/IDT/trap、故意触发保护异常的负向测试：WP1-3。
+- #PF/#GP/IDT/trap、故意触发保护异常的负向测试：WP1-3（已完成，见
+  `docs/design/trap-syscall-ng.md` 与 `docs/claims/ng-WP1-3.md`）。
 - PMM/heap、页表页回收、2 MiB 大页拆分：WP1-4。
 - 用户页（U/S=1）、ring3、ELF64 加载器：WP1-7。
 - 1 GiB 大页、PWT/PCD/MMIO 缓存属性、higher-half 映射：暂不需要。

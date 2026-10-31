@@ -99,3 +99,10 @@
 - **理由**：段权限必须先有页级粒度，否则 `.rodata` 可写、`.text` 可写就谈不上 W^X；而全 1 GiB 都拆 4 KiB 既浪费页表又没必要。`.bss` 静态池让 WP1-2 不依赖 PMM，边界干净。SMAP 下不按约定就会随机 #PF，必须把约定前置到 ABI/文档。
 - **影响**：`src/ng/paging.c` 是唯一建表/改权限的地方；`link.ld` 增加段边界符号与 `__kernel_end <= 2 MiB` 断言；`docs/design/paging-ng.md` 记录布局、标志位与 stac/clac 约定；WP1-3 的 `copyin/copyout`、#PF 入口与 syscall `SFMASK` 按该约定实现。
 - **替代**：全 2 MiB 大页——无法按段设权限（W^X 不成立）；页表页走 PMM——把 WP1-4 依赖提前；SMAP 关闭——放弃保护，且与出口冲突；均否决。
+
+## ADR-015：trap/syscall 用 IDT + TSS/IST；ring3 用 iret/sysret，ring0 测试返回用直接跳转
+
+- **决策**：IDT 固定 256 项 64 位中断门（0x8E，selector 0x08）；异常 0–31 各一个 stub，有 error code 的 8 个占 10 个向量不补假 error，其余补 0；`#DF` 的 IDT 项 `IST=1`，TSS.IST1 单独 8 KiB 栈，TSS.RSP0 给 ring3→ring0 入口。GDT 7 槽：`0x08` 内核代码、`0x10` 内核数据、`0x18` 用户数据、`0x20` 用户代码、`0x28` TSS；用户数据必须在用户代码前一个槽（SYSRET 的 `CS=base+16`、`SS=base+8` 硬约束）。syscall 用 `EFER.SCE` + STAR/LSTAR/FMASK，ABI 草案：`rax` 调用号、`rdi/rsi/rdx` 参数、返回值 `rax`，本 WP 只实现 0=write serial、1=exit test。ring3 最小往返：用户页 U/S=1（代码 R-X、栈 RW+NX）、`iretq` 进 CPL3、`syscall` 进内核、`sysretq` 回用户、第二次 syscall 经内核恢复点退出。ring0 往返测试的返回用 `popfq + jmp`，不用同 CPL `iretq`。
+- **理由**：可恢复异常是证明 W^X 真的生效的唯一硬证据（WP1-2 只能读回页表）；#DF 没有独立栈就一定三重故障，TSS/IST 是 64 位内核的底线配置。SYSRET 的架构语义只允许返回 CPL3，ring0 测试不该依赖它；本机 QEMU 对同 CPL `iretq` 实测也弹 5 项，绕开这条非必要路径更稳。SYSCALL 是 64 位桌面 ABI 的主入口，先把 MSR/栈切换/返回路径打通，参数与错误码留给 WP1-7/WP4-1 定形。
+- **影响**：`src/ng/isr.S`/`gdt.c`/`trap.c`/`syscall.c` 是新的 trap/syscall 域；`pg_map` 增加 `PG_USER` 逐级 U 位传播；异常入口按 `CR4.SMAP` 决定是否 `clac`（SMAP=off 时 CLAC 是 #UD），syscall 用 `FMASK` 清 AC；`run-ng.ps1` 增加 12 条期望行 + 3 条正则与 `-Panic` 负向模式，`build-ng.ps1` 增加 `-PanicTest`。
+- **替代**：`int 0x80` 软中断入口——慢且与旧 32 位 ABI 纠缠，否决；ring0 返回也用 SYSRET——只能回 CPL3，不可行；ring3 延后到 WP1-7——本 WP 已用静态用户页 + 机器码 blob 打通，不做 ELF 即可，故不延后；#DF 不做 IST——任何栈故障都三重故障，无法定位，否决。

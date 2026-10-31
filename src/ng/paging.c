@@ -395,6 +395,9 @@ int pg_map(u64 va, u64 phys, u64 flags)
     u64 *pdpt = NULL;
     u64 *pd = NULL;
     u64 *pt = NULL;
+    u64 *e4;
+    u64 *e3;
+    u64 *e2;
     u64 *entry;
 
     if (kernel_pml4 == NULL) {
@@ -407,18 +410,21 @@ int pg_map(u64 va, u64 phys, u64 flags)
         return PG_EINVAL;
     }
 
-    rc = descend(&kernel_pml4[(va >> 39) & 0x1FFu], 1, &pdpt);
+    e4 = &kernel_pml4[(va >> 39) & 0x1FFu];
+    rc = descend(e4, 1, &pdpt);
     if (rc != PG_OK) {
         return rc;
     }
-    rc = descend(&pdpt[(va >> 30) & 0x1FFu], 1, &pd);
+    e3 = &pdpt[(va >> 30) & 0x1FFu];
+    rc = descend(e3, 1, &pd);
     if (rc != PG_OK) {
         return rc;
     }
-    if (pd[(va >> 21) & 0x1FFu] & PG_PS) {
+    e2 = &pd[(va >> 21) & 0x1FFu];
+    if (*e2 & PG_PS) {
         return PG_EBIGPAGE;
     }
-    rc = descend(&pd[(va >> 21) & 0x1FFu], 1, &pt);
+    rc = descend(e2, 1, &pt);
     if (rc != PG_OK) {
         return rc;
     }
@@ -428,6 +434,19 @@ int pg_map(u64 va, u64 phys, u64 flags)
         return PG_EEXIST;
     }
     *entry = (phys & PG_ADDR_MASK) | (flags & ~PG_PRESENT) | PG_PRESENT;
+
+    /*
+     * 用户页要求**每一级**表项都带 U/S=1，否则 ring3 在走表时就被拒；
+     * 中间表是既有的内核表（descend 建的时候没有 U 位），这里逐级补上。
+     * U 位升级后重写 CR3，避免子树里残留的 TLB 项还按内核页解释。
+     */
+    if (flags & PG_USER) {
+        *e4 |= PG_USER;
+        *e3 |= PG_USER;
+        *e2 |= PG_USER;
+        write_cr3(read_cr3());
+    }
+
     invlpg(va);
     return PG_OK;
 }
@@ -515,6 +534,26 @@ int pg_protect(u64 va, u64 flags)
 u64 pg_cr3(void)
 {
     return read_cr3();
+}
+
+/*
+ * WP1-3：trap/syscall 初始化要按实际 CPU/CR4 状态决定行为（例如 SMAP=off 时
+ * 不能执行 clac，否则在 qemu64 这类 CPU 上会 #UD）。这几个 getter 就在
+ * pg_init() 之后返回读回值。
+ */
+int pg_nx_on(void)
+{
+    return nx_on;
+}
+
+int pg_smep_on(void)
+{
+    return smep_on;
+}
+
+int pg_smap_on(void)
+{
+    return smap_on;
 }
 
 /* ------------------------------------------------------------------------- */

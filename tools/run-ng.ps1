@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP1-2: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP1-3: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
-# 启动命令（WP1-1/WP1-2 出口）：
+# 启动命令（WP1-1/WP1-3 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
 #                      -display none -no-reboot -m 256 -cpu max
 #
@@ -13,16 +13,24 @@
 #
 # 期望行（全部命中才 PASS）：
 #   ng: hello 64-bit
-#   ng: paging 4-level ok
-#   ng: wx layout ok (text rx, rodata ro, data rw-nx)
-#   ng: nx on
-#   ng: smep=<on|off> smap=<on|off>
-#   ng: WP1-2 selftest PASS
+#   ng: paging 4-level ok / wx layout ok / nx on / WP1-2 selftest PASS
+#   ng: idt 256 entries, 32 exception stubs
+#   ng: #pf ro write handled ok
+#   ng: #ud handled ok
+#   ng: #gp handled ok
+#   ng: syscall ring0 ok
+#   ng: ring3 syscall ok
+#   ng: WP1-3 selftest PASS
+# 以及 3 条正则：smep/smap、tss/ist、syscall MSR。
+#
+# -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
+# `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
 #
 # 若 ELF 不存在会先调用 tools/build-ng.ps1（干净检出也能一条命令 PASS）。
 #
 # usage: powershell -File tools/run-ng.ps1 [-Repo <root>] [-ElfPath <elf>]
-#                                           [-TimeoutSec 20] [-SerialLog <path>] [-Cpu max]
+#                                           [-TimeoutSec 20] [-SerialLog <path>]
+#                                           [-Cpu max] [-Panic]
 # 退出码：0 = PASS；1 = FAIL（缺 QEMU / 启动失败 / 超时 / 期望行缺失）。
 # =============================================================================
 param(
@@ -30,7 +38,8 @@ param(
     [string]$ElfPath = '',
     [int]$TimeoutSec = 20,
     [string]$SerialLog = '',
-    [string]$Cpu = 'max'
+    [string]$Cpu = 'max',
+    [switch]$Panic
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,22 +47,48 @@ if (-not $Repo) { $Repo = Split-Path -Parent $PSScriptRoot }
 $Repo = (Resolve-Path $Repo).Path
 
 # ---- 期望的串口行 ----------------------------------------------------------
-$required = @(
-    'ng: hello 64-bit',
-    'ng: paging 4-level ok',
-    'ng: wx layout ok (text rx, rodata ro, data rw-nx)',
-    'ng: nx on',
-    'ng: WP1-2 selftest PASS'
-)
-$smepPattern = 'ng: smep=(on|off) smap=(on|off)'
-$failPattern = 'ng: WP1-2 selftest FAIL'
+if ($Panic) {
+    $required = @(
+        'ng: panic selftest: triggering unrecoverable #UD'
+    )
+    $patterns = @(
+        'PANIC: vec=0x6 err=0x0 rip=0x[0-9a-f]+ cr2=0x[0-9a-f]+'
+    )
+    $failPatterns = @()
+} else {
+    $required = @(
+        'ng: hello 64-bit',
+        'ng: paging 4-level ok',
+        'ng: wx layout ok (text rx, rodata ro, data rw-nx)',
+        'ng: nx on',
+        'ng: WP1-2 selftest PASS',
+        'ng: idt 256 entries, 32 exception stubs',
+        'ng: #pf ro write handled ok',
+        'ng: #ud handled ok',
+        'ng: #gp handled ok',
+        'ng: syscall ring0 ok',
+        'ng: ring3 syscall ok',
+        'ng: WP1-3 selftest PASS'
+    )
+    $patterns = @(
+        'ng: smep=(on|off) smap=(on|off)',
+        'ng: tss rsp0=0x[0-9a-f]+ ist1=0x[0-9a-f]+ idt8\.ist=1',
+        'ng: syscall msr star=0x[0-9a-f]+ lstar=0x[0-9a-f]+ fmask=0x[0-9a-f]+'
+    )
+    $failPatterns = @(
+        'ng: WP1-2 selftest FAIL',
+        'ng: WP1-3 selftest FAIL'
+    )
+}
 
 function Test-Serial([string]$text) {
     if (-not $text) { return $false }
     foreach ($line in $required) {
         if (-not $text.Contains($line)) { return $false }
     }
-    if ($text -notmatch $smepPattern) { return $false }
+    foreach ($p in $patterns) {
+        if ($text -notmatch $p) { return $false }
+    }
     return $true
 }
 
@@ -101,7 +136,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP1-2) ==='
+Write-Host '=== run-ng (WP1-3) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }
@@ -128,7 +163,10 @@ while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
     if (Test-Path -LiteralPath $SerialLog) {
         $text = Get-Content -LiteralPath $SerialLog -Raw -ErrorAction SilentlyContinue
         if ($text) {
-            if ($text -match $failPattern) { $failedEarly = $true; break }
+            foreach ($fp in $failPatterns) {
+                if ($text -match $fp) { $failedEarly = $true; break }
+            }
+            if ($failedEarly) { break }
             if (Test-Serial $text) { $matched = $true; break }
         }
     }
@@ -160,8 +198,12 @@ if ($matched) {
     Write-Host ($serialText.TrimEnd())
     Write-Host ('-' * 48)
     $missingCount = @($required | Where-Object { -not $serialText.Contains($_) }).Count
-    Write-Host ("run-ng: matched {0}/{1} expected lines + smep/smap line" -f ($required.Count - $missingCount), $required.Count)
-    Write-Host ("run-ng: PASS (all expected lines in {0:N1}s, cpu {1})" -f $sw.Elapsed.TotalSeconds, $Cpu)
+    Write-Host ("run-ng: matched {0}/{1} expected lines + {2} patterns" -f ($required.Count - $missingCount), $required.Count, $patterns.Count)
+    if ($Panic) {
+        Write-Host ("run-ng: PASS (panic path observed in {0:N1}s, cpu {1})" -f $sw.Elapsed.TotalSeconds, $Cpu)
+    } else {
+        Write-Host ("run-ng: PASS (all expected lines in {0:N1}s, cpu {1})" -f $sw.Elapsed.TotalSeconds, $Cpu)
+    }
     Remove-TmpBase
     exit 0
 }
@@ -175,14 +217,16 @@ $missing = @($required | Where-Object { -not $serialText -or -not $serialText.Co
 if ($missing.Count -gt 0) {
     foreach ($m in $missing) { Write-Host ("run-ng: missing line: {0}" -f $m) }
 }
-if ($serialText -and $serialText -notmatch $smepPattern) {
-    Write-Host 'run-ng: missing line: ng: smep=<on|off> smap=<on|off>'
+if ($serialText) {
+    foreach ($p in $patterns) {
+        if ($serialText -notmatch $p) { Write-Host ("run-ng: missing pattern: {0}" -f $p) }
+    }
 }
 if ($qemuErr -and $qemuErr.Trim()) {
     Write-Host 'run-ng: qemu stderr:'
     Write-Host ($qemuErr.TrimEnd())
 }
-if ($failedEarly) { Fail 'kernel reported ng: WP1-2 selftest FAIL' }
+if ($failedEarly) { Fail 'kernel reported ng: selftest FAIL' }
 if ($exitedEarly) {
     # Start-Process 返回的进程对象有时读不到 ExitCode；读不到就不打，stderr 已足够定位
     $code = $null
