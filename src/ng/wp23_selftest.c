@@ -96,6 +96,8 @@ static struct input_io g_input_io = {ps2_inb, ps2_outb, NULL};
 static struct fb_info g_fb;
 static struct vga_text g_text;
 static struct input_state g_input;
+static int g_fb_ready;   /* fb_init + 画图读回自检都通过 */
+static int g_text_ready; /* VGA 文本降级初始化完成 */
 
 /* ------------------------------------------------------------------------- */
 /* LFB 映射                                                                   */
@@ -214,6 +216,7 @@ static int fb_draw_selftest(void)
         u32 cols;
         u32 rows;
 
+        g_fb_ready = 1;
         serial_puts("ng: fb draw ok (readback)\r\n");
         fb_grid(&g_fb, &cols, &rows);
         serial_puts("ng: fb console cols=");
@@ -339,6 +342,7 @@ static int setup_vga_text(void)
         return -1;
     }
     serial_puts("ng: vga text fallback ok (0xB8000)\r\n");
+    g_text_ready = 1;
     return 0;
 }
 
@@ -495,4 +499,23 @@ u64 ng_input_readkey(void)
 void ng_input_poll(void)
 {
     (void)input_poll(&g_input, &g_input_io, INPUT_POLL_MAX);
+}
+
+/* ------------------------------------------------------------------------- */
+/* WP2-7 parity 诊断（只读）                                                  */
+/* ------------------------------------------------------------------------- */
+
+const struct fb_info *ng_display_fb(void)
+{
+    return (g_fb_ready != 0) ? &g_fb : NULL;
+}
+
+const struct vga_text *ng_display_text(void)
+{
+    return (g_text_ready != 0) ? &g_text : NULL;
+}
+
+const struct input_state *ng_input_state(void)
+{
+    return &g_input;
 }

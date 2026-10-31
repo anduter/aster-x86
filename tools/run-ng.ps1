@@ -95,6 +95,10 @@
 #   ng: shell session file ok (s.txt=3) / ng: shell session pkg ok (lists=+1)
 #   ng: WP2-6 selftest PASS
 #   -Smoke 模式：ng: shell skipped (smoke mode) 替代以上全部。
+# WP2-7 追加（parity 100 项；-Panic 之外所有模式都要求）：
+#   ng: parity 100/100 PASS / ng: WP2-7 selftest PASS
+#   逐项 `parity: NNN/100 [域] ... ok`（001 与 100 各有一条正则），
+#   以及失败模式 `ng: parity FAIL` / `parity: NNN/100 ... FAIL`。
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
 # ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数、
 # FAT16 簇数/链边界/坏 BPB 计数、ATA 型号/扇区数、磁盘 FAT16 簇数。
@@ -238,7 +242,9 @@ if ($Panic) {
         'ng: ring3 auth ok',
         'ng: ring3 pkg ok',
         'ng: ring3 svc ok',
-        'ng: WP2-5 selftest PASS'
+        'ng: WP2-5 selftest PASS',
+        'ng: parity 100/100 PASS',
+        'ng: WP2-7 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -269,7 +275,9 @@ if ($Panic) {
         'ng: disk file rw ok \(bytes=600\)',
         'ng: ata stat reads=[0-9]+ writes=[0-9]+ timeouts=[0-9]+ errors=[0-9]+',
         'ng: log ring ok \(bytes=[0-9]+\)',
-        'ng: pkg list ok \(n=1\)'
+        'ng: pkg list ok \(n=1\)',
+        '(?m)^parity: 001/100 \[vfs\] .* \.\.\. ok',
+        '(?m)^parity: 100/100 \[input\] .* \.\.\. ok'
     )
 
     # WP2-3：显示/输入证据行。stdvga 与 -vga none 降级路径各取一套。
@@ -376,7 +384,10 @@ if ($Panic) {
         'ng: input .* FAIL',
         'ng: vga text fallback FAIL',
         'ng: shell .* FAIL',
-        'ng: WP2-6 selftest FAIL'
+        'ng: WP2-6 selftest FAIL',
+        'ng: WP2-7 selftest FAIL',
+        'ng: parity FAIL',
+        '(?m)^parity: [0-9]+/100 .* \.\.\. FAIL'
     )
 }
 

@@ -41,6 +41,7 @@
 #include "log.h"
 #include "mem_selftest.h"
 #include "paging.h"
+#include "parity_selftest.h"
 #include "sched_selftest.h"
 #include "serial.h"
 #include "syscall.h"
@@ -278,6 +279,26 @@ void kmain(u64 mb_info)
         serial_puts(")\r\n");
     }
     log_wp("WP2-3", fails);
+
+    /* WP2-7：parity 100 项（E2 出口）。排在所有服务/驱动自检之后、ring3
+     * demo 之前：用例会重建 auth/pkg/log 状态（幂等；auth 重新 init 也会
+     * 解锁用户，保证后面的 ring3 svc demo 仍能登录）。失败不 panic。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += parity_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP2-7 parity skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP2-7 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+    log_wp("WP2-7", fails);
 
     /* WP1-7：ELF64 加载器 + ring3 hello。需要 PMM/heap/调度器（per-thread
      * syscall 内核栈用一个真实线程验证），所以排在最后。 */

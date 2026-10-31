@@ -37,4 +37,19 @@ u64 ng_input_readkey(void);
 /* 在 idle 点轮询 PS/2（main.c 的 hlt 循环/自检用）。 */
 void ng_input_poll(void);
 
+/*
+ * WP2-7 parity 诊断（只读）：
+ *   - ng_display_fb()  ：VBE 帧缓冲路径就绪时返回 fb_info，否则 NULL；
+ *   - ng_display_text()：VGA 文本降级路径就绪时返回 vga_text，否则 NULL；
+ *   - ng_input_state() ：PS/2 输入状态（永远非 NULL，初始化后）。
+ * 只暴露指针，不改变初始化顺序；显示/输入 parity 用例据此断言“当前实际
+ * 走的是哪条路径”，而不是假设一定有 stdvga。
+ */
+struct fb_info;
+struct vga_text;
+struct input_state;
+const struct fb_info *ng_display_fb(void);
+const struct vga_text *ng_display_text(void);
+const struct input_state *ng_input_state(void);
+
 #endif /* NG_WP23_H */

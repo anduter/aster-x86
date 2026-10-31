@@ -36,6 +36,10 @@
 #                cwd 解析、行编辑、15 个内建命令、错误分支；-DNG_HOST_TEST 把
 #                sh_sys() 换成 test_shell.c 的 sh_host_syscall()，后端直接跑
 #                真实的 VFS/ramfs + auth/log/pkg）
+#   - tests/unit-ng/test_parity.c : WP2-7 parity 100 项里可 host 化的 95 项。
+#                与内核共用 tests/parity/parity_cases.h（编号/case 表）和
+#                parity_body.inc（断言体）；ATA 走 fake 控制器，显示/输入 5 项
+#                需要 QEMU，由内核自检覆盖。
 # 这些模块不 include 串口/端口 IO，所以能脱离内核直接跑。
 #
 # 输出必须包含 `N checks, M failures`；M=0 且 N>=20 才算 PASS。
@@ -122,7 +126,8 @@ $sources = @(
     'tests/unit-ng/test_auth.c',
     'tests/unit-ng/test_log.c',
     'tests/unit-ng/test_pkg.c',
-    'tests/unit-ng/test_shell.c'
+    'tests/unit-ng/test_shell.c',
+    'tests/unit-ng/test_parity.c'
 )
 $srcPaths = @()
 foreach ($s in $sources) { $srcPaths += (Join-Path $Repo $s) }
@@ -137,6 +142,7 @@ $ccArgs = @(
     '-I', (Join-Path $Repo 'src/services/pkg/include'),
     '-I', (Join-Path $Repo 'src/drivers/include'),
     '-I', (Join-Path $Repo 'tests/unit-ng'),
+    '-I', (Join-Path $Repo 'tests/parity'),
     '-o', $exe
 ) + $srcPaths
 

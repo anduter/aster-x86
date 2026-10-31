@@ -98,7 +98,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP2-5) ==='
+Write-Host '=== build-ng (WP2-7) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -120,6 +120,7 @@ $cFlags = $common + @('-mno-sse', '-mgeneral-regs-only', '-fno-builtin',
     '-I', (Join-Path $Repo 'src/services/log/include'),
     '-I', (Join-Path $Repo 'src/services/pkg/include'),
     '-I', (Join-Path $Repo 'src/drivers/include'),
+    '-I', (Join-Path $Repo 'tests/parity'),
     '-c')
 if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
 if ($Smoke) { $cFlags += '-DNG_SMOKE_MODE=1' }
@@ -416,10 +417,13 @@ Write-Host ''
 #                  （src/services/fs，L1；只依赖 types.h/vfs.h/blk.h）。
 # WP2-3 additions: wp23_selftest.c（src/ng 接线）+ src/drivers/{pci,video,input}
 #                  （L1D；只依赖 types.h / 自己的头，端口 IO 由内核注入）。
+# WP2-7 additions: parity_selftest.c（src/ng，100 项 parity harness）+
+#                  tests/parity/{parity_cases.h,parity_body.inc}（-I）+ 一份
+#                  -DNG_HOST_TEST 的 src/apps/shell/shell.c（tokenizer 回归）。
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S', 'switch.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'mem.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'sched_arch.c', 'sched.c', 'sched_selftest.c', 'handle.c', 'ipc_core.c', 'ipc.c', 'ipc_selftest.c', 'elf.c', 'useras.c', 'uaccess.c', 'elf_selftest.c', 'fs_syscall.c', 'svc_syscall.c', 'fs_selftest.c', 'fat_ramdisk.c', 'fat16_selftest.c', 'wp23_selftest.c', 'ata_blk.c', 'wp24_selftest.c', 'wp25_selftest.c', 'wp26_selftest.c', 'parity_selftest.c', 'main.c')
 # L1 服务域源码（相对仓库根；-I src/ng 与各 src/services/*/include 已加）。
 $serviceSources = @('src/services/fs/vfs.c', 'src/services/fs/ramfs.c',
     'src/services/fs/fat16.c',
@@ -430,7 +434,7 @@ $driverSources = @('src/drivers/pci/pci.c', 'src/drivers/video/vbe.c',
     'src/drivers/video/fb.c', 'src/drivers/video/font8x16.c',
     'src/drivers/video/vga_text.c', 'src/drivers/input/ps2.c',
     'src/drivers/block/ata.c')
-$steps = $asmSources.Count + $cSources.Count + $serviceSources.Count + $driverSources.Count + 1
+$steps = $asmSources.Count + $cSources.Count + $serviceSources.Count + $driverSources.Count + 2
 $step = 0
 $asmObjs = New-Object System.Collections.Generic.List[string]
 
@@ -478,13 +482,24 @@ foreach ($rel in $driverSources) {
     $driverObjs.Add($obj)
 }
 
+# ---- WP2-7：shell.c 的 parity 对象（只取 tokenizer / cwd 解析钩子）---------
+# 内核 parity 不跑 shell_main（那是 ring3 的 WP2-6 路径），但要用**同一份**
+# 解析代码做回归，所以用 -DNG_HOST_TEST 编一份：它保留 sh_test_tokenize /
+# sh_test_resolve 钩子、去掉 _start，并且不依赖 libc。sh_host_syscall 由
+# src/ng/parity_selftest.c 提供一个 -ENOSYS 兜底（tokenizer 不会调用它）。
+$step++
+$shellParityObj = Join-Path $objDir 'shell_parity.o'
+Write-Host ("  [{0}/{1}] src/apps/shell/shell.c (parity tokenizer, -DNG_HOST_TEST)" -f $step, $steps)
+& $clang @($cFlags + @('-DNG_HOST_TEST=1', (Join-Path $Repo 'src/apps/shell/shell.c'), '-o', $shellParityObj)) 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
+if ($LASTEXITCODE -ne 0) { Fail 'shell parity object compile failed' }
+
 # ---- 链接 ------------------------------------------------------------------
 $step++
 Write-Host ("  [{0}/{1}] link -> dist-ng/aster-ng.elf" -f $step, $steps)
 $linkArgs = @($target, '-fuse-ld=lld', '-nostdlib',
     ('-Wl,-T,' + (Join-Path $srcDir 'link.ld')),
     '-Wl,--build-id=none', '-Wl,--fatal-warnings',
-    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($userBlobObj, $shellBlobObj, $fatBlobObj)
+    '-o', $elf) + $asmObjs.ToArray() + $cObjs.ToArray() + $serviceObjs.ToArray() + $driverObjs.ToArray() + @($shellParityObj, $userBlobObj, $shellBlobObj, $fatBlobObj)
 & $clang @linkArgs 2>&1 | Out-String | ForEach-Object { if ($_.Trim()) { Write-Host $_.Trim() } }
 if ($LASTEXITCODE -ne 0) {
     if (Test-Path $elf) { Remove-Item -LiteralPath $elf -Force }

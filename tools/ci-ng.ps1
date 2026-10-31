@@ -1,17 +1,20 @@
 ﻿# =============================================================================
-# ci-ng.ps1 - ng 分支 E1 门禁：一条命令跑完 64 位内核的静态检查 + host 单测 +
-#             构建 + ring3 回归 + 旧 32 位 parity
+# ci-ng.ps1 - ng 分支门禁：一条命令跑完 64 位内核的静态检查 + host 单测 +
+#             构建 + ring3 回归 + parity 100 项 + 旧 32 位 parity
 #
 # 步骤（按顺序）：
 #   1. tools/check-domains.ps1     域边界（向上依赖必须失败），期望 0 违规
 #   2. tools/check-deps.ps1        旧树模块边界，期望 0 违规
 #   3. tools/unit-ng.ps1           host 单测（PMM/heap/memmap/sched/ipc/elf/
-#                                  uaccess/syscall），期望 N checks, 0 failures
+#                                  uaccess/syscall/fs/fat/ata/drivers/auth/
+#                                  log/pkg/shell/parity），期望 N checks, 0 failures
 #   4. tools/build-ng.ps1          构建 dist-ng/aster-ng.elf（ELF64 + multiboot2
 #                                  + PVH + 用户 ELF 校验）
-#   5. tools/run-ng.ps1            QEMU 启动，等 39 条期望行 + 11 条正则（含
-#                                  `ng: ring3 hello`）
-#   6. build.ps1 -Test             旧 32 位回归（默认跑，保持 parity；
+#   5. tools/run-ng.ps1            QEMU 启动，等 108 条期望行 + 42 条正则（含
+#                                  `ng: ring3 hello`、`ng: parity 100/100 PASS`）
+#   6. tools/parity-ng.ps1         WP2-7 parity 门禁（复用第 5 步日志，断言
+#                                  100 项逐条 ok / 无 FAIL，不重复起 QEMU）
+#   7. build.ps1 -Test             旧 32 位回归（默认跑，保持 parity；
 #                                  -Quick / -NoLegacy 跳过；非 Windows 跳过）
 #
 # 输出：每步一行 PASS/FAIL/SKIP；失败时打印该步日志尾部；最后
@@ -68,6 +71,7 @@ $requiredScripts = @(
     'tools/unit-ng.ps1',
     'tools/build-ng.ps1',
     'tools/run-ng.ps1',
+    'tools/parity-ng.ps1',
     'build.ps1'
 )
 foreach ($rel in $requiredScripts) {
@@ -173,7 +177,7 @@ Write-Host ("legacy: {0}" -f $(if ($runLegacy) { 'run' } else { 'skip' }))
 Write-Host ''
 
 # ---- 1/6、2/6：静态边界检查 ------------------------------------------------
-Write-Ng '--- 1/6 domain boundaries ---'
+Write-Ng '--- 1/7 domain boundaries ---'
 $null = Invoke-NgStep -Label 'check-domains' -RelativePath 'tools/check-domains.ps1' `
     -ScriptArgs @('-Repo', $Repo) -Parse {
         param($text)
@@ -184,7 +188,7 @@ $null = Invoke-NgStep -Label 'check-domains' -RelativePath 'tools/check-domains.
         return @{ Ok = $false; Detail = 'no violation summary in output' }
     }
 
-Write-Ng '--- 2/6 module boundaries ---'
+Write-Ng '--- 2/7 module boundaries ---'
 $null = Invoke-NgStep -Label 'check-deps' -RelativePath 'tools/check-deps.ps1' `
     -ScriptArgs @('-Repo', $Repo) -Parse {
         param($text)
@@ -196,7 +200,7 @@ $null = Invoke-NgStep -Label 'check-deps' -RelativePath 'tools/check-deps.ps1' `
     }
 
 # ---- 3/6：host 单测 --------------------------------------------------------
-Write-Ng '--- 3/6 host unit tests (unit-ng) ---'
+Write-Ng '--- 3/7 host unit tests (unit-ng) ---'
 $unitOk = Invoke-NgStep -Label 'unit-ng' -RelativePath 'tools/unit-ng.ps1' `
     -ScriptArgs @('-Repo', $Repo) -Parse {
         param($text)
@@ -210,7 +214,7 @@ $unitOk = Invoke-NgStep -Label 'unit-ng' -RelativePath 'tools/unit-ng.ps1' `
     }
 
 # ---- 4/6：构建 ------------------------------------------------------------
-Write-Ng '--- 4/6 build kernel (build-ng) ---'
+Write-Ng '--- 4/7 build kernel (build-ng) ---'
 $buildOk = Invoke-NgStep -Label 'build-ng' -RelativePath 'tools/build-ng.ps1' `
     -ScriptArgs @('-Repo', $Repo) -Parse {
         param($text)
@@ -223,8 +227,8 @@ $buildOk = Invoke-NgStep -Label 'build-ng' -RelativePath 'tools/build-ng.ps1' `
         return @{ Ok = $true; Detail = $d }
     }
 
-# ---- 5/6：QEMU ring3 回归 --------------------------------------------------
-Write-Ng '--- 5/6 QEMU ring3 regression (run-ng) ---'
+# ---- 5/7：QEMU ring3 回归 --------------------------------------------------
+Write-Ng '--- 5/7 QEMU ring3 regression (run-ng) ---'
 $runSkip = ''
 $runOk = $false
 if ($Quick) {
@@ -249,8 +253,31 @@ $runOk = Invoke-NgStep -Label 'run-ng' -RelativePath 'tools/run-ng.ps1' `
         return @{ Ok = $false; Detail = 'run-ng PASS line missing' }
     }
 
-# ---- 6/6：旧 32 位 parity --------------------------------------------------
-Write-Ng '--- 6/6 legacy 32-bit parity (build.ps1 -Test) ---'
+# ---- 6/7：parity 100 项（复用 run-ng 的日志，不重复启动 QEMU）--------------
+Write-Ng '--- 6/7 parity 100 items (WP2-7) ---'
+$paritySkip = ''
+if ($runSkip) {
+    $paritySkip = $runSkip
+} elseif (-not $runOk) {
+    $paritySkip = 'run-ng 失败，跳过'
+}
+$runEntry = @($results | Where-Object { $_.Label -eq 'run-ng' })[0]
+$runLog = ''
+if ($runEntry) { $runLog = $runEntry.Log }
+$parityOk = Invoke-NgStep -Label 'parity-ng' -RelativePath 'tools/parity-ng.ps1' `
+    -ScriptArgs @('-Repo', $Repo, '-LogFile', $runLog) -SkipReason $paritySkip -Parse {
+        param($text)
+        if ($text -match 'parity-ng: PASS \((\d+)/100 items, (\d+) FAIL, (\d+) domains\)') {
+            return @{ Ok = $true; Detail = ("{0}/100 items, {1} domains" -f $Matches[1], $Matches[3]) }
+        }
+        if ($text -match 'parity-ng: FAIL \(([^)]*)\)') {
+            return @{ Ok = $false; Detail = ("parity-ng FAIL: {0}" -f $Matches[1]) }
+        }
+        return @{ Ok = $false; Detail = 'parity-ng PASS line missing' }
+    }
+
+# ---- 7/7：旧 32 位 parity --------------------------------------------------
+Write-Ng '--- 7/7 legacy 32-bit parity (build.ps1 -Test) ---'
 $legacySkip = ''
 if ($Quick) {
     $legacySkip = '-Quick 跳过 legacy'

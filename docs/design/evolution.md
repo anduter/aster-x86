@@ -75,8 +75,21 @@ E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP
 | WP2-6 | shell 移植 | src/apps | 64 位 shell 可交互 |
 | WP2-7 | parity 套件 100 项 | tests/ | 100 项通过 |
 
-E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5、WP2-6 完成**（tag
-待 E2 收口时打）。`src/services/fs` 成为第一个真正落地的 L1 服务域；
+E2 出口状态（2026-10-31）：**E2 完成，待打 tag `ng-e2`**。WP2-1..WP2-7 全部
+完成，出口证据：
+
+- 内核 parity **100/100 PASS**（`ng: parity 100/100 PASS`；run-ng 108/108
+  期望行 + 42 条正则）；host parity **95/95**（显示/输入 5 项需 QEMU）；
+- `tools/unit-ng.ps1` host 单测 **3203 checks, 0 failures**；
+- `tools/ci-ng.ps1` 一条命令 7/7 PASS（check-domains / check-deps / unit-ng /
+  build-ng / run-ng / parity-ng / 旧 32 位 `build.ps1 -Test`）；
+- 旧 32 位 **305/305**；`-Fallback` / `-NoQmp` / `-Smoke` 三种模式 parity
+  均为 100/100；
+- 证据与 100 项逐条结果见 `docs/claims/ng-WP2-7.md`。
+
+E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5、WP2-6、WP2-7
+全部完成；E2 出口达成，待打 tag `ng-e2`**（tag 由负责人打）。`src/services/fs`
+成为第一个真正落地的 L1 服务域；
 `src/drivers` 成为第一个 L1D 设备域；`src/services/{auth,log,pkg}` 补齐 L1
 认证/日志/包最小集；`src/apps/shell` 成为第一个独立编译的 L3 应用：
 
@@ -150,15 +163,25 @@ E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5、WP2-6 完�
   `ng: WP2-6 selftest PASS`；顺带修正 `isr.S` ring3 返回未恢复 callee-saved
   寄存器（shell 的 rbx 指向用户栈导致 `*out` 写 #PF）的 WP1-7 潜在缺陷；
 - host 单测 1085 → 1438（WP2-1）→ 1824（WP2-2）→ 2290（WP2-3，+466）→
-  2522（WP2-4 +232）→ 2791（WP2-5 +269）→ **3108 checks**（WP2-6 +317，
-  tokenizer/cwd 解析/重定向/行编辑/15 个命令/错误分支/ls 截断/fd 泄漏）；
-  旧 32 位 305/305；
+  2522（WP2-4 +232）→ 2791（WP2-5 +269）→ 3108（WP2-6 +317）→ **3203
+  checks**（WP2-7 +95：parity 100 项里可 host 化的 VFS/ramfs/FAT16/ATA/
+  auth/log/pkg/shell）；旧 32 位 305/305；
+- **WP2-7 parity 100 项（E2 出口）**：`tests/parity/parity_cases.h` 是唯一的
+  100 项 case 表（编号/域/描述），`tests/parity/parity_body.inc` 是 kernel 与
+  host **共用**的断言体（90 项共享 + ATA 5 + 显示/输入 5）。内核 harness
+  `src/ng/parity_selftest.c` 逐项打印 `parity: NNN/100 [域] ... ok`，汇总
+  `ng: parity 100/100 PASS`，覆盖 vfs 20、ramfs 15、fat16 20、ata 5、auth 10、
+  log 5、pkg 10、shell tokenizer/cwd 10、显示 3 + 输入 2；`tools/parity-ng.ps1`
+  跑（或复用）run-ng 日志并断言“恰好 100 条、编号连续、无 FAIL”，
+  `tools/ci-ng.ps1` 第 6 步接入（复用第 5 步日志，不重复起 QEMU）。
+  **没有新增功能，也没有发现需要修复的产品 bug**；证据见
+  `docs/claims/ng-WP2-7.md`（含 100 项逐条表）；
 - 设计/限制见 `docs/design/vfs-ng.md`、`fat16-ng.md`、`display-input-ng.md`、
   `block-ng.md`、`auth-log-pkg-ng.md`、`shell-ng.md`，证据见
-  `docs/claims/ng-WP2-1.md`、`ng-WP2-2.md`、`ng-WP2-3.md`、`ng-WP2-4.md`、
-  `ng-WP2-5.md`、`ng-WP2-6.md`。64 位 shell 完成；下一步 parity 套件
-  （WP2-7）与 E2 收口（tag `ng-e2`）；fb/输入不做 IRQ/鼠标（E3/C 之后），
-  shell 的 TTY/屏幕输出留给 E3 display server。
+  `docs/claims/ng-WP2-1.md` … `ng-WP2-7.md`。**E2 完成**：64 位 shell +
+  100 项 parity + 全绿门禁；下一步 E3（display server / shell-WM / session
+  manager / SDK alpha）；fb/输入不做 IRQ/鼠标（E3/C 之后），shell 的
+  TTY/屏幕输出留给 E3 display server。
 
 ### E3
 
@@ -197,7 +220,10 @@ E2 进度（2026-10-31）：**WP2-1、WP2-2、WP2-3、WP2-4、WP2-5、WP2-6 完�
   build-ng + run-ng + 旧 32 位 `build.ps1 -Test`（`-Quick` 跳 QEMU/legacy）；
   CI 侧 `.github/workflows/ng.yml`。
 - check-domains：向上依赖必须失败。
-- parity：E2 起 50 项，每个 WP +10，E2 结束 100 项。
+- parity：E2 结束到 **100 项**（`tools/parity-ng.ps1`；内核自检 + host 同表），
+  E3 起随 display server/WM/session 增加新项，100 是 E2 基线而非上限。
+- 门禁顺序：`ci-ng` 的 parity 步骤复用 run-ng 的串口日志，不重复启动 QEMU
+  （`tools/parity-ng.ps1 -LogFile <run-ng 日志>`）。
 - 故障注入：E3 起杀 shell/compositor/inputd，按 architecture.md 第 3 节断言。
 - 8h 浸泡：E4 之前 1h smoke；D1 出口 8h。
 - 文档：每个 WP 必须更新对应 domain 文档或 decisions.md。
