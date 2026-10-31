@@ -85,3 +85,10 @@
 - **理由**：通用桌面的瓶颈是生态，不是 syscall 数量。
 - **影响**：ABI 文档、工具链、示例、调试器进 D0 范围。
 - **替代**：先做内核再补 SDK——会做出“只有作者能开发”的系统，否决。
+
+## ADR-013：QEMU 上 ELF64 内核用 Xen PVH note 启动，镜像保留 multiboot2 头
+
+- **决策**：ng 内核仍是带 multiboot2 头的 ELF64；QEMU 的 `-kernel` 路径额外加一个 Xen PVH note（`XEN_ELFNOTE_PHYS32_ENTRY` = 18，指向同一个 32 位 `_start`）。
+- **理由**：QEMU 11 的 multiboot 加载器只接受 32 位 ELF。WP1-1 实测：带 MB1 头的 ELF64 报 `Cannot load x86-64 image, give a 32bit one.`，带 MB2 头的 ELF64 走 Linux 加载器并报 `Error loading uncompressed kernel without PVH ELF Note`。PVH 是 QEMU 加载 ELF64 的既有路径，进入状态与 multiboot 相同：32 位保护模式、分页关闭、平坦段；镜像仍保留 MB2 头给 GRUB。
+- **影响**：`src/ng/entry.S` 同时带两种头，`tools/build-ng.ps1` 校验两者；`tools/run-ng.ps1` 仍用 `qemu-system-x86_64 -kernel ...`。GRUB/multiboot2 实机路径 WP1-1 未实测。
+- **替代**：改用 GRUB + `-cdrom` 启动——偏离 WP1-1 的 `-kernel` 出口；改用 ELF32 包装器——与“产出 ELF64”出口冲突；均否决。
