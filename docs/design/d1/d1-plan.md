@@ -584,3 +584,21 @@ D1 有三个高频冲突文件：`src/ng/main.c`（自检调用）、`src/ng/sys
 - `../evolution.md`：E5/D1 的阶段口径；本文件是它的执行细化。
 - `../architecture.md` §10：D1 的长期目标；本文件对“安装器/更新/回滚”
   给出拆到 D1.1 的建议，需负责人确认。
+
+## 8. 负责人裁决（2026-10-31）
+
+以下为 D1 开工前的正式裁决，覆盖 §7 待确认项；后续 WP 以此为准。
+
+| 决策 | 裁决 |
+|---|---|
+| D1-A libc 底座 | **newlib**（备选 picolibc，仅在 S1 预检失败时启用） |
+| D1-B TLS/HTTP | **BearSSL TLS 1.2** + 自写 HTTP/1.1；不依赖 OpenSSL；TLS 1.3 留 D2 |
+| D1-C 网络形态 | L1 内核网络库 + **native socket syscall** + 用户态 facade；netd 进程留 D2 |
+| D1-D 调度 | D1 **保持协作式**；tick IRQ 只用于时间/睡眠/HLT，不做抢占、不做 SMP 调度 |
+| D1-E 真机 | **一款 UEFI 机型** + GOP + PS/2（或 xHCI）+ Intel 网卡；AP 停泊；**不做安装器** |
+| D1-G 进程模型 | **execve + posix_spawn**；`fork()` 返回 `ENOSYS`（D2 再评估） |
+| D1-H ABI | **ABI 1.1 只追加**，新号自 48 起；ABI 1.0 语义不变；`abi-check` 同时校验 1.0/1.1 |
+| 安装器/更新/回滚 | 拆到 **D1.1**，D1 不做 |
+| fork/线程组 | D1 不做 fork；线程用 clone 子集 + futex（WP5-1c/1d） |
+
+**开工顺序**：WP5-0a（ABI 1.1 + ENOSYS + abi-check）与 S1（newlib 预检）可并行；S1 只在 8h 浸泡结束后启动重负载构建。
