@@ -141,3 +141,42 @@
   元数据，位图更简单；heap 用一个固定大 arena——扩堆受连续物理页限制，
   碎片化时失败，否决；页表池继续静态——WP1-2 已明确列为 WP1-4 遗留，且无法
   回答“PMM 到底管不管页表页”，否决。
+
+## ADR-017：线程用 TCB 静态池 + heap 16 KiB 栈；`switch_context` 保存 rsp/rip 用 `jmp` 恢复；协作式 round-robin + TSC 睡眠
+
+- **决策**：WP1-5 的线程模型是 `thread_t`（tid/状态/上下文/16 KiB 栈/
+  wake_tick/链指针），TCB 放 16 槽静态池（0 号槽是 boot 线程，不回收），
+  栈从 heap `kmalloc`。`switch.S` 的 `switch_context(old,new)` 只保存
+  callee-saved（rbx/rbp/r12–r15）+ rsp + rip：rsp 存 `leaq 8(%rsp)`（ret 之后），
+  rip 存返回地址，恢复时装载 rsp 后 `jmp *rip`，不伪造栈帧。新线程
+  `ctx.rip = thread_entry`、`ctx.rsp = stack_top`，trampoline `cld` +
+  `andq $-16,%rsp` + `call thread_bootstrap`（跑 `start(arg)` 后
+  `thread_exit`）。调度器是单核协作式：FIFO ready 队列，pick 队头 / yield
+  放队尾 = round-robin；`sched_start()` 建 idle 线程并第一次让出；`thread_exit`
+  只标 DEAD 挂 zombie 链，由下一次别人调度时 `sched_core_reap(skip=current)`
+  回收栈（不能在自己正在用的栈上 `kfree`）；`thread_sleep(ticks)` 用
+  `rdtsc + ticks` 作 deadline，`sched_core_poll(now)` 在每次调度点/未来的
+  `sched_tick()` 里把到期线程搬回 ready；`thread_wake(tid)` 显式唤醒并校验
+  返回 `THREAD_EBAD/ENOENT`。栈底 16 字节 canary，退出时校验。
+- **理由**：协作式是没有任何 IRQ 基础设施（PIC/APIC/PIT 都还没接）时的
+  正确最小步，接口用 `sched_tick()` 为 WP1-6 的 tick 抢占留口。rsp 存
+  “ret 之后”的值 + `jmp` 恢复，比“push 返回地址再 iretq”少一层伪造，
+  对齐在数学上就是 SysV 的原状态，首次上下文不需要额外调整。TCB 静态池
+  避免“线程退出时释放 TCB 再用到它”的窗口，16 槽对当前自检/服务启动足够；
+  栈用 heap 是因为 WP1-4 已经把连续页/合并/记账都做好，且每次 16 KiB
+  不超过单个 region（≥64 KiB）。延迟回收把“正在用的栈”排除在 `kfree`
+  之外，是最简单且可证明安全的顺序。守护页需要把 2 MiB 恒等大页拆成
+  4 KiB 页，属于页表工作，本 WP 用 canary 降到最小。
+- **影响**：`src/ng/thread.h`、`sched.c`、`sched_arch.[ch]`、`switch.S`、
+  `sched_selftest.[ch]` 新增；`main.c` 在 WP1-4 之后跑 WP1-5 自检；
+  `build-ng.ps1` 变 17 步；`run-ng.ps1` 增加 6 条固定行 + 1 条线程交错正则 +
+  sched 失败模式；`tools/unit-ng.ps1` 增加 `sched.c`/`test_sched.c`，
+  host 单测 166 → 390 checks；`docs/design/sched-ng.md` 记录设计。
+  旧 32 位树完全不改。
+- **替代**：抢占式 IRQ 调度提前到本 WP——没有 PIT/PIC/APIC 的 ng 树里无法
+  验证 tick，且会与 WP1-6 的 IPC 等待队列纠缠，否决；每次 `thread_create`
+  都 `kmalloc` TCB——需要线程安全回收和“退出后不能引用 TCB”的约束，静态池
+  更稳；exit 时立刻 `kfree` 自己的栈——在正在使用的栈上释放，必崩，否决；
+  用 `iretq` 构造首帧——要伪造 SS/RSP/RFLAGS 三件套且容易对错齐，`jmp +
+  call` trampoline 只依赖 C ABI，否决；守护页——需拆 2 MiB 映射，超出
+  WP1-5 范围，先 canary。

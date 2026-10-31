@@ -214,7 +214,8 @@ FAIL），但 heap/pgtbl 自检跳过，避免拿 0 地址扩堆。
 
 ## 7. 边界 / 遗留
 
-- 单核、IF=0 的早期内核：PMM/heap 没有锁（SMP/抢占在 WP1-5 之后再加）。
+- 单核、IF=0：PMM/heap 没有锁；WP1-5 已加入协作式线程调度（显式 yield/
+  sleep 才切换），抢占式 IRQ tick 与 SMP 留给后续 WP。
 - PMM 只管理 1 GiB；RAM 更大时超出部分不可用（页表也只恒等映射 1 GiB）。
 - 位图/堆/页表都没有回收策略：`pmm_free_page` 可用，但内核还没有“释放页表
   子树”的路径；heap region 只增不减。
