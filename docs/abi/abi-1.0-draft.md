@@ -1,14 +1,12 @@
-# Aster native ABI 1.0（草案）
+# Aster native ABI 1.0（历史草案）
 
-> **状态：草案（v0.1），2026-10-31，未冻结。冻结节点：E4 / WP4-1。**
-> 适用：ng 分支 HEAD `c4efabc` 的 64 位内核 + 静态 ELF64 用户程序。
-> 权威源：调用号以 `src/ng/syscall.h` 为准；结构体/上限以
-> `src/services/fs/include/vfs.h`、`src/ng/{ipc.h,proc.h,shm.h,fbmap.h}` 为准；
-> 用户指针规则以 `src/ng/uaccess.h` 为准。本文是**描述**，不是头文件。
+> **状态：已被 `abi-1.0.md`（冻结，v1.0.0）取代。**
+> 本文保留为冻结前的推理记录，不再是规范；冻结后的编号/语义以
+> `abi-1.0.md` + `abi-1.0.h` 为准（`tools/abi-check.ps1` 校验）。
+> 草案基线：ng 分支 HEAD `c4efabc` 的 64 位内核 + 静态 ELF64 用户程序。
 > 证据：`../claims/ng-WP1-8.md`、`ng-WP2-1.md` … `ng-WP2-7.md`、
 > `ng-WP3-0.md`、`ng-WP3-1.md`、`ng-WP3-2.md`。
-> 冻结前允许不兼容修正；每次修正必须同一个 WP 更新 `syscall.h`、本文和 claims。
-> E4 之后只允许**追加**（见 §9）。
+> 冻结决议见 `abi-1.0.md` §10。
 
 ## 1. 范围
 
