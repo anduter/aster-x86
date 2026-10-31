@@ -170,6 +170,21 @@ static u32 g_hotkey_key;     /* DS_HOTKEY_ANY = 所有键 */
 static u32 g_hotkey_prints;  /* 热键转发证据行计数 */
 static u32 g_hotkey_rejects; /* v3：热键令牌不匹配的拒绝次数 */
 static u32 g_destroy_rejects; /* v3：DESTROY 归属校验拒绝次数 */
+/*
+ * v3 审计加固（第二轮）：证据行 / 状态文件写入的**打印闸门**。
+ *
+ * 这些路径全部由客户端消息触发（FOCUS/DESTROY/REGISTER_HOTKEY 洪泛）。
+ * 以前每来一条就写一行串口 + 重写一次 /run/display.status：一条 16 深度的
+ * 端口队列就能稳定地把串口和 ramfs 打满（串口是所有门禁的证据源，也是全局
+ * 慢设备）。现在每类证据行最多打 D_MAX_PRINTS 行，计数器继续在内存里累计；
+ * 被拒的请求不改变任何状态，所以**也不再重写状态文件**。
+ */
+#define D_MAX_PRINTS 8u
+static u32 g_focus_prints;      /* focus reject 证据行计数 */
+static u32 g_destroy_prints;    /* destroy reject 证据行计数 */
+static u32 g_hotkey_reject_prints;
+static u32 g_wm_claim_rejects; /* v3：伪造 WM 令牌认领的拒绝次数 */
+static u32 g_hotkey_ok;        /* v3：成功注册热键的次数（打印闸门） */
 static u32 g_last_list_n = 0xFFFFFFFFu;     /* LIST 证据行去重 */
 static u32 g_last_list_focus = 0xFFFFFFFFu;
 /*
@@ -198,10 +213,26 @@ static struct ds_screen g_screen;
 
 /*
  * 状态文本是 k=v 行，**所有值都可能来自外部消息**（WM_STATUS / SESSION_STATUS
- * 的字段是客户端给的 u32）。最坏情况（全部 10 位十进制）约 573 字节，所以
- * 缓冲区留 1024，并且追加函数必须按 cap 截断：以前用 512 字节缓冲 + 无界
- * 追加，伪造一个全 0xFFFFFFFF 的 SESSION_STATUS 就能栈溢出。
+ * 的字段是客户端给的 u32）。最坏情况（全部 10 位十进制 + px 8 位 hex）约 520
+ * 字节，所以缓冲区留 1024，并且追加函数必须按 cap 截断：以前用 512 字节缓冲 +
+ * 无界追加，伪造一个全 0xFFFFFFFF 的 SESSION_STATUS 就能栈溢出。
+ *
+ * v3 审计加固（第二轮）：缓冲区 1024 只是必要条件，**不是充分条件**。
+ * SYS_WRITE_FD 走内核的 fs_sys_write()，它的 bounce buffer 上限
+ * FS_SYS_IO_MAX = 512（src/ng/fs_syscall.c：len > 512 直接 EINVAL）。所以
+ * 一行 520 字节的文本写下去会失败，而且因为字段值来自客户端，**之后每一次**
+ * 状态写都会继续失败 —— /run/display.status 冻结在旧内容上（内核 wp31/32/33
+ * 自检读的就是它）。实测：伪造一条全 0xFFFFFFFF 的 SESSION_STATUS 后随便
+ * COMMIT 一次（px 从 "0" 变成 "0x101820"），串口就只剩
+ * "ng: displayd status FAIL (write)"。
+ *
+ * 现在整行钳到 D_STATUS_MAX_LINE（< 512，且给 '\n' 留位置），字段顺序保证
+ * 显示面（up/surface/mapped/commits/focus/input/hotkey/tok）最先写、会话面
+ * （s*）最后写；真正截断时打一行证据（只打一次）。
  */
+#define D_STATUS_MAX_LINE 500u
+static u32 g_status_trunc; /* 状态行被截断过（证据只打一次） */
+
 static void d_status_append(char *buf, u32 cap, u32 *len, const char *s)
 {
     while (s != NULL && *s != '\0' && *len + 1u < cap) {
@@ -325,6 +356,20 @@ static void d_status_write(void)
         d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.tokenfail);
         d_status_append(buf, (u32)sizeof(buf), &len, " sregistry=");
         d_status_append_u32(buf, (u32)sizeof(buf), &len, g_sess.registry);
+    }
+    /*
+     * 钳到一次 write() 能写完的长度（D_STATUS_MAX_LINE < FS_SYS_IO_MAX=512）。
+     * 追加函数已经保证 *len < sizeof(buf)，这里把"能写下去"变成硬约束：字段
+     * 顺序上显示面最先写、会话面（s*）最后写，所以截断只会砍掉尾部。
+     */
+    if (len > D_STATUS_MAX_LINE) {
+        len = D_STATUS_MAX_LINE;
+        if (g_status_trunc == 0u) {
+            g_status_trunc = 1;
+            d_put("ng: displayd status trunc ok (cap=");
+            d_putdec(D_STATUS_MAX_LINE);
+            d_put(")\r\n");
+        }
     }
     buf[len++] = '\n';
     buf[len] = '\0';
@@ -584,6 +629,28 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
         d_put("ng: surface create FAIL (token)\r\n");
         return;
     }
+    /*
+     * v3 审计加固（第二轮）：WM 角色令牌只认领一次。
+     *
+     * 以前任何客户端都能拿一个"形状合法"的 WM 角色令牌 CREATE 一个 surface，
+     * displayd 会把 g_wm_token 覆盖成它 —— 于是它立刻能 FOCUS 任意窗口、
+     * DESTROY 任意窗口、抢走全局热键（伪造 WM 权威）。这里改成：已经有 WM
+     * 令牌时，只接受同一个令牌（WM 重建自己的面板）；别人的 WM 令牌以 EPERM
+     * 拒绝，而且**在分配 SHM 之前**拒绝（不泄漏共享内存对象）。
+     */
+    if (session_token_is(token, SESSION_ROLE_WM) &&
+        ds_wm_claim_ok(g_wm_token, token) == 0) {
+        g_wm_claim_rejects++;
+        if (g_wm_claim_rejects <= D_MAX_PRINTS) {
+            d_put("ng: surface wm-claim reject ok (token=");
+            d_puthex(token);
+            d_put(" n=");
+            d_putdec(g_wm_claim_rejects);
+            d_put(")\r\n");
+        }
+        d_reply_status(from, DS_MSG_CREATE_REPLY, DS_EPERM, m->seq);
+        return;
+    }
     pages64 = ((u64)w * (u64)h * 4ULL + (u64)DS_SHM_PAGE_SIZE - 1ULL) /
               (u64)DS_SHM_PAGE_SIZE;
     if (pages64 == 0 || pages64 > (u64)DS_SHM_PAGES_MAX) {
@@ -635,10 +702,18 @@ static void d_handle_create(const struct ds_msg *m, u32 from)
     d_putdec(pages);
     d_put(")\r\n");
     if (title[0] != '\0') {
+        /*
+         * 标题是客户端给的任意 15 字节：直接 d_put() 会让 "\r\nPANIC: ..."
+         * 这类标题伪造出证据行（串口是所有门禁的证据源）。净化后再打。
+         */
+        char safe[DS_TITLE_MAX];
+
+        (void)ds_str_sanitize(safe, (u32)sizeof(safe), title,
+                             (u32)sizeof(safe) - 1u);
         d_put("ng: surface title ok (id=");
         d_putdec(id);
         d_put(" title=");
-        d_put(title);
+        d_put(safe);
         d_put(")\r\n");
     }
     if (token != 0) {
@@ -691,32 +766,49 @@ static void d_handle_register_hotkey(const struct ds_msg *m, u32 from)
      * v3：请求者令牌（v2 的 reserved 字段）。会话模式下热键通道属于 WM：
      * 已经见过 WM 面板后，只接受 WM 的令牌 —— 否则任何客户端都能把全局
      * 按键副本抢走，WM 的 Tab/1..9 就失灵了。
+     *
+     * v3 审计加固（第二轮）：重复注册（洪泛）只打前 D_MAX_PRINTS 行、
+     * 只有注册参数**真的变了**才重写状态文件 —— 以前 40 条完全相同
+     * REGISTER_HOTKEY 会产生 40 行串口 + 40 次 ramfs 写。
      */
     u32 token = (m->version >= 3u) ? m->u.register_hotkey.token : 0u;
+    u32 surface = m->u.register_hotkey.surface_id;
+    u32 key = m->u.register_hotkey.key;
+    int changed;
 
     if (!ds_hotkey_token_ok(g_wm_token, token)) {
         g_hotkey_rejects++;
-        d_put("ng: hotkey reject ok (token=");
-        d_puthex(token);
-        d_put(" n=");
-        d_putdec(g_hotkey_rejects);
-        d_put(")\r\n");
+        if (g_hotkey_reject_prints < D_MAX_PRINTS) {
+            g_hotkey_reject_prints++;
+            d_put("ng: hotkey reject ok (token=");
+            d_puthex(token);
+            d_put(" n=");
+            d_putdec(g_hotkey_rejects);
+            d_put(")\r\n");
+        }
         return;
     }
+    changed = (g_hotkey_client != from) || (g_hotkey_surface != surface) ||
+              (g_hotkey_key != key);
     g_hotkey_client = from;
-    g_hotkey_surface = m->u.register_hotkey.surface_id;
-    g_hotkey_key = m->u.register_hotkey.key;
+    g_hotkey_surface = surface;
+    g_hotkey_key = key;
     d_reply_status(from, DS_MSG_REGISTER_HOTKEY, DS_OK, m->seq);
-    d_put("ng: hotkey registered ok (surface=");
-    d_putdec(g_hotkey_surface);
-    d_put(" key=");
-    if (g_hotkey_key == DS_HOTKEY_ANY) {
-        d_put("any");
-    } else {
-        d_puthex(g_hotkey_key);
+    g_hotkey_ok++;
+    if (g_hotkey_ok <= D_MAX_PRINTS) {
+        d_put("ng: hotkey registered ok (surface=");
+        d_putdec(g_hotkey_surface);
+        d_put(" key=");
+        if (g_hotkey_key == DS_HOTKEY_ANY) {
+            d_put("any");
+        } else {
+            d_puthex(g_hotkey_key);
+        }
+        d_put(")\r\n");
     }
-    d_put(")\r\n");
-    d_status_write();
+    if (changed != 0) {
+        d_status_write();
+    }
 }
 
 /* WP3-2：WM 把切换/启动计数报上来，displayd 汇总进 /run/display.status。 */
@@ -800,18 +892,22 @@ static void d_handle_commit(const struct ds_msg *m)
  *   - WM 的令牌（shell 做任务切换，可以切任何窗口）。
  * 其它（含伪造/外来令牌）-> 拒绝 + 记数，不改变焦点。
  * token=0（v1/v2 客户端或旧调用）保持 WP3-2 的行为。
+ *
+ * v3 审计加固（第二轮）：`token=0` 以前对**任何**窗口都放行 —— 知道 surface
+ * id 就能把焦点从别人的窗口抢走（输入被劫持）。现在无令牌的窗口（v1/v2
+ * 直连模式）行为不变，会话窗口必须出示自己的令牌或 WM 令牌（纯函数
+ * ds_focus_token_ok，host 单测覆盖）。
  */
 static void d_handle_focus(const struct ds_msg *m)
 {
     u32 id = m->u.focus.surface_id;
     u32 token = (m->version >= 3u) ? m->u.focus.token : 0u;
-    struct ds_surface *sf;
+    struct ds_surface *sf = ds_table_find(&g_table, id);
 
-    if (token != 0) {
-        sf = ds_table_find(&g_table, id);
-        if (!((sf != NULL && sf->token == token) ||
-              (g_wm_token != 0 && token == g_wm_token))) {
-            g_focus_rejects++;
+    if (sf == NULL || ds_focus_token_ok(sf->token, g_wm_token, token) == 0) {
+        g_focus_rejects++;
+        if (g_focus_prints < D_MAX_PRINTS) {
+            g_focus_prints++;
             d_put("ng: focus reject ok (id=");
             d_putdec(id);
             d_put(" token=");
@@ -819,9 +915,8 @@ static void d_handle_focus(const struct ds_msg *m)
             d_put(" n=");
             d_putdec(g_focus_rejects);
             d_put(")\r\n");
-            d_status_write();
-            return;
         }
+        return; /* 拒绝不改变状态：不重写状态文件 */
     }
     (void)ds_table_focus(&g_table, id);
     d_status_write();
@@ -832,28 +927,47 @@ static void d_handle_destroy(const struct ds_msg *m, u32 from)
     u32 id = m->u.destroy.surface_id;
     u32 token = (m->version >= 3u) ? m->u.destroy.token : 0u;
     struct ds_surface *sf = ds_table_find(&g_table, id);
+    /*
+     * 归属信息必须在 ds_table_destroy() **之前**取：它会 ds_table_zero() 槽位。
+     * 以前这里在销毁之后再读 sf->token —— 永远是 0，于是"WM 面板没了，它的
+     * 跨窗口权限也失效"那句注释从来没生效过：g_wm_token 永久保留，旧的 WM
+     * 令牌在 WM 死掉/重启后仍然可以 FOCUS/DESTROY 任何窗口、注册热键。
+     */
+    u32 sf_token = (sf != NULL) ? sf->token : 0u;
+    int was_wm = (sf_token != 0 && sf_token == g_wm_token) ? 1 : 0;
+    int was_hotkey = (g_hotkey_client != 0 && g_hotkey_surface == id) ? 1 : 0;
     int rc;
 
-    /*
-     * v3 归属校验：只有窗口自己的令牌、WM 的令牌，或（token=0 的旧客户端）
-     * 创建者端口能销毁。以前任何客户端按 id 就能销毁任何窗口（含 WM 面板），
-     * 既能 DoS 别的应用，也能把 g_wm_token 清掉。
-     */
     rc = ds_table_destroy_checked(&g_table, id, token, g_wm_token, from);
     if (rc != DS_OK) {
         g_destroy_rejects++;
-        d_put("ng: destroy reject ok (id=");
-        d_putdec(id);
-        d_put(" token=");
-        d_puthex(token);
-        d_put(" n=");
-        d_putdec(g_destroy_rejects);
-        d_put(")\r\n");
-        d_status_write();
-        return;
+        if (g_destroy_prints < D_MAX_PRINTS) {
+            g_destroy_prints++;
+            d_put("ng: destroy reject ok (id=");
+            d_putdec(id);
+            d_put(" token=");
+            d_puthex(token);
+            d_put(" n=");
+            d_putdec(g_destroy_rejects);
+            d_put(")\r\n");
+        }
+        return; /* 拒绝不改变状态：不重写状态文件 */
     }
-    if (sf != NULL && sf->token != 0 && sf->token == g_wm_token) {
-        g_wm_token = 0; /* WM 面板没了：它的跨窗口权限也失效 */
+    if (was_wm != 0) {
+        /* WM 面板被销毁：跨窗口权限 + 全局热键通道一起失效（令牌回收）。 */
+        g_wm_token = 0;
+        g_hotkey_client = 0;
+        g_hotkey_surface = 0;
+        d_put("ng: displayd wm token cleared ok (id=");
+        d_putdec(id);
+        d_put(")\r\n");
+    } else if (was_hotkey != 0) {
+        /* 注册热键的窗口没了：不再向死 surface 转发按键副本。 */
+        g_hotkey_client = 0;
+        g_hotkey_surface = 0;
+        d_put("ng: displayd hotkey cleared ok (id=");
+        d_putdec(id);
+        d_put(")\r\n");
     }
     g_last_list_n = 0xFFFFFFFFu;
     d_status_write();
