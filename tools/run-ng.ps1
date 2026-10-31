@@ -1,7 +1,7 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP1-3: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP1-4: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
-# 启动命令（WP1-1/WP1-3 出口）：
+# 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
 #                      -display none -no-reboot -m 256 -cpu max
 #
@@ -21,7 +21,10 @@
 #   ng: syscall ring0 ok
 #   ng: ring3 syscall ok
 #   ng: WP1-3 selftest PASS
-# 以及 3 条正则：smep/smap、tss/ist、syscall MSR。
+#   ng: pmm alloc/free ok / pmm double-free rejected
+#   ng: heap kmalloc ok / heap coalesce ok / pgtbl from pmm ok
+#   ng: WP1-4 selftest PASS
+# 以及 4 条正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数。
 #
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
@@ -68,16 +71,27 @@ if ($Panic) {
         'ng: #gp handled ok',
         'ng: syscall ring0 ok',
         'ng: ring3 syscall ok',
-        'ng: WP1-3 selftest PASS'
+        'ng: WP1-3 selftest PASS',
+        'ng: pmm alloc/free ok',
+        'ng: pmm double-free rejected',
+        'ng: heap kmalloc ok',
+        'ng: heap coalesce ok',
+        'ng: pgtbl from pmm ok',
+        'ng: WP1-4 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
         'ng: tss rsp0=0x[0-9a-f]+ ist1=0x[0-9a-f]+ idt8\.ist=1',
-        'ng: syscall msr star=0x[0-9a-f]+ lstar=0x[0-9a-f]+ fmask=0x[0-9a-f]+'
+        'ng: syscall msr star=0x[0-9a-f]+ lstar=0x[0-9a-f]+ fmask=0x[0-9a-f]+',
+        'ng: memmap ok \(usable=[0-9]+ pages\)'
     )
     $failPatterns = @(
         'ng: WP1-2 selftest FAIL',
-        'ng: WP1-3 selftest FAIL'
+        'ng: WP1-3 selftest FAIL',
+        'ng: memmap FAIL',
+        'ng: pmm .* FAIL',
+        'ng: heap .* FAIL',
+        'ng: WP1-4 selftest FAIL'
     )
 }
 
@@ -136,7 +150,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP1-3) ==='
+Write-Host '=== run-ng (WP1-4) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }

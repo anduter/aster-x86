@@ -3,20 +3,21 @@
  *
  * 分工：entry.S 只建「引导用」的 1 GiB 恒等映射（2 MiB 大页），把 CPU 带进
  * 长模式并跳到 kmain；真正的 4 级页表在这里建好后写 CR3 切换。两张表对当前
- * 代码/栈/页表池的映射完全一致（都是恒等映射），所以切换 CR3 后不需要再来
+ * 代码/栈/页表页的映射完全一致（都是恒等映射），所以切换 CR3 后不需要再来
  * 一次 far jump。
  *
  * 关键顺序（踩坑点）：
  *   1. EFER.NXE 必须在任何带 NX 位的页表被 CR3 装载之前置位，否则 NX=1 是
  *      保留位 -> #PF；entry.S 在开 PG 前就置了，这里只做确认/兜底。
- *   2. 新表自己的页（.bss 里的 pt_pool）必须被新表映射成 RW+NX，否则写表就
- *      会踩到只读页/不可执行假设。
+ *   2. 新表自己的页（WP1-4 起从 PMM 动态申请）必须被新表映射成 RW+NX，
+ *      否则写表就会踩到只读页/不可执行假设。
  *   3. CR0.WP=1 让只读页在 ring0 也真正只读；CR4.SMEP/SMAP 最后开，并重写
  *      一次 CR3 刷 TLB（CR4 变更的保守做法）。
  */
 #include "paging.h"
 
 #include "io.h"
+#include "pmm.h"
 #include "serial.h"
 
 #define PAGE_4K 0x1000ULL
@@ -32,9 +33,6 @@
 #define CR4_PAE (1ULL << 5)
 #define CR4_SMEP (1ULL << 20)
 #define CR4_SMAP (1ULL << 21)
-
-/* 页表池：没有 PMM（WP1-4）之前，页表页从 .bss 的静态池里 bump 分配。 */
-#define PT_POOL_PAGES 24
 
 /* helper 自测用的虚拟地址：1 GiB，在恒等映射（0..1 GiB）之外。 */
 #define SCRATCH_VA 0x40000000ULL
@@ -52,13 +50,14 @@ extern char __bss_end[];
 extern char __kernel_end[];
 
 /*
- * 页表池与 helper 的落点帧都放 .bss：内核镜像在第一个 2 MiB 里，已被
- * 4 KiB 页覆盖（RW+NX），所以恒等映射下「虚拟地址 == 物理地址」。
- * .bss 的页由 pt_alloc() 逐页清零，不依赖加载器对 p_memsz 的清零行为。
+ * WP1-4：页表页不再来自 .bss 静态池，而是每页向 PMM 申请（pg_alloc_table）。
+ * PMM 只发 < 1 GiB 的 RAM 页，恒等映射（虚拟 == 物理）保证返回的物理地址
+ * 可以直接写；pg_alloc_table 自己清零，不依赖加载器对 p_memsz 的行为。
+ *
+ * helper 的落点帧仍放 .bss（它不是页表，不需要动态分配）。
  */
-static u64 pt_pool[PT_POOL_PAGES][512] __attribute__((aligned(4096)));
-static u32 pt_pool_used;
 static u64 helper_frame[512] __attribute__((aligned(4096)));
+static u32 pg_tables_allocated; /* 本内核生命周期内从 PMM 拿的页表页数 */
 
 static u64 *kernel_pml4; /* 当前 CR3 指向的 PML4（恒等映射，虚拟 == 物理） */
 
@@ -94,21 +93,32 @@ static inline u64 nx_bit(void)
     return nx_on ? PG_NX : 0;
 }
 
-/* 分配一页 4 KiB 页表并清零；池耗尽返回 NULL。 */
-static u64 *pt_alloc(void)
+/*
+ * 向 PMM 申请一页 4 KiB 页表并清零；PMM 耗尽返回 NULL。
+ * 公开给 WP1-4 自检（pg_tables_allocated 读回），也是 paging 内部唯一的
+ * 页表分配入口。
+ */
+void *pg_alloc_table(void)
 {
     u64 *page;
+    u64 phys;
     u32 i;
 
-    if (pt_pool_used >= PT_POOL_PAGES) {
+    phys = pmm_alloc_page();
+    if (phys == 0) {
         return NULL;
     }
-    page = pt_pool[pt_pool_used];
-    pt_pool_used++;
+    page = (u64 *)(usize)phys;
     for (i = 0; i < 512; i++) {
         page[i] = 0;
     }
+    pg_tables_allocated++;
     return page;
+}
+
+u32 pg_table_count(void)
+{
+    return pg_tables_allocated;
 }
 
 /* 一个断言：失败计数 + 一行串口证据（不依赖 #PF/trap，WP1-3 才做异常）。 */
@@ -229,9 +239,9 @@ static int build_identity(u64 *pml4)
     u64 rodata_end;
     u64 kernel_end;
 
-    pdpt = pt_alloc();
-    pd = pt_alloc();
-    pt = pt_alloc();
+    pdpt = pg_alloc_table();
+    pd = pg_alloc_table();
+    pt = pg_alloc_table();
     if (pdpt == NULL || pd == NULL || pt == NULL) {
         return PG_ENOMEM;
     }
@@ -380,7 +390,7 @@ static int descend(u64 *entry, int alloc, u64 **next)
         *next = NULL;
         return PG_ENOENT;
     }
-    table = pt_alloc();
+    table = pg_alloc_table();
     if (table == NULL) {
         return PG_ENOMEM;
     }
@@ -805,7 +815,7 @@ int pg_init(void)
     detect_cpu();
     enable_nx();
 
-    kernel_pml4 = pt_alloc();
+    kernel_pml4 = pg_alloc_table();
     if (kernel_pml4 == NULL) {
         expect(0, "alloc pml4");
         return fails;
@@ -822,10 +832,8 @@ int pg_init(void)
     serial_puts("ng: pml4=");
     serial_puthex(pa_of(kernel_pml4));
     serial_puts(" tables=");
-    serial_putdec((u64)pt_pool_used);
-    serial_puts(" pool=");
-    serial_putdec((u64)PT_POOL_PAGES);
-    serial_puts(" (4-level, .bss)\r\n");
+    serial_putdec((u64)pg_tables_allocated);
+    serial_puts(" (4-level, pmm)\r\n");
 
     install_tables();
 

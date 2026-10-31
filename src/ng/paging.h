@@ -12,7 +12,7 @@
  *   - [0x100000, __text_start)  .multiboot + .note.Xen：RO + NX
  *   - [__text_start, __text_end)      .text：R + X（W=0, NX=0）
  *   - [__rodata_end 之前) .rodata：RO + NX
- *   - [__data_start, __kernel_end)   .data/.bss：RW + NX（含页表池、栈）
+ *   - [__data_start, __kernel_end)   .data/.bss：RW + NX（含栈）
  *   - 上半区 PML4[256..511] 保持为空（不做 higher-half 映射）。
  *
  * 段边界由链接脚本给定，见 src/ng/link.ld 的 __text_start/__text_end 等符号。
@@ -53,6 +53,13 @@ int pg_init(void);
 
 /* 走一遍 4 级页表，返回叶项（PD 大页项或 PTE）；未映射返回 0。 */
 u64 pg_walk(u64 va);
+
+/*
+ * WP1-4：页表页统一从 PMM 申请（4 KiB、清零、物理地址 == 虚拟地址）。
+ * 返回 NULL 表示 PMM 耗尽；pg_table_count() 是累计分配页数（证据用）。
+ */
+void *pg_alloc_table(void);
+u32 pg_table_count(void);
 
 /*
  * 显式 helper。flags 只传权限位（PG_WRITE/PG_NX/...），PG_PRESENT 由 helper 加。

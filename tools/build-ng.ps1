@@ -1,11 +1,14 @@
 ﻿# =============================================================================
-# build-ng.ps1 - ng WP1-3: 构建 64 位内核（ELF64 x86_64，页表 + IDT/TSS + syscall）
+# build-ng.ps1 - ng WP1-4: 构建 64 位内核（ELF64 x86_64，PMM/heap + 页表 + trap/syscall）
 #
 # 输入：src/ng/entry.S（multiboot2 + PVH 头、32 位入口、引导页表、长模式）、
 #       src/ng/isr.S（32 个异常 stub、受控探测、syscall 入口、ring3 往返）、
-#       src/ng/serial.c（COM1）、src/ng/paging.c（4 级页表/W^X/NX/SMEP/SMAP）、
+#       src/ng/serial.c（COM1）、src/ng/memmap.c（PVH/multiboot2 内存图）、
+#       src/ng/pmm.c（bitmap PMM）、src/ng/heap.c（first-fit + 合并堆）、
+#       src/ng/paging.c（4 级页表/W^X/NX/SMEP/SMAP，页表页来自 PMM）、
 #       src/ng/gdt.c（GDT/TSS/IST）、src/ng/trap.c（IDT/异常/panic）、
 #       src/ng/syscall.c（STAR/LSTAR/FMASK + ring0/ring3 测试）、
+#       src/ng/mem_selftest.c（内存图/PMM/heap/页表池自检）、
 #       src/ng/main.c（64 位 C 入口）、src/ng/link.ld。
 # 输出：dist-ng/aster-ng.elf，对象文件在 obj-ng/。
 #
@@ -59,7 +62,7 @@ if (-not $lldCmd -and (Test-Path $mingw)) {
 }
 if (-not $lldCmd) { Fail 'ld.lld not found; install lld (WP0-4) or add its dir to PATH' }
 
-Write-Host '=== build-ng (WP1-3) ==='
+Write-Host '=== build-ng (WP1-4) ==='
 Write-Host ("clang: {0}" -f $clang)
 Write-Host ("lld:   {0}" -f $lldCmd.Source)
 if ($PanicTest) { Write-Host 'mode:  panic-test build (-DNG_PANIC_TEST=1)' }
@@ -79,7 +82,7 @@ if ($PanicTest) { $cFlags += '-DNG_PANIC_TEST=1' }
 # 汇编源；新增 .S 只要加进这个列表。
 $asmSources = @('entry.S', 'isr.S')
 # C 源文件按顺序编译；新增 .c 只要加进这个列表。
-$cSources = @('serial.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'main.c')
+$cSources = @('serial.c', 'memmap.c', 'pmm.c', 'heap.c', 'paging.c', 'gdt.c', 'trap.c', 'syscall.c', 'mem_selftest.c', 'main.c')
 $steps = $asmSources.Count + $cSources.Count + 1
 $step = 0
 $asmObjs = New-Object System.Collections.Generic.List[string]

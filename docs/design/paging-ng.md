@@ -24,9 +24,10 @@ PML4[256..511] 空：不做 higher-half 映射，用户态地址空间留给 WP1
 - 恒等映射 1 GiB 与 WP1-1 的行为一致；不同点是 0..2 MiB 换成 4 KiB 页，才能按段
   给 `.text`/`.rodata`/`.data`/`.bss` 不同权限。
 - 内核镜像必须整个落在第一个 2 MiB 内（`link.ld` 的
-  `ASSERT(__kernel_end <= 0x200000)` 兜底）；当前镜像约 0x127000，余量充足。
-- 页表页从 `.bss` 的静态池 `pt_pool`（24 页 × 4 KiB）bump 分配，池页由
-  `pt_alloc()` 逐页清零。没有 PMM（WP1-4）之前不释放。
+  `ASSERT(__kernel_end <= 0x200000)` 兜底）；WP1-4 镜像约 0x133000，余量充足。
+- 页表页从 PMM 动态申请（WP1-4 起，`pg_alloc_table()` → `pmm_alloc_page()`），
+  每页清零；不再有 `.bss` 静态池。PMM 位图本身在 `.bss`，由内核镜像保留区
+  覆盖。
 - 引导页表（`boot_pml4/boot_pdpt/boot_pd`，1 GiB 2 MiB）只为把 CPU 带进长模式；
   C 建好最终表后写 CR3 切换。两张表对当前代码/栈/表池的映射一致，所以**不需要**
   再 far jump 一次。
@@ -39,7 +40,7 @@ PML4[256..511] 空：不做 higher-half 映射，用户态地址空间留给 WP1
 | `.text` | 4 KiB | 1 | 0 | 0 | 只读、可执行（R-X） |
 | `.rodata`（含 GDT） | 4 KiB | 1 | 0 | 1 | 只读、不可执行 |
 | `.data` | 4 KiB | 1 | 1 | 1 | 可写、不可执行 |
-| `.bss`（页表池、栈） | 4 KiB | 1 | 1 | 1 | 可写、不可执行 |
+| `.bss`（PMM 位图、栈、静态页面） | 4 KiB | 1 | 1 | 1 | 可写、不可执行 |
 | 其余 RAM/空洞 0..1 MiB | 4 KiB | 1 | 1 | 1 | 可写、不可执行 |
 | RAM 2 MiB..1 GiB | 2 MiB | 1 | 1 | 1 | 可写、不可执行 |
 
@@ -68,15 +69,18 @@ PML4[256..511] 空：不做 higher-half 映射，用户态地址空间留给 WP1
 1. `entry.S`：CPUID 查 LM（必须）与 NX（可选）→ 建 1 GiB 2 MiB 引导表 →
    `CR4.PAE=1` → `CR3=boot_pml4` → `EFER.LME=1`（NX 支持时同时 `NXE=1`）→ `CR0.PG=1`
    → far jump 到 64 位代码段 → `call kmain`。
-2. `pg_init()`：CPUID 查 NX/SMEP/SMAP → 确认/兜底 `EFER.NXE` → 建最终表
-   （含 NX 位）→ 写 CR3 → `CR0.WP=1` → `CR4.SMEP/SMAP` → 再写一次 CR3 刷 TLB。
-3. 自检：读 CR0/CR4/EFER/CR3 + 逐页走表断言 → 打印证据行。
+2. `mem_boot_init()`（WP1-4）：解析 PVH/multiboot2 内存图 → `pmm_init()` →
+   标记可用 RAM → 保留低 1 MiB/内核镜像/引导结构；页表页从这里开始可分配。
+3. `pg_init()`：CPUID 查 NX/SMEP/SMAP → 确认/兜底 `EFER.NXE` → 从 PMM 申请
+   页表页建最终表（含 NX 位）→ 写 CR3 → `CR0.WP=1` → `CR4.SMEP/SMAP` →
+   再写一次 CR3 刷 TLB。
+4. 自检：读 CR0/CR4/EFER/CR3 + 逐页走表断言 → 打印证据行。
 
 要点：
 
 - **NXE 必须在带 NX 位的表被 CR3 装载前置位**，否则 NX=1 是保留位 → #PF。
-- 最终表自己的页（`.bss` 的 `pt_pool`）必须映射成 RW+NX，否则建表过程会在
-  只读/不可写的映射上写表项。
+- 最终表自己的页（WP1-4 起由 PMM 分配）必须映射成 RW+NX，否则建表过程会在
+  只读/不可写的映射上写表项；PMM 只发 1 GiB 恒等映射范围内的 RAM 页。
 - 写 CR3 前先确认新表覆盖当前 RIP/RSP 所在页（这里都是恒等映射）。
 
 ## 5. helper 语义

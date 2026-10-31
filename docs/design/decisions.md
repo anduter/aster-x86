@@ -106,3 +106,38 @@
 - **理由**：可恢复异常是证明 W^X 真的生效的唯一硬证据（WP1-2 只能读回页表）；#DF 没有独立栈就一定三重故障，TSS/IST 是 64 位内核的底线配置。SYSRET 的架构语义只允许返回 CPL3，ring0 测试不该依赖它；本机 QEMU 对同 CPL `iretq` 实测也弹 5 项，绕开这条非必要路径更稳。SYSCALL 是 64 位桌面 ABI 的主入口，先把 MSR/栈切换/返回路径打通，参数与错误码留给 WP1-7/WP4-1 定形。
 - **影响**：`src/ng/isr.S`/`gdt.c`/`trap.c`/`syscall.c` 是新的 trap/syscall 域；`pg_map` 增加 `PG_USER` 逐级 U 位传播；异常入口按 `CR4.SMAP` 决定是否 `clac`（SMAP=off 时 CLAC 是 #UD），syscall 用 `FMASK` 清 AC；`run-ng.ps1` 增加 12 条期望行 + 3 条正则与 `-Panic` 负向模式，`build-ng.ps1` 增加 `-PanicTest`。
 - **替代**：`int 0x80` 软中断入口——慢且与旧 32 位 ABI 纠缠，否决；ring0 返回也用 SYSRET——只能回 CPL3，不可行；ring3 延后到 WP1-7——本 WP 已用静态用户页 + 机器码 blob 打通，不做 ELF 即可，故不延后；#DF 不做 IST——任何栈故障都三重故障，无法定位，否决。
+
+## ADR-016：PMM 用双位图 + 1 GiB 窗口；heap first-fit 合并；页表池改从 PMM 分配
+
+- **决策**：WP1-4 起 `src/ng` 自带内存管理。内存图优先解析 QEMU `-kernel` 的
+  PVH `hvm_start_info`（magic `0x336EC578`，memmap 24 字节项，type 1=RAM），
+  保留 multiboot2 mmap 解析作为结构校验 fallback。PMM 管理 `[0, 1 GiB)`，
+  两份 32 KiB 静态位图（used / reserved）放 `.bss`；页号相对窗口 base，分配
+  first-fit + rover，默认清零。保留区固定为低 1 MiB、内核镜像
+  `[__image_start, __kernel_end)`、PVH start_info/memmap。释放路径先校验
+  对齐/窗口/reserved/used，double-free、保留页、越界、未对齐分别返回
+  `PMM_EDOUBLE/ERESERVED/ERANGE/EINVAL` 并记账。heap 由连续 PMM 页组成
+  region（≥16 页，最多 16 个），region 内 48 字节块头 + first-fit + 同 region
+  相邻空闲块合并；`kmalloc/kfree/krealloc/kmalloc_aligned`，野指针/重复释放
+  拒绝并记账。WP1-2 的 `pt_pool[24]` 删除，`pg_alloc_table()` 每页调用
+  `pmm_alloc_page()`。
+- **理由**：启动到 `kmain` 时 EBX 就是 PVH start_info（WP1-1 已实测），
+  `0x336EC578` 是唯一可靠识别；QEMU 的 memmap 与 multiboot2 只差字段布局，
+  统一成 `ng_memrange` 后 PMM 不需要知道来源。位图放静态 `.bss` 避免“位图页
+  由 PMM 自己分配再清零”的 bootstrap 环；1 GiB 窗口与现有恒等映射一致，
+  超过窗口的 RAM 即使标记可用也无映射，强行分配只会 #PF。heap 用 region
+  而不是单个连续 arena：PMM 连续页在碎片化后不一定够，多 region 让扩堆更稳；
+  只在 region 内合并使 `kfree()` 的边界校验简单、不会被“跨 region 块”绕过。
+  页表池动态化是 WP1-2 遗留项，继续用静态池会让 PMM 自检与页表自检互相
+  掩盖“到底谁在管物理页”。
+- **影响**：`src/ng/{memmap,pmm,heap,mem_selftest}.c` 新增；`paging.c` 的
+  `pt_alloc` 改为 `pg_alloc_table`，证据行从 `pool=24 (4-level, .bss)` 改为
+  `tables=N (4-level, pmm)`；`main.c` 顺序变为内存图/PMM → 页表 → trap/syscall
+  → heap/pgtbl；`build-ng.ps1` 增加 4 个 C 源；`run-ng.ps1` 增加 6 条固定行 +
+  1 条 memmap 正则；新增 `tests/unit-ng/` 与 `tools/unit-ng.ps1`（166 checks）。
+  `docs/design/memory-ng.md` 记录布局/语义；旧 32 位树完全不改。
+- **替代**：位图放第一个可用页（省 64 KiB `.bss`）——需要 bootstrap 特判，
+  且坏位图会直接毁掉整个 PMM，否决；空闲链表 PMM——单页/连续页都要额外
+  元数据，位图更简单；heap 用一个固定大 arena——扩堆受连续物理页限制，
+  碎片化时失败，否决；页表池继续静态——WP1-2 已明确列为 WP1-4 遗留，且无法
+  回答“PMM 到底管不管页表页”，否决。
