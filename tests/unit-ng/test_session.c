@@ -476,6 +476,22 @@ static void t_table_lifecycle(void)
     /* 同一个 surface 不能属于两个会话项 */
     CHECK(session_register_window(&t, app_tok, 0x30003, 1, "Dup", 17) ==
           DS_EBUSY);
+    /*
+     * 第二轮审计：**同一条会话项**重复 REGISTER 必须是幂等的（客户端丢了
+     * 回复后重试）。以前这里也返回 DS_EBUSY，重试方永远注册不上。
+     */
+    {
+        u32 r0 = t.rejects;
+
+        CHECK(session_register_window(&t, app_tok, 0x30004, 2, "Demo2", 18) ==
+              DS_OK);
+        CHECK(t.rejects == r0);
+        CHECK(session_by_token(&t, app_tok)->port == 0x30004u);
+        CHECK(session_by_token(&t, app_tok)->surface_id == 2);
+        CHECK(strcmp(session_by_token(&t, app_tok)->title, "Demo2") == 0);
+        CHECK(session_by_token(&t, app_tok)->last_seen == 18);
+        CHECK(session_windows(&t) == 2);
+    }
     /* 未知令牌 / NULL 标题 */
     CHECK(session_register_window(&t, 0xDEADu, 0, 9, "x", 1) == DS_ENOENT);
     CHECK(session_register_window(&t, app_tok, 0, 0, NULL, 1) == DS_OK);

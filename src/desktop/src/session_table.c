@@ -217,12 +217,20 @@ int session_register_window(struct session_table *t, u32 token, u32 port,
         }
         return DS_EPERM;
     }
-    if (surface_id != 0 && session_by_surface(t, surface_id) != NULL) {
-        /* 同一个 surface 只能属于一个会话项。 */
-        if (t != NULL) {
+    if (surface_id != 0) {
+        struct session_entry *owner = session_by_surface(t, surface_id);
+
+        if (owner != NULL && owner != e) {
+            /* 同一个 surface 只能属于一个会话项。 */
             t->rejects++;
+            return DS_EBUSY;
         }
-        return DS_EBUSY;
+        /*
+         * v3 审计加固（第二轮）：owner == e 表示同一条会话项**重复 REGISTER**
+         * （客户端丢了回复之后重试，或者重新上报标题）。以前这里同样返回
+         * EBUSY：重试的客户端永远注册不上，rejects 被无辜抬高。现在幂等：
+         * 端口/窗口/标题/心跳时间照常更新，返回 DS_OK。
+         */
     }
     e->port = port;
     e->surface_id = surface_id;

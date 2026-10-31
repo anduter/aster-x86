@@ -573,10 +573,16 @@ static void e_role_client(void)
     m.u.commit.h = h;
     (void)e_send_msg(server, &m, my);
 
-    /* FOCUS（置焦点；displayd 之后把按键推给本客户端） */
+    /*
+     * FOCUS（置焦点；displayd 之后把按键推给本客户端）。
+     * v3 审计加固：会话窗口必须出示自己的 role_token —— displayd 不再接受
+     * "token=0 + 知道 surface id" 就抢焦点（别的窗口也能这么被抢）。直连模式
+     * 下 e_token 就是 0，行为与 WP3-2 一致。
+     */
     ds_memzero(&m, (u64)sizeof(m));
     m.type = DS_MSG_FOCUS;
     m.u.focus.surface_id = surface_id;
+    m.u.focus.token = e_token;
     (void)e_send_msg(server, &m, my);
 
     e_put("ng: demo input ready (id=");

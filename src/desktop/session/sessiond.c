@@ -510,7 +510,9 @@ static int s_display_ping(void)
         int type = s_recv_ds(&m, S_POLL_TICKS);
 
         if (type == (int)DS_MSG_LIST_REPLY) {
-            s_on_list(&m);
+            if (m.version >= 3u) {
+                s_on_list(&m);
+            }
             return 1;
         }
         if (type >= 0) {
@@ -746,12 +748,20 @@ static void s_handle_register(const struct session_msg *m, u32 from)
             s_put(")\r\n");
         }
     } else {
+        /*
+         * v3 审计加固（第二轮）：标题是客户端给的任意 15 字节，直接打印会让
+         * "\r\nPANIC: ..." 这类标题伪造出证据行（串口是所有门禁的证据源）。
+         */
+        char safe[DS_TITLE_MAX];
+
+        (void)ds_str_sanitize(safe, (u32)sizeof(safe), title,
+                             (u32)sizeof(safe) - 1u);
         s_put("ng: session window ok (pid=");
         s_putdec(e->pid);
         s_put(" id=");
         s_putdec(e->surface_id);
         s_put(" title=");
-        s_put((title[0] != '\0') ? title : "app");
+        s_put((safe[0] != '\0') ? safe : "app");
         s_put(")\r\n");
     }
     /* 焦点策略：新窗口（重新）获得焦点（令牌 = 窗口自己的）。 */
@@ -838,8 +848,13 @@ static void s_handle_launch(const struct session_msg *m, u32 from)
     argv[4] = NULL;
     pid = s_spawn(path, argv);
     if (pid == 0) {
+        /* path 来自 LAUNCH 消息：净化后再进证据通道（防伪造证据行）。 */
+        char safe[SESSION_PATH_MAX];
+
+        (void)ds_str_sanitize(safe, (u32)sizeof(safe), path,
+                             (u32)sizeof(safe) - 1u);
         s_put("ng: session launch FAIL (spawn ");
-        s_put(path);
+        s_put(safe);
         s_put(")\r\n");
         return;
     }
@@ -853,11 +868,15 @@ static void s_handle_launch(const struct session_msg *m, u32 from)
     e = session_at(&g_tab, (u32)slot);
     g_tab.launches++;
     if (g_launch_prints < S_MAX_PRINTS) {
+        char safe[SESSION_PATH_MAX];
+
+        (void)ds_str_sanitize(safe, (u32)sizeof(safe), path,
+                             (u32)sizeof(safe) - 1u);
         g_launch_prints++;
         s_put("ng: session app launch ok (pid=");
         s_putdec(pid);
         s_put(" app=");
-        s_put(path);
+        s_put(safe);
         s_put(" token=");
         s_puthex((e != NULL) ? e->token : 0);
         s_put(")\r\n");
@@ -1120,7 +1139,16 @@ static void s_poll_display(void)
         int type = s_recv_ds(&m, 0);
 
         if (type == (int)DS_MSG_LIST_REPLY) {
-            s_on_list(&m);
+            /*
+             * v3 审计加固（第二轮）：只信任 v3 的 LIST_REPLY。
+             * v2 的 entry 是 44 字节、v3 是 48 字节：按 v3 的布局解析一条
+             * v2 消息会让 entries 全部错位（伪造一条 v2 LIST_REPLY 就能把
+             * tokenfail / registry 这些状态证据搅乱，而计数是内核自检读的）。
+             * 合法的对端只有本仓库的 v3 displayd，所以直接忽略低版本回复。
+             */
+            if (m.version >= 3u) {
+                s_on_list(&m);
+            }
             continue;
         }
         break;
