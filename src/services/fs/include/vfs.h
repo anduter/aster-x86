@@ -37,6 +37,7 @@
 #define VFS_OK 0
 #define VFS_EPERM (-1)
 #define VFS_ENOENT (-2)
+#define VFS_EIO (-5) /* WP2-2：块设备错误 / 簇链损坏 */
 #define VFS_EBADF (-9)
 #define VFS_ENOMEM (-12)
 #define VFS_EFAULT (-14)

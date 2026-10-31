@@ -1,5 +1,5 @@
 # =============================================================================
-# ng WP1-7 / WP2-1 示例用户程序：ring3 hello + VFS demo（无 libc，裸 syscall）
+# ng WP1-7 / WP2-1 / WP2-2 示例用户程序：ring3 hello + VFS/FAT demo（无 libc）
 #
 # 加载基址 0x40000000（见 user.ld），由内核 ELF64 加载器映射成三段：
 #   .text   R-X   -> syscall 0 = write(buf,len)、1 = exit(code)、20..27 = VFS
@@ -14,6 +14,11 @@
 #   open("/tmp/a", O_CREAT|O_RDWR, 0644) -> write("hello") -> read 校验
 #   -> stat(type=FILE,size=5) -> close -> read(旧 fd) 必须是 -EBADF
 #   -> listdir("/tmp") 必须 1 条、名字 "a"。
+#
+# WP2-2 demo（内核已把 RAM 盘 FAT16 挂到 /mnt/fat）：
+#   read("/mnt/fat/HELLO.TXT") 校验 18 字节 ->
+#   create("/mnt/fat/NEW.TXT") + write("fat16") -> stat(size=5) ->
+#   unlink -> stat 必须 -ENOENT。
 #   每步失败就 exit(1)；成功打印 "ng: fs ..." 证据行。
 #
 # 系统调用约定（ABI 1.0 草案）：
@@ -148,6 +153,86 @@ _start:
     jne .Lfail
     PRINT_MSG fs_msg_listdir, fs_msg_listdir_len
 
+    # ---- WP2-2：FAT16 挂载点 /mnt/fat -------------------------------------
+    # 20 open("/mnt/fat/HELLO.TXT", O_RDONLY) -> 21 read 18 字节并校验
+    leaq fat_hello_path(%rip), %rdi
+    xorl %esi, %esi
+    xorl %edx, %edx
+    movl $20, %eax
+    syscall
+    testq %rax, %rax
+    jle .Lfail
+    movq %rax, fs_fd(%rip)
+    movq fs_fd(%rip), %rdi
+    leaq fs_readbuf(%rip), %rsi
+    movl $32, %edx
+    movl $21, %eax
+    syscall
+    cmpq $18, %rax
+    jne .Lfail
+    leaq fs_readbuf(%rip), %rdi
+    leaq fat_hello(%rip), %rsi
+    movl $18, %ecx
+    cld
+    repe cmpsb
+    jne .Lfail
+    movq fs_fd(%rip), %rdi
+    movl $23, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    PRINT_MSG fat_msg_read, fat_msg_read_len
+
+    # 20 open("/mnt/fat/NEW.TXT", O_CREAT|O_RDWR, 0644) -> 22 write("fat16")
+    leaq fat_new_path(%rip), %rdi
+    movl $0x42, %esi
+    movl $0644, %edx
+    movl $20, %eax
+    syscall
+    testq %rax, %rax
+    jle .Lfail
+    movq %rax, fs_fd(%rip)
+    movq fs_fd(%rip), %rdi
+    leaq fat_data(%rip), %rsi
+    movl $5, %edx
+    movl $22, %eax
+    syscall
+    cmpq $5, %rax
+    jne .Lfail
+    movq fs_fd(%rip), %rdi
+    movl $23, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    PRINT_MSG fat_msg_write, fat_msg_write_len
+
+    # 24 stat("/mnt/fat/NEW.TXT")：type=FILE(1)、size=5
+    leaq fat_new_path(%rip), %rdi
+    leaq fs_statbuf(%rip), %rsi
+    movl $24, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    cmpl $1, fs_statbuf(%rip)
+    jne .Lfail
+    cmpq $5, fs_statbuf+8(%rip)
+    jne .Lfail
+    PRINT_MSG fat_msg_stat, fat_msg_stat_len
+
+    # 27 unlink + 24 stat 必须是 -ENOENT(-2)
+    leaq fat_new_path(%rip), %rdi
+    movl $27, %eax
+    syscall
+    testq %rax, %rax
+    jne .Lfail
+    leaq fat_new_path(%rip), %rdi
+    leaq fs_statbuf(%rip), %rsi
+    movl $24, %eax
+    syscall
+    cmpq $-2, %rax
+    jne .Lfail
+    PRINT_MSG fat_msg_unlink, fat_msg_unlink_len
+
     PRINT_MSG fs_msg_demo, fs_msg_demo_len
 
     # exit(0)
@@ -189,13 +274,35 @@ fs_msg_listdir:
 fs_msg_demo:
     .ascii "ng: fs user demo ok\r\n"
     .set fs_msg_demo_len, . - fs_msg_demo
+fat_msg_read:
+    .ascii "ng: fs fat read ok\r\n"
+    .set fat_msg_read_len, . - fat_msg_read
+fat_msg_write:
+    .ascii "ng: fs fat write ok\r\n"
+    .set fat_msg_write_len, . - fat_msg_write
+fat_msg_stat:
+    .ascii "ng: fs fat stat ok\r\n"
+    .set fat_msg_stat_len, . - fat_msg_stat
+fat_msg_unlink:
+    .ascii "ng: fs fat unlink ok\r\n"
+    .set fat_msg_unlink_len, . - fat_msg_unlink
 fs_hello:
     .ascii "hello"
     .set fs_hello_len, . - fs_hello
+fat_hello:
+    .ascii "hello from fat16\r\n"
+    .set fat_hello_len, . - fat_hello
+fat_data:
+    .ascii "fat16"
+    .set fat_data_len, . - fat_data
 fs_path:
     .asciz "/tmp/a"
 fs_tmp:
     .asciz "/tmp"
+fat_hello_path:
+    .asciz "/mnt/fat/HELLO.TXT"
+fat_new_path:
+    .asciz "/mnt/fat/NEW.TXT"
 
     .section .data
     .align 8
@@ -211,7 +318,7 @@ user_bss_word:
 fs_fd:
     .zero 8
 fs_readbuf:
-    .zero 16
+    .zero 64
 fs_statbuf:
     .zero 24
 fs_dirents:

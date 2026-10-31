@@ -44,6 +44,18 @@ SECTIONS
     __bss_end = .;
     __kernel_end = .;
 
+    /*
+     * WP2-2：FAT16 测试镜像（1.44MB）放在 2 MiB，**不**参与内核 4 KiB
+     * W^X 窗口（PD[0] 只覆盖 0..2 MiB）。它由 QEMU 作为独立 PT_LOAD 加载，
+     * 落在 PD[1] 的 2 MiB 恒等大页（RW+NX）里；mem_selftest.c 在 PMM 里
+     * 保留 [__fat16_img_start, __fat16_img_end)，启动时 fat_ramdisk 把它
+     * 复制到 PMM 页。这样内核正文/.rodata/.bss 仍然 < 2 MiB。
+     */
+    . = 0x200000;
+    __fat16_img_start = .;
+    .fat16 : { KEEP(*(.fat16)) }
+    __fat16_img_end = .;
+
     /DISCARD/ : {
         *(.comment)
         *(.eh_frame*)

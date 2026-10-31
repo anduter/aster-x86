@@ -75,19 +75,30 @@ E1 出口状态（2026-10-31）：**E1 完成，待打 tag `ng-e1`**。WP1-1..WP
 | WP2-6 | shell 移植 | src/apps | 64 位 shell 可交互 |
 | WP2-7 | parity 套件 100 项 | tests/ | 100 项通过 |
 
-E2 进度（2026-10-31）：**WP2-1 完成**（tag 待 E2 收口时打）。`src/services/fs`
-成为第一个真正落地的 L1 服务域：
+E2 进度（2026-10-31）：**WP2-1、WP2-2 完成**（tag 待 E2 收口时打）。
+`src/services/fs` 成为第一个真正落地的 L1 服务域：
 
 - VFS 核心（挂载/节点/路径/fd/权限，负 errno）+ ramfs（节点/目录项/页链，
   1 MiB/文件）+ syscall 20..27（用户指针经 uaccess）+ ring3 demo
   （open→write→read→stat→close→listdir）；
+- FAT16 作为第二个 VFS 后端（`src/services/fs/fat16.c`）：L1 `blk_env`
+  块设备抽象（内核绑 PMM RAM 盘，host 绑 fake 镜像）、BPB 几何校验、
+  FAT 表单扇区缓存、簇链循环/截断/坏簇/越界检测、空闲簇分配/释放、
+  8.3 目录项（卷标/LFN 跳过）、根目录+子目录、mount/read/write/create/
+  unlink/rename/truncate/readdir；1.44MB 镜像由 `tools/mkfat-ng.ps1` 生成，
+  以 `.fat16` PT_LOAD 嵌在 2 MiB（PMM 保留）并在启动时复制到 RAM 盘，
+  挂到 `/mnt/fat`；
 - 内核自检 `ng: vfs mount ok` / `ng: ramfs write/read ok` / `ng: fd bad
-  rejected` / `ng: vfs path edge ok` / `ng: WP2-1 selftest PASS`；run-ng
-  52 条期望行 + 17 条正则；
-- host 单测 1085 → **1438 checks**（新增 `tests/unit-ng/test_vfs.c` 与
-  syscall 20..27 分发用例）；旧 32 位 305/305；
-- 设计/限制见 `docs/design/vfs-ng.md`，证据见 `docs/claims/ng-WP2-1.md`。
-  FAT16（WP2-2）/块设备（WP2-4）/fb（WP2-3）未动。
+  rejected` / `ng: vfs path edge ok` / `ng: WP2-1 selftest PASS`，新增
+  `ng: fat16 mount ok (clusters=2841)` / `read ok` / `write ok` /
+  `chain edge ok` / `bad bpb rejected` / `ng: WP2-2 selftest PASS`；
+  run-ng **62 条期望行 + 20 条正则**；ring3 demo 增加 FAT 读/写/stat/unlink；
+- host 单测 1085 → 1438（WP2-1）→ **1824 checks**（本 WP +386，含
+  `tests/unit-ng/test_fat16.c` 的合成镜像/坏 BPB/坏链/满盘/跨目录/VFS 集成）；
+  旧 32 位 305/305；
+- 设计/限制见 `docs/design/vfs-ng.md`、`docs/design/fat16-ng.md`，证据见
+  `docs/claims/ng-WP2-1.md`、`docs/claims/ng-WP2-2.md`。块设备（WP2-4）/
+  fb/输入（WP2-3）/shell（WP2-6）未动。
 
 ### E3
 

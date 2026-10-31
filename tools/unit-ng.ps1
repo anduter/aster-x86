@@ -76,6 +76,7 @@ $sources = @(
     'src/ng/fs_syscall.c',
     'src/services/fs/vfs.c',
     'src/services/fs/ramfs.c',
+    'src/services/fs/fat16.c',
     'tests/unit-ng/fake_ng_env.c',
     'tests/unit-ng/unit_main.c',
     'tests/unit-ng/test_pmm.c',
@@ -86,7 +87,8 @@ $sources = @(
     'tests/unit-ng/test_elf.c',
     'tests/unit-ng/test_uaccess.c',
     'tests/unit-ng/test_syscall.c',
-    'tests/unit-ng/test_vfs.c'
+    'tests/unit-ng/test_vfs.c',
+    'tests/unit-ng/test_fat16.c'
 )
 $srcPaths = @()
 foreach ($s in $sources) { $srcPaths += (Join-Path $Repo $s) }

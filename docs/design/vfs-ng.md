@@ -32,8 +32,9 @@
 | 元数据 | `vfs_stat` / `vfs_listdir` / `vfs_mkdir` / `vfs_unlink` / `vfs_rename` / `vfs_truncate` / `vfs_symlink` |
 | 上下文 | `vfs_ctx_init(c)`（fd 表 + cwd + uid） |
 
-错误码全是负 errno：`EPERM/ENOENT/EBADF/ENOMEM/EFAULT/EBUSY/EEXIST/ENOTDIR/
-EISDIR/EINVAL/ENFILE/EMFILE/ENOSPC/EROFS/ENAMETOOLONG/ENOTEMPTY/ELOOP`。
+错误码全是负 errno：`EPERM/ENOENT/EIO/EBADF/ENOMEM/EFAULT/EBUSY/EEXIST/
+ENOTDIR/EISDIR/EINVAL/ENFILE/EMFILE/ENOSPC/EROFS/ENAMETOOLONG/ENOTEMPTY/ELOOP`。
+（`EIO` 是 WP2-2 为 FAT16 的块设备/簇链错误追加的。）
 所有负向用例在 host 单测里断言**具体值**，不按“负值即失败”放过。
 
 节点由具体 FS **内嵌**（`struct vfs_node` 是 `ramfs_node` 的成员），VFS 不分配
@@ -152,4 +153,5 @@ cwd 相对路径。
   链接本身已存在而返回 `EEXIST`，不会创建目标文件（POSIX 行为差异，记录）。
 - **不缓存/不预读**：read/write 直接拷页；page cache、mmap 留给 fsd。
 - **上限**：1 MiB/文件、2 MiB 数据池、32 节点、64 目录项、8 挂载、16 fd/AS、
-  512 B/syscall IO、8 条/listdir。FAT16（WP2-2）会换掉 ramfs，但 VFS 层不变。
+  512 B/syscall IO、8 条/listdir。FAT16（WP2-2）作为第二个 VFS 后端挂在
+  `/mnt/fat`，VFS 层不变；FAT16 的几何/镜像/限制见 `fat16-ng.md`。

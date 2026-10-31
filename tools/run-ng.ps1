@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# run-ng.ps1 - ng WP1-7: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
+# run-ng.ps1 - ng WP2-2: 在 QEMU 里启动 dist-ng/aster-ng.elf，等一组期望行
 #
 # 启动命令（WP1-1/WP1-4 出口）：
 #   qemu-system-x86_64 -kernel dist-ng/aster-ng.elf -serial file:<log> \
@@ -44,8 +44,14 @@
 #   <用户态> ng: fs open ok / write ok / read ok / stat ok / close ok /
 #            listdir ok / ng: fs user demo ok
 #   ng: WP2-1 selftest PASS
+# WP2-2 追加（FAT16 / RAM 盘镜像 + ring3 FAT demo）：
+#   ng: fat16 mount ok (clusters=...) / ng: fat16 read ok /
+#   ng: fat16 write ok / ng: fat16 chain edge ok (n=...) /
+#   ng: fat16 bad bpb rejected (n=...) / ng: WP2-2 selftest PASS
+#   <用户态> ng: fs fat read ok / write ok / stat ok / unlink ok
 # 以及正则：smep/smap、tss/ist、syscall MSR、memmap usable 页数、线程交错、
-# ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数。
+# ipc 统计行、ELF 段规划/per-thread 栈/uaccess、VFS 挂载/ramfs 计数/fd 拒绝数、
+# FAT16 簇数/链边界/坏 BPB 计数。
 #
 # -Panic：负向模式。配合 tools/build-ng.ps1 -PanicTest 构建的内核，期望
 # `PANIC: vec=... err=... rip=... cr2=...`，命中即 PASS（内核随后 hlt）。
@@ -129,6 +135,10 @@ if ($Panic) {
         'ng: fs close ok',
         'ng: fs listdir ok',
         'ng: fs user demo ok',
+        'ng: fs fat read ok',
+        'ng: fs fat write ok',
+        'ng: fs fat stat ok',
+        'ng: fs fat unlink ok',
         'ng: ring3 exit ok',
         'ng: WP1-7 selftest PASS',
         'ng: vfs mount ok',
@@ -136,7 +146,13 @@ if ($Panic) {
         'ng: fd bad rejected',
         'ng: vfs path edge ok',
         'ng: fs syscall user ptr EFAULT ok',
-        'ng: WP2-1 selftest PASS'
+        'ng: WP2-1 selftest PASS',
+        'ng: fat16 mount ok',
+        'ng: fat16 read ok',
+        'ng: fat16 write ok',
+        'ng: fat16 chain edge ok',
+        'ng: fat16 bad bpb rejected',
+        'ng: WP2-2 selftest PASS'
     )
     $patterns = @(
         'ng: smep=(on|off) smap=(on|off)',
@@ -155,7 +171,10 @@ if ($Panic) {
         'ng: fd bad rejected \(n=[0-9]+\)',
         'ng: vfs path edge ok \(n=[0-9]+\)',
         'ng: fs stat ok \(size=5\)',
-        'ng: fs listdir ok \(n=1\)'
+        'ng: fs listdir ok \(n=1\)',
+        'ng: fat16 mount ok \(clusters=[0-9]+\)',
+        'ng: fat16 chain edge ok \(n=[0-9]+\)',
+        'ng: fat16 bad bpb rejected \(n=[0-9]+\)'
     )
     $failPatterns = @(
         'ng: WP1-2 selftest FAIL',
@@ -175,7 +194,9 @@ if ($Panic) {
         'ng: ramfs .* FAIL',
         'ng: fd .* FAIL',
         'ng: fs .* FAIL',
-        'ng: WP2-1 selftest FAIL'
+        'ng: WP2-1 selftest FAIL',
+        'ng: fat16 .* FAIL',
+        'ng: WP2-2 selftest FAIL'
     )
 }
 
@@ -240,7 +261,7 @@ $errLog = Join-Path $tmpBase 'qemu.err'
 $outLog = Join-Path $tmpBase 'qemu.out'
 Remove-Item -LiteralPath $SerialLog -Force -ErrorAction SilentlyContinue
 
-Write-Host '=== run-ng (WP2-1) ==='
+Write-Host '=== run-ng (WP2-2) ==='
 Write-Host ("elf:  {0} ({1} bytes)" -f $elf, (Get-Item -LiteralPath $elf).Length)
 Write-Host ("qemu: {0}" -f $qemu)
 if ($qemuVer) { Write-Host ("      {0}" -f $qemuVer) }

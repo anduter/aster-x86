@@ -16,7 +16,9 @@
  *   8. IPC/句柄/端口自检（WP1-6，需要调度器的阻塞/唤醒，排在 WP1-5 之后）；
  *   9. VFS/ramfs 自检（WP2-1：根 ramfs + /tmp，数据页来自 PMM；ring3 demo
  *      要调 20..27，所以排在 WP1-7 之前）；
- *  10. ELF64 加载器 + ring3 hello（WP1-7：PMM 页、用户地址空间、CR3
+ *  10. FAT16 自检（WP2-2：嵌入镜像 -> PMM RAM 盘 -> /mnt/fat；ring3 demo
+ *      读 HELLO.TXT / 建 NEW.TXT，所以必须排在 WP1-7 之前）；
+ *  11. ELF64 加载器 + ring3 hello（WP1-7：PMM 页、用户地址空间、CR3
  *      切换、copyin/copyout、per-thread 内核栈；排在 WP1-6/2-1 之后）。
  *
  * ipc_init() 不分配内存，只把端口表/句柄表清零并绑定环境钩子，所以放在
@@ -26,6 +28,7 @@
  * 不可恢复的 #UD（普通 build 不定义 NG_PANIC_TEST，行为不变）。
  */
 #include "elf_selftest.h"
+#include "fat16_selftest.h"
 #include "fs_selftest.h"
 #include "gdt.h"
 #include "ipc.h"
@@ -151,6 +154,24 @@ void kmain(u64 mb_info)
     }
 
     serial_puts("ng: WP2-1 selftest ");
+    if (fails == 0) {
+        serial_puts("PASS\r\n");
+    } else {
+        serial_puts("FAIL (");
+        serial_putdec((u64)fails);
+        serial_puts(")\r\n");
+    }
+
+    /* WP2-2：嵌入的 1.44MB FAT16 镜像 -> PMM RAM 盘 -> /mnt/fat。ring3 demo
+     * 要读 /mnt/fat/HELLO.TXT、建 NEW.TXT，所以排在 ELF64/ring3 之前。 */
+    if (mem_fails == 0 && fails == 0) {
+        fails += fat16_selftest();
+    } else {
+        fails += 1;
+        serial_puts("ng: WP2-2 selftest skipped (earlier failure)\r\n");
+    }
+
+    serial_puts("ng: WP2-2 selftest ");
     if (fails == 0) {
         serial_puts("PASS\r\n");
     } else {

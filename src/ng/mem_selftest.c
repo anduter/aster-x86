@@ -13,6 +13,8 @@
 /* 链接脚本给的段边界（见 src/ng/link.ld）。 */
 extern char __image_start[];
 extern char __kernel_end[];
+extern char __fat16_img_start[];
+extern char __fat16_img_end[];
 
 #define LOW_MEM_RESERVED 0x100000ULL /* 低 1 MiB：IVT/BDA/VGA/引导结构 */
 
@@ -86,6 +88,10 @@ int mem_boot_init(u64 boot_info)
     pmm_reserve(0, LOW_MEM_RESERVED);
     pmm_reserve((u64)(usize)__image_start,
                 (u64)(usize)__kernel_end - (u64)(usize)__image_start);
+    /* WP2-2：2 MiB 处的 FAT16 镜像段（独立 PT_LOAD，PMM 不得分配）。 */
+    pmm_reserve((u64)(usize)__fat16_img_start,
+                (u64)(usize)__fat16_img_end -
+                    (u64)(usize)__fat16_img_start);
     if (map.boot_end > map.boot_start) {
         pmm_reserve(map.boot_start, map.boot_end - map.boot_start);
     }
